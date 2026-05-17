@@ -11,6 +11,18 @@ use_directory_urls = true
 
 nav = [
   { "Home" = "index.md" },
+  { "User Guide" = [
+    { "Concepts" = "guide/concepts.md" },
+    { "Complex Config Example" = "guide/complex-config-example.md" },
+    { "Version Discovery" = "guide/version-discovery.md" },
+    { "Schema Patches" = "guide/schema-patches.md" },
+    { "Migrations" = "guide/migrations.md" },
+    { "Rendering Configs" = "guide/rendering.md" },
+    { "Adoption Guidance" = "guide/adoption-guidance.md" },
+  ] },
+  { "Reference" = [
+    { "API" = "reference/api.md" },
+  ] },
   { "Research" = [
     { "Overview" = "research/index.md" },
   ] },

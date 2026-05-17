@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+
+class SchemaVersionError(Exception):
+    """Base exception for schema version configuration and runtime errors."""
+
+
+class MissingSchemaVersionError(SchemaVersionError):
+    """Raised when a schema version cannot be discovered for input data."""
+
+
+class UnknownSchemaVersionError(SchemaVersionError):
+    """Raised when a requested schema version is not registered."""
+
+
+class DuplicateSchemaVersionError(SchemaVersionError):
+    """Raised when a schema version or migration is registered more than once."""
+
+
+class InvalidMigrationError(SchemaVersionError):
+    """Raised when a migration is invalid or returns an invalid value."""
+
+
+class VersionedValidationError(SchemaVersionError):
+    """Raised when versioned validation cannot be completed."""
