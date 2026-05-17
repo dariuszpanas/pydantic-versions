@@ -1,0 +1,31 @@
+[project]
+site_name = "pydantic-versions"
+site_description = "Bring version control and history to your Pydantic schemas"
+site_url = "https://pydantic-versions.readthedocs.io/en/latest/"
+repo_url = "https://github.com/dariuszpanas/pydantic-versions"
+repo_name = "GitHub"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+use_directory_urls = true
+
+nav = [
+  { "Home" = "index.md" },
+  { "Research" = [
+    { "Overview" = "research/index.md" },
+  ] },
+  { "Development" = [
+    { "Contributing" = "contributing.md" },
+    { "Changelog" = "changelog.md" },
+  ] },
+]
+
+[project.theme]
+features = [
+  "navigation.sections",
+  "navigation.path",
+  "navigation.top",
+  "toc.follow",
+  "content.action.edit",
+  "content.action.view",
+]
