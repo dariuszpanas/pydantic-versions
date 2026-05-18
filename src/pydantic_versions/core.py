@@ -182,7 +182,7 @@ def validate_versioned[T: BaseModel](
         payload = migrated
         migrations_applied.append(step)
 
-    current_model = model_cls.model_validate(payload)
+    current_model = model_cls.model_validate(_current_validation_input(model_cls, payload))
     return VersionedValidation(
         source_version=source_version,
         current_version=schema.current,
@@ -380,6 +380,11 @@ def _build_model_for_version(schema: _VersionedSchema, version: str) -> type[Bas
         field_dict = field_info.asdict()
         annotation = _rewrite_annotation(field_dict["annotation"], version)
         attributes = dict(field_dict["attributes"])
+        if current_name in renames:
+            attributes["alias"] = None
+            attributes["alias_priority"] = None
+            attributes["validation_alias"] = None
+            attributes["serialization_alias"] = None
         _rewrite_nested_default(attributes, field_dict["annotation"], annotation)
         if current_name in defaults:
             default_patch = defaults[current_name]
@@ -467,6 +472,17 @@ def _to_current_names(
         if isinstance(patch, FieldRenamed) and patch.version_name in normalized:
             normalized[patch.current_name] = normalized.pop(patch.version_name)
     return normalized
+
+
+def _current_validation_input(
+    model_cls: type[BaseModel], payload: dict[str, Any]
+) -> dict[str, Any]:
+    current_payload = dict(payload)
+    for name, field_info in model_cls.model_fields.items():
+        alias = field_info.alias
+        if alias is not None and name in current_payload and alias not in current_payload:
+            current_payload[alias] = current_payload[name]
+    return current_payload
 
 
 def _to_version_names(schema: _VersionedSchema, version: str, payload: Any) -> Any:

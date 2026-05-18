@@ -8,12 +8,15 @@ edit_uri = "edit/main/docs/"
 docs_dir = "docs"
 site_dir = "site"
 use_directory_urls = true
+extra_css = ["assets/stylesheets/pydantic-versions.css"]
 
 nav = [
   { "Home" = "index.md" },
   { "User Guide" = [
+    { "Getting Started" = "guide/getting-started.md" },
     { "Concepts" = "guide/concepts.md" },
     { "Complex Config Example" = "guide/complex-config-example.md" },
+    { "Django Ninja" = "guide/django-ninja.md" },
     { "Version Discovery" = "guide/version-discovery.md" },
     { "Schema Patches" = "guide/schema-patches.md" },
     { "Migrations" = "guide/migrations.md" },
@@ -23,9 +26,6 @@ nav = [
   { "Reference" = [
     { "API" = "reference/api.md" },
   ] },
-  { "Research" = [
-    { "Overview" = "research/index.md" },
-  ] },
   { "Development" = [
     { "Contributing" = "contributing.md" },
     { "Changelog" = "changelog.md" },
@@ -33,6 +33,10 @@ nav = [
 ]
 
 [project.theme]
+logo = "assets/images/pydantic-versions-icon.svg"
+favicon = "assets/images/pydantic-versions-icon.svg"
+palette = { scheme = "default", primary = "blue", accent = "amber" }
+font = { text = "Manrope", code = "Roboto Mono" }
 features = [
   "navigation.sections",
   "navigation.path",

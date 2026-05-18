@@ -2,7 +2,23 @@
 
 Bring version control and history to your Pydantic schemas.
 
-This project is in early development. The initial public API focuses on registering schema versions, deriving historical Pydantic models, validating historical config payloads, rendering historical config shapes, and upgrading data to the current model.
+<p align="center">
+  <img src="docs/assets/images/pydantic-versions-hero.png" alt="pydantic-versions logo" width="760">
+</p>
+
+`pydantic-versions` lets projects register ordered schema versions, derive historical Pydantic models from a current model, validate historical payloads, render historical config shapes, and upgrade data to the current model.
+
+## Install
+
+```bash
+pip install pydantic-versions
+```
+
+With `uv`:
+
+```bash
+uv add pydantic-versions
+```
 
 ## Example
 

@@ -1,8 +1,28 @@
 # pydantic-versions
 
-`pydantic-versions` is an early-stage package for versioned Pydantic schemas.
+<p align="center">
+  <img src="assets/images/pydantic-versions-hero.png" alt="pydantic-versions logo" width="760">
+</p>
 
-It focuses on config-style data where schema versions are independent from software versions. The core API lets projects register ordered schema versions, derive historical Pydantic models from a current model, validate historical payloads, render historical config shapes, and upgrade inputs to the current model through explicit migrations.
+`pydantic-versions` brings explicit schema versioning to Pydantic models.
+
+It focuses on config and API payloads where schema versions are independent from
+software versions. The core API lets projects register ordered schema versions,
+derive historical Pydantic models from a current model, validate historical
+payloads, render historical config shapes, and upgrade inputs to the current
+model through explicit migrations.
+
+## Install
+
+```bash
+pip install pydantic-versions
+```
+
+With `uv`:
+
+```bash
+uv add pydantic-versions
+```
 
 ## Quick example
 

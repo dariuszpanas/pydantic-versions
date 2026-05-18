@@ -44,16 +44,17 @@ Avoid putting transient process context in commit history. Commit messages shoul
 Example:
 
 ```text
-chore: add initial project scaffold
+feat: add versioned schema API
 
-Set up the baseline Python package structure for pydantic-versions with a src
-layout, Hatchling build metadata, uv dependency management, and a committed
-lockfile. The package currently exposes only version metadata while the public
-API remains in research and design.
+Add the initial public API for registering versioned Pydantic schemas,
+generating historical models, validating historical payloads, rendering older
+schema shapes, and upgrading data to the current model through explicit
+migrations.
 
-Add development workflows for formatting, linting, type checking, testing,
-documentation builds, package builds, and release automation. Seed the docs
-with a research area so findings can be captured before implementation starts.
+Document the main config-versioning workflow, legacy unversioned fallback
+behavior, nested version fields, Django Ninja compatibility, and release setup.
+Cover the implementation with unit tests for registration, patching, migration,
+dumping, nested models, and Django Ninja schemas.
 
 Validation: make ci; uv run zensical build --strict; uv build
 ```

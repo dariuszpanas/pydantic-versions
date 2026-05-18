@@ -1,0 +1,123 @@
+:root {
+  --pv-navy: #102143;
+  --pv-blue: #2567c9;
+  --pv-blue-soft: #eaf2ff;
+  --pv-yellow: #f4bb2f;
+  --pv-green: #75ad4f;
+  --pv-ink: #111827;
+  --pv-muted: #5e6b7d;
+
+  --md-primary-fg-color: var(--pv-navy);
+  --md-primary-fg-color--light: #1f3767;
+  --md-primary-fg-color--dark: #08142e;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.72);
+  --md-accent-fg-color: var(--pv-blue);
+  --md-accent-fg-color--transparent: rgba(37, 103, 201, 0.12);
+  --md-typeset-a-color: var(--pv-blue);
+}
+
+.md-header,
+.md-tabs {
+  background: var(--pv-navy);
+}
+
+.md-header__title,
+.md-header__source {
+  color: #ffffff;
+}
+
+.md-header__title,
+.md-nav__title,
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.md-header .md-search__button {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.md-header .md-search__button:focus,
+.md-header .md-search__button:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+.md-header .md-search__button::before {
+  background-color: currentcolor;
+}
+
+.md-header .md-search__button::after {
+  background-color: rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.md-logo img {
+  background: #ffffff;
+  border-radius: 0.24rem;
+  padding: 0.1rem;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: var(--pv-ink);
+}
+
+.md-typeset a {
+  color: var(--pv-blue);
+}
+
+.md-typeset a:hover {
+  color: var(--pv-navy);
+}
+
+.md-typeset code {
+  color: var(--pv-navy);
+}
+
+.md-typeset .highlight,
+.md-typeset pre {
+  border-left: 0.18rem solid var(--pv-yellow);
+}
+
+.md-nav__link--active,
+.md-nav__link[aria-current="page"] {
+  color: var(--pv-blue);
+}
+
+.md-nav__link:hover {
+  color: var(--pv-navy);
+}
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-color: var(--pv-blue);
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  background-color: var(--pv-blue-soft);
+}
+
+.md-typeset .admonition-title::before,
+.md-typeset summary::before {
+  background-color: var(--pv-blue);
+}
+
+.md-typeset mark {
+  background-color: rgba(244, 187, 47, 0.28);
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--pv-navy);
+  color: #ffffff;
+}
+
+.md-typeset table:not([class]) tr:hover {
+  background-color: rgba(37, 103, 201, 0.04);
+}
