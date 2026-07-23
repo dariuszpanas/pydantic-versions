@@ -16,6 +16,7 @@ from pydantic_versions._compiler import (
     _validate_family_declarations,
     _validate_required_field_introductions,
 )
+from pydantic_versions._planning import _build_planning_catalog
 from pydantic_versions._runtime import (
     _build_model_for_projection,
     _dump_family,
@@ -36,10 +37,12 @@ from pydantic_versions.declarations import (
 from pydantic_versions.exceptions import (
     DuplicateSchemaVersionError,
     InvalidMigrationError,
+    IrreversibleTransitionError,
     SchemaCompilationError,
     SchemaFamilySelectionError,
     UnknownSchemaVersionError,
 )
+from pydantic_versions.inspection import ConversionPlan, SchemaInventory
 
 _DEFAULT_FAMILIES: dict[type[BaseModel], SchemaFamily[Any]] = {}
 _FAMILY_LOCK = RLock()
@@ -152,8 +155,17 @@ class SchemaFamily[T: BaseModel]:
                     _CompiledVersion(
                         projection=projection,
                         model=_build_model_for_projection(self, projection),
+                        wire_model_kind=(
+                            "current"
+                            if index == len(projections) - 1
+                            else "explicit"
+                            if declaration.wire_model is not None
+                            else "generated"
+                        ),
                     )
-                    for projection in projections
+                    for index, (projection, declaration) in enumerate(
+                        zip(projections, self.versions, strict=True)
+                    )
                 )
                 explicit = {
                     (transition.source, transition.target): transition
@@ -167,6 +179,11 @@ class SchemaFamily[T: BaseModel]:
                         strict=False,
                     )
                 )
+                catalog = _build_planning_catalog(
+                    self,
+                    compiled_versions,
+                    compiled_transitions,
+                )
                 self._compiled = _CompiledFamily(
                     model=self.model,
                     name=self.name,
@@ -174,6 +191,7 @@ class SchemaFamily[T: BaseModel]:
                     transitions=compiled_transitions,
                     version_metadata=self.version_metadata,
                     missing_version=self.missing_version,
+                    catalog=catalog,
                 )
             finally:
                 self._compiling = False
@@ -191,6 +209,30 @@ class SchemaFamily[T: BaseModel]:
                 )
                 raise SchemaFamilySelectionError(msg)
         return self
+
+    def describe(self) -> SchemaInventory:
+        return self._compiled_family().catalog.inventory
+
+    def plan_validation(self, source_version: str) -> ConversionPlan:
+        requested = _runtime_label(source_version, family_name=self.name)
+        compiled = self._compiled_family()
+        return compiled.catalog.validation_plans[compiled.index(requested)]
+
+    def plan_render(self, target_version: str) -> ConversionPlan:
+        requested = _runtime_label(target_version, family_name=self.name)
+        compiled = self._compiled_family()
+        candidate = compiled.catalog.render_plans[compiled.index(requested)]
+        if candidate.semantics == "unavailable":
+            blocked = next(step for step in candidate.steps if step.semantics == "unavailable")
+            msg = (
+                f"Schema family {self.name!r} cannot render "
+                f"{candidate.source_version!r} -> {candidate.target_version!r}: "
+                f"transition {blocked.target_version!r} -> "
+                f"{blocked.source_version!r} has no declared downgrade for render step "
+                f"{blocked.source_version!r} -> {blocked.target_version!r}"
+            )
+            raise IrreversibleTransitionError(msg)
+        return candidate
 
     def model_for(self, version: str) -> type[BaseModel]:
         requested = _runtime_label(version, family_name=self.name)

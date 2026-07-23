@@ -13,6 +13,10 @@ class SchemaFamilySelectionError(SchemaVersionError):
     """Raised when a model-only call has no unambiguous explicit default family."""
 
 
+class IrreversibleTransitionError(SchemaVersionError):
+    """Raised when a complete render route cannot be planned safely."""
+
+
 class MissingSchemaVersionError(SchemaVersionError):
     """Raised when a schema version cannot be discovered for input data."""
 
