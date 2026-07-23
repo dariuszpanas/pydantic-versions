@@ -33,6 +33,7 @@ from pydantic_versions.exceptions import (
     SchemaFamilySelectionError,
     SchemaVersionError,
     UnknownSchemaVersionError,
+    UnsupportedWireModelError,
     VersionedValidationError,
 )
 from pydantic_versions.family import SchemaFamily
@@ -93,6 +94,7 @@ __all__ = [
     "TransitionData",
     "TransitionFunc",
     "TransitionDescription",
+    "UnsupportedWireModelError",
     "UnknownSchemaVersionError",
     "VersionMetadata",
     "VersionPatch",

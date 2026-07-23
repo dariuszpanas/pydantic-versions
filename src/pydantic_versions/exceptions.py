@@ -9,6 +9,10 @@ class SchemaCompilationError(SchemaVersionError):
     """Raised when a schema-family declaration cannot be compiled safely."""
 
 
+class UnsupportedWireModelError(SchemaCompilationError):
+    """Raised when a model cannot be represented as an automatic wire contract."""
+
+
 class SchemaFamilySelectionError(SchemaVersionError):
     """Raised when a model-only call has no unambiguous explicit default family."""
 

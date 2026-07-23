@@ -18,6 +18,7 @@ from pydantic_versions import (
     StepKind,
     StepSemantics,
     TransitionDescription,
+    UnsupportedWireModelError,
     VersionDescription,
     VersionedValidation,
     VersionPatch,
@@ -76,5 +77,6 @@ assert_type(family.dump(version="1"), dict[str, Any])
 assert_type(dump_versioned(family, version="1"), dict[str, Any])
 
 compilation_error: type[Exception] = SchemaCompilationError
+unsupported_wire_error: type[SchemaCompilationError] = UnsupportedWireModelError
 selection_error: type[Exception] = SchemaFamilySelectionError
 irreversible_error: type[Exception] = IrreversibleTransitionError

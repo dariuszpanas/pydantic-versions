@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Defined generated current and historical models as object-shaped Pydantic v2
+  wire contracts, with explicit preservation and behavior boundaries, exact
+  `Literal` version discriminators, deterministic identities, and contextual
+  `UnsupportedWireModelError` failures for unsafe automatic projections.
 - Added frozen schema inventories and deterministic validation/render plans with
   stable step IDs, visible implicit migrations, JSON-safe serialization, lossy
   projection semantics, and payload-free irreversible-route preflight.

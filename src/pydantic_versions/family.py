@@ -18,10 +18,13 @@ from pydantic_versions._compiler import (
 )
 from pydantic_versions._planning import _build_planning_catalog
 from pydantic_versions._runtime import (
-    _build_model_for_projection,
     _dump_family,
     _runtime_label,
     _validate_family,
+)
+from pydantic_versions._wire import (
+    _build_model_for_projection,
+    _validate_automatic_wire_model,
 )
 from pydantic_versions.declarations import (
     _DEFAULT_VERSION_METADATA,
@@ -142,6 +145,7 @@ class SchemaFamily[T: BaseModel]:
                     transitions=self.transitions,
                     nested=self.nested,
                 )
+                _validate_automatic_wire_model(self)
                 projections = tuple(
                     _compile_projection(self.model, declaration) for declaration in self.versions
                 )
