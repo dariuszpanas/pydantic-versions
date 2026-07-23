@@ -3,7 +3,7 @@
 Bring version control and history to your Pydantic schemas.
 
 <p align="center">
-  <img src="docs/assets/images/pydantic-versions-hero.png" alt="pydantic-versions logo" width="760">
+  <img src="https://raw.githubusercontent.com/dariuszpanas/pydantic-versions/main/docs/assets/images/pydantic-versions-hero.png" alt="pydantic-versions logo" width="760">
 </p>
 
 `pydantic-versions` lets projects register ordered schema versions, derive historical Pydantic models from a current model, validate historical payloads, render historical config shapes, and upgrade data to the current model.
