@@ -215,6 +215,9 @@ site/
 # Local scratch
 tmp/
 
+# Local Obsidian project knowledge vault
+.vault/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
