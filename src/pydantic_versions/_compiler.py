@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel
 
@@ -23,7 +23,12 @@ from pydantic_versions.exceptions import (
 )
 from pydantic_versions.patches import FieldDefault, FieldRemoved, FieldRenamed, VersionPatch
 
+if TYPE_CHECKING:
+    from pydantic_versions._planning import _PlanningCatalog
+
 type UpgradeKind = Literal["implicit_identity", "custom_transition"]
+type DowngradeKind = Literal["implicit_identity", "custom_transition", "unavailable"]
+type WireModelKind = Literal["current", "generated", "explicit"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class _CompiledField:
     current_name: str
     version_name: str | None
     default: FieldDefault | None
+    patch_ordinal: int | None
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,7 @@ class _VersionProjection:
 class _CompiledVersion:
     projection: _VersionProjection
     model: type[BaseModel]
+    wire_model_kind: WireModelKind
 
 
 @dataclass(frozen=True)
@@ -58,6 +65,8 @@ class _CompiledTransition:
     target: str
     upgrade_kind: UpgradeKind
     upgrade: TransitionFunc | None
+    downgrade_kind: DowngradeKind
+    downgrade_semantics: Literal["exact", "lossy", "unavailable"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,7 @@ class _CompiledFamily:
     transitions: tuple[_CompiledTransition, ...]
     version_metadata: VersionMetadata | None
     missing_version: str | None
+    catalog: _PlanningCatalog
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -347,6 +357,10 @@ def _compile_projection(
         for patch in declaration.patches
         if isinstance(patch, FieldRenamed)
     }
+    patch_ordinals = {
+        patch.current_name if isinstance(patch, FieldRenamed) else patch.name: ordinal
+        for ordinal, patch in enumerate(declaration.patches)
+    }
     fields = tuple(
         _CompiledField(
             current_name=current_name,
@@ -354,6 +368,7 @@ def _compile_projection(
             if current_name in removed
             else renames.get(current_name, current_name),
             default=defaults.get(current_name),
+            patch_ordinal=patch_ordinals.get(current_name),
         )
         for current_name in model_cls.model_fields
     )
@@ -366,11 +381,29 @@ def _compile_transition(
     declaration: VersionTransition | None,
 ) -> _CompiledTransition:
     upgrade = None if declaration is None else declaration.upgrade
+    downgrade = None if declaration is None else declaration.downgrade
+    if downgrade is not None:
+        if declaration is None:  # pragma: no cover - derived from declaration
+            msg = f"Downgrade {source!r} -> {target!r} has no declaration"
+            raise SchemaCompilationError(msg)
+        downgrade_kind: DowngradeKind = "custom_transition"
+        downgrade_semantics = declaration.downgrade_semantics
+        if downgrade_semantics not in ("exact", "lossy"):  # pragma: no cover - validated
+            msg = f"Downgrade {source!r} -> {target!r} has no declared semantics"
+            raise SchemaCompilationError(msg)
+    elif upgrade is None:
+        downgrade_kind = "implicit_identity"
+        downgrade_semantics = "exact"
+    else:
+        downgrade_kind = "unavailable"
+        downgrade_semantics = "unavailable"
     return _CompiledTransition(
         source=source,
         target=target,
         upgrade_kind="implicit_identity" if upgrade is None else "custom_transition",
         upgrade=upgrade,
+        downgrade_kind=downgrade_kind,
+        downgrade_semantics=downgrade_semantics,
     )
 
 
@@ -385,17 +418,21 @@ def _generated_model_name(
         family_name,
         label,
     )
-    digest = hashlib.sha256()
-    for component in components:
-        encoded = component.encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
-        digest.update(encoded)
-    suffix = digest.hexdigest()[:12]
+    suffix = _stable_digest(components)[:12]
     return (
         f"{_identifier_component(model.__name__)}"
         f"_{_identifier_component(family_name)}"
         f"_{_identifier_component(label)}_{suffix}"
     )
+
+
+def _stable_digest(components: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    for component in components:
+        encoded = component.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def _identifier_component(value: str) -> str:

@@ -27,6 +27,7 @@ from pydantic_versions.declarations import (
 from pydantic_versions.exceptions import (
     DuplicateSchemaVersionError,
     InvalidMigrationError,
+    IrreversibleTransitionError,
     MissingSchemaVersionError,
     SchemaCompilationError,
     SchemaFamilySelectionError,
@@ -35,6 +36,17 @@ from pydantic_versions.exceptions import (
     VersionedValidationError,
 )
 from pydantic_versions.family import SchemaFamily
+from pydantic_versions.inspection import (
+    ConversionPlan,
+    NestedFamilyDescription,
+    PlanStep,
+    ProjectionDescription,
+    SchemaInventory,
+    StepKind,
+    StepSemantics,
+    TransitionDescription,
+    VersionDescription,
+)
 from pydantic_versions.patches import (
     FieldDefault,
     FieldRemoved,
@@ -56,22 +68,31 @@ def _package_version(distribution: str = "pydantic-versions") -> str:
 __version__ = _package_version()
 
 __all__ = [
+    "ConversionPlan",
     "DuplicateSchemaVersionError",
     "FieldDefault",
     "FieldRemoved",
     "FieldRenamed",
     "InvalidMigrationError",
+    "IrreversibleTransitionError",
     "JsonValue",
     "MatchingLabels",
     "MissingSchemaVersionError",
     "NestedFamily",
+    "NestedFamilyDescription",
+    "PlanStep",
+    "ProjectionDescription",
     "SchemaCompilationError",
     "SchemaFamily",
     "SchemaFamilySelectionError",
+    "SchemaInventory",
     "SchemaVersion",
     "SchemaVersionError",
+    "StepKind",
+    "StepSemantics",
     "TransitionData",
     "TransitionFunc",
+    "TransitionDescription",
     "UnknownSchemaVersionError",
     "VersionMetadata",
     "VersionPatch",
@@ -79,6 +100,7 @@ __all__ = [
     "VersionTransition",
     "VersionedValidation",
     "VersionedValidationError",
+    "VersionDescription",
     "__version__",
     "dump_versioned",
     "field_default",
