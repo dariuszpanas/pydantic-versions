@@ -70,6 +70,73 @@ def migrate_v1_to_v2(data: dict) -> dict:
 Migrations should be deterministic and side-effect free. They should not read
 files, access the network, or depend on the current time.
 
+## Migrating from 0.1 Decorators to External Families
+
+Projects can preserve behavior while moving history out of decorators, then
+remove decorator coupling from the model file.
+
+```python
+# 0.1-style declaration (models.py)
+from pydantic import BaseModel
+from pydantic_versions import versioned_schema, schema_version, field_default
+
+
+@versioned_schema(name="app_config", versions=["1", "2"], current="2")
+@schema_version("1", patches=[field_default("timeout", 5.0)])
+class AppConfig(BaseModel):
+    timeout: float = 10.0
+```
+
+```python
+# models.py
+from pydantic import BaseModel
+
+
+class AppConfig(BaseModel):
+    timeout: float = 10.0
+```
+
+```python
+# schema_history.py
+from models import AppConfig
+from pydantic_versions import (
+    SchemaFamily,
+    SchemaVersion,
+    VersionTransition,
+    field_default,
+    validate_versioned,
+    dump_versioned,
+)
+
+
+def upgrade_v1_to_v2(data: dict) -> dict:
+    data.setdefault("timeout", 5.0)
+    return data
+
+
+APP_CONFIG_SCHEMA = SchemaFamily(
+    model=AppConfig,
+    name="app_config",
+    versions=(
+        SchemaVersion("1", patches=(field_default("timeout", 5.0),)),
+        SchemaVersion("2"),
+    ),
+    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1_to_v2),),
+)
+
+
+def validate_app_config(data):
+    return validate_versioned(APP_CONFIG_SCHEMA, data)
+
+
+def render_app_config(model, version: str):
+    return dump_versioned(model, family=APP_CONFIG_SCHEMA, version=version)
+```
+
+In most migrations, this change is behaviorally identical, but the version
+history is now decoupled from the model definition and can evolve in its own
+module, import path, and package lifecycle.
+
 ## Handling Existing Unversioned Files
 
 If users already have configs without schema metadata, decide what historical
