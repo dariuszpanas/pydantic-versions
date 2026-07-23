@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, cast
 
 import pytest
@@ -59,6 +60,31 @@ class PlainModel(BaseModel):
 def test_package_requires_registered_models() -> None:
     with pytest.raises(SchemaVersionError):
         model_for_version(PlainModel, "1")
+
+
+def test_versioned_schema_rejects_pydantic_v1_models_at_registration() -> None:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.",
+        )
+        from pydantic.v1 import BaseModel as PydanticV1BaseModel
+
+    class LegacyModel(PydanticV1BaseModel):
+        value: str
+
+    decorator = versioned_schema(name="legacy", versions=["1"], current="1")
+
+    with pytest.raises(SchemaVersionError, match="Pydantic v2"):
+        decorator(cast(Any, LegacyModel))
+
+
+def test_schema_version_rejects_non_pydantic_models_at_registration() -> None:
+    class NotPydantic:
+        pass
+
+    with pytest.raises(SchemaVersionError, match="Pydantic v2"):
+        schema_version("1")(cast(Any, NotPydantic))
 
 
 def test_model_for_version_applies_defaults_removals_renames_and_version_field() -> None:
