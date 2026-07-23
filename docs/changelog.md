@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added immutable external `SchemaFamily`, `SchemaVersion`, and
+  `VersionTransition` declarations so schema history can live outside the
+  current model and two isolated families can safely reuse one model.
+- Made family compilation lazy, thread-safe, collision-resistant, and
+  authoritative for generated models, field projections, validation upgrades,
+  and rendering projections; unreachable transition declarations now fail.
+- Kept decorators and model-first free functions as explicit-default adapters
+  to the same compiler, with contextual errors for missing or conflicting
+  default-family selection.
 - Added Python 3.14 package metadata and raised the supported Pydantic v2 floor
   to 2.12.3.
 - Added explicit registration-time errors for Pydantic v1 and other models that

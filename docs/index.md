@@ -7,10 +7,11 @@
 `pydantic-versions` brings explicit schema versioning to Pydantic models.
 
 It focuses on config and API payloads where schema versions are independent from
-software versions. The core API lets projects register ordered schema versions,
-derive historical Pydantic models from a current model, validate historical
-payloads, render historical config shapes, and upgrade inputs to the current
-model through explicit migrations.
+software versions. External schema families keep growing history outside the
+current application model, derive historical Pydantic models, validate
+historical payloads, render historical config shapes, and upgrade inputs through
+explicit transitions. Decorators remain available as a compact compatibility
+style.
 
 ## Install
 
@@ -26,24 +27,31 @@ uv add pydantic-versions
 
 ## Quick example
 
-This example uses an explicit historical schema version. The input validates as
-version `1`, then upgrades to the current model.
+This example declares history without decorating the current model. The input
+validates as version `1`, then upgrades to the current model.
 
 ```python
 from pydantic import BaseModel
-from pydantic_versions import field_default, schema_version, validate_versioned, versioned_schema
+from pydantic_versions import SchemaFamily, SchemaVersion, field_default
 
 
-@versioned_schema(name="app_config", versions=["1", "2"], current="2")
-@schema_version("1", patches=[field_default("timeout", 5.0)])
 class AppConfig(BaseModel):
     timeout: float = 10.0
 
 
-result = validate_versioned(AppConfig, {"schema_version": "1"})
+APP_CONFIG_SCHEMA = SchemaFamily(
+    model=AppConfig,
+    name="app_config",
+    versions=(
+        SchemaVersion("1", patches=(field_default("timeout", 5.0),)),
+        SchemaVersion("2"),
+    ),
+)
+
+result = APP_CONFIG_SCHEMA.validate({"schema_version": "1"})
 assert result.current_model.timeout == 5.0
 ```
 
-See the user guide for the important details around version discovery,
-`missing_version`, schema patches, migrations, rendering historical configs, and
-the [complex config example](guide/complex-config-example.md).
+See the user guide for [external families](guide/external-families.md), version
+discovery, `missing_version`, schema patches, migrations, rendering historical
+configs, and the [complex config example](guide/complex-config-example.md).
