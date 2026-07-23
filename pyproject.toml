@@ -27,10 +27,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
-    "pydantic>=2.0,<3.0",
+    "pydantic>=2.12.3,<3.0",
 ]
 
 [project.urls]
@@ -42,6 +44,7 @@ Issues = "https://github.com/dariuszpanas/pydantic-versions/issues"
 [dependency-groups]
 dev = [
     "django-ninja>=1.6.2",
+    "packaging>=24.0",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.14.13",
