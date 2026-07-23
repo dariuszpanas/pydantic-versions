@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, AliasPath, BaseModel
 
 from pydantic_versions._compiler import (
     _CompiledFamily,
@@ -37,7 +37,7 @@ def _validate_family[T: BaseModel](
     compiled = family._compiled_family()
     source_version = _detect_version(compiled, data, explicit_version=version)
     source = compiled.version(source_version)
-    source_model = source.model.model_validate(data)
+    source_model = source.model.model_validate(data, by_name=True)
     payload = _to_current_names(compiled, source, source_model.model_dump(by_alias=False))
 
     migrations_applied: list[tuple[str, str]] = []
@@ -154,9 +154,15 @@ def _set_version_field(data: dict[str, Any], version_field: VersionPath, value: 
     current = data
     for part in version_field[:-1]:
         next_value = current.get(part)
-        if not isinstance(next_value, dict):
+        if part not in current:
             next_value = {}
             current[part] = next_value
+        elif not isinstance(next_value, dict):
+            msg = (
+                f"Cannot set version metadata at {version_field!r} because "
+                f"intermediate value {part!r} is not an object"
+            )
+            raise InvalidMigrationError(msg)
         current = next_value
     current[version_field[-1]] = value
 
@@ -225,20 +231,133 @@ def _current_validation_input(
     current_payload = dict(payload)
     if model_cls.model_config.get("validate_by_alias", True) is False:
         return current_payload
+    return _normalize_payload_field_aliases(model_cls, current_payload, prefer_aliases=True)
+
+
+def _normalize_payload_field_aliases(
+    model_cls: type[BaseModel],
+    payload: Mapping[str, Any],
+    *,
+    prefer_aliases: bool = False,
+) -> dict[str, Any]:
+    normalized = dict(payload)
     for name, field_info in model_cls.model_fields.items():
-        if name not in current_payload:
+        alias_paths = _field_alias_paths(field_info)
+        if name in normalized:
+            if prefer_aliases:
+                value = normalized[name]
+                mapped_aliases = tuple(
+                    path for path in alias_paths if not (len(path) == 1 and path[0] == name)
+                )
+                if mapped_aliases:
+                    mapped_alias = mapped_aliases[0]
+                    for alias_path in mapped_aliases:
+                        _remove_payload_path(normalized, alias_path)
+                    _set_payload_path(normalized, mapped_alias, value)
+                    normalized.pop(name, None)
+                continue
+
+            for alias_path in alias_paths:
+                if len(alias_path) == 1 and alias_path[0] == name:
+                    continue
+                _remove_payload_path(normalized, alias_path)
             continue
-        validation_alias = field_info.validation_alias
-        alias = (
-            validation_alias
-            if isinstance(validation_alias, str)
-            else field_info.alias
-            if validation_alias is None
-            else None
-        )
-        if isinstance(alias, str):
-            current_payload[alias] = current_payload.pop(name)
-    return current_payload
+        source_path = _next_alias_path(field_info)
+        if source_path is not None and _path_has_payload(normalized, source_path):
+            value = _get_payload_path(normalized, source_path)
+            _remove_payload_path(normalized, source_path)
+            normalized[name] = value
+    return normalized
+
+
+def _field_alias_paths(field_info: Any) -> tuple[tuple[Any, ...], ...]:
+    validation_alias = field_info.validation_alias
+    if validation_alias is None:
+        return _alias_path(field_info.alias)
+    if isinstance(validation_alias, str):
+        return ((validation_alias,),)
+    if isinstance(validation_alias, AliasChoices):
+        return tuple(path for choice in validation_alias.choices for path in _alias_path(choice))
+    if isinstance(validation_alias, AliasPath):
+        return (tuple(validation_alias.path),)
+    return ()
+
+
+def _alias_path(alias: Any) -> tuple[tuple[Any, ...], ...]:
+    if isinstance(alias, str):
+        return ((alias,),)
+    if isinstance(alias, AliasPath):
+        return (tuple(alias.path),)
+    if isinstance(alias, AliasChoices):
+        return tuple(path for choice in alias.choices for path in _alias_path(choice))
+    return ()
+
+
+def _next_alias_path(field_info: Any) -> tuple[Any, ...] | None:
+    paths = _field_alias_paths(field_info)
+    for path in paths:
+        if path:
+            return path
+    return None
+
+
+def _path_has_payload(payload: Mapping[Any, Any], path: tuple[Any, ...]) -> bool:
+    current: Any = payload
+    for part in path:
+        if not isinstance(current, Mapping) or part not in current:
+            return False
+        current = current[part]
+    return True
+
+
+def _get_payload_path(payload: Mapping[Any, Any], path: tuple[Any, ...]) -> Any:
+    current: Any = payload
+    for part in path:
+        current = current[part]
+    return current
+
+
+def _remove_payload_path(payload: dict[str, Any], path: tuple[Any, ...]) -> None:
+    if not path:
+        return
+    parent_path: list[tuple[dict[str, Any], Any]] = []
+    current: Any = payload
+    for part in path[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        if not isinstance(current[part], Mapping):
+            return
+        parent_path.append((current, part))
+        current = current[part]
+    if not isinstance(current, Mapping):
+        return
+    removed = path[-1] in current
+    if removed:
+        current.pop(path[-1], None)
+    if removed:
+        for parent, part in reversed(parent_path):
+            child = parent[part]
+            if isinstance(child, Mapping) and len(child) == 0:
+                parent.pop(part, None)
+
+
+def _set_payload_path(payload: dict[str, Any], path: tuple[Any, ...], value: Any) -> None:
+    if not path:
+        return
+    current: Any = payload
+    for part in path[:-1]:
+        if not isinstance(current, dict):
+            return
+        next_value = current.get(part)
+        if part not in current:
+            next_value = {}
+            current[part] = next_value
+        elif not isinstance(next_value, Mapping):
+            return
+        current = next_value
+    if not isinstance(current, Mapping):
+        return
+    current[path[-1]] = value
 
 
 def _model_metadata_field_name(compiled: _CompiledFamily) -> str:
@@ -261,8 +380,9 @@ def _model_metadata_field_name(compiled: _CompiledFamily) -> str:
 def _to_version_names(version: _CompiledVersion, payload: Any) -> Any:
     if not isinstance(payload, Mapping):
         return payload
-    original = dict(payload)
-    versioned = dict(original)
+    normalized = _normalize_payload_field_aliases(version.model, payload)
+    original = dict(normalized)
+    versioned = dict(normalized)
     renamed = tuple(
         field
         for field in version.projection.fields
