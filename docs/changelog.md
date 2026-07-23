@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added frozen schema inventories and deterministic validation/render plans with
+  stable step IDs, visible implicit migrations, JSON-safe serialization, lossy
+  projection semantics, and payload-free irreversible-route preflight.
 - Added immutable external `SchemaFamily`, `SchemaVersion`, and
   `VersionTransition` declarations so schema history can live outside the
   current model and two isolated families can safely reuse one model.

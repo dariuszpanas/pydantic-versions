@@ -804,7 +804,12 @@ qualified name, the exact family name, and the exact label. Labels `1.0` and
 `1-0` therefore cannot collide. A family name is a non-empty stable identifier;
 two different declarations with the same model and family identity may not be
 combined in one schema graph. Plan-step IDs use the same encoding plus the
-operation, kind, source, target, schema path, and declaration ordinal.
+operation, direction, kind, source, target, schema path, semantics, and
+declaration ordinal, together with safe step-specific declaration details such
+as projection, wire-model, and metadata kind. They use a versioned `pv1-`
+prefix and the full 64-character SHA-256 digest because they are durable
+correlation identifiers; unlike generated Python class-name suffixes, they are
+not truncated. Default values, factories, and callable identities are excluded.
 
 ## Version metadata ownership
 

@@ -2,7 +2,8 @@
 
 Migrations upgrade already-validated historical data toward the current model.
 They are optional: if adjacent versions are compatible, the compiler records an
-identity edge.
+identity edge. The compiled inventory and operation-specific plans make both
+custom and identity edges visible without running a payload.
 
 ## Declare transitions with the family
 
@@ -49,8 +50,10 @@ def migrate_v1_to_v2(data: dict) -> dict:
 
 Legacy registrations must finish before the family's first compilation.
 Registering another migration after `compile()`, `model_for_version()`,
-`validate_versioned()`, or `dump_versioned()` has compiled that family raises
-`InvalidMigrationError` instead of mutating live plans.
+`describe()`, `plan_validation()`, `plan_render()`, `validate_versioned()`, or
+`dump_versioned()` has compiled that family raises `InvalidMigrationError`
+instead of mutating live plans. Put legacy decorators before any inspection or
+runtime call; new code should prefer constructor transitions.
 
 ## Direction and topology
 
@@ -80,14 +83,119 @@ topology is:
 ```
 
 Custom upgrades run in that order. An edge with no upgrade callable remains an
-explicit internal identity step, which is useful when a version changed only
-field defaults or when its historical projection is already current-compatible.
+explicit identity step, which is useful when a version changed only field
+defaults or when its historical projection is already current-compatible.
 
 `SchemaFamily.transitions` exposes the frozen custom declarations for tooling
 and review. After validation, `VersionedValidation.migrations_applied` reports
-the custom upgrade edges that actually ran. Compiler-added identity steps are
-not presented as user migrations; the public compiled-plan API will provide the
-complete topology.
+the custom upgrade edges that actually ran. Use the inventory or a validation
+plan when tooling needs the complete topology, including compiler-added
+identity steps.
+
+## Inspect the migration inventory
+
+`describe()` returns the family-owned compiled inventory:
+
+```python
+inventory = APP_CONFIG_SCHEMA.describe()
+
+transition = inventory.transitions[0]
+assert transition.source == "1"
+assert transition.target == "2"
+assert transition.upgrade == "custom"
+assert transition.downgrade == "unavailable"
+assert transition.downgrade_semantics == "unavailable"
+```
+
+That record can drive a migration table without inspecting decorator state or
+Python callables:
+
+| Edge | Upgrade | Downgrade | Downgrade semantics |
+| --- | --- | --- | --- |
+| `1 -> 2` | `custom` | `unavailable` | `unavailable` |
+
+Every adjacent pair appears in declared version order. An omitted transition is
+reported as `implicit_identity` in both directions with exact downgrade
+semantics. Version descriptions also list generated/current wire-model kinds
+and version-specific default, removed, and renamed field projections.
+
+The inventory and its nested records are frozen values. `to_dict()` returns a
+fresh deterministic JSON-safe representation and deliberately omits model
+classes, callable objects, default values and factories, and payload data.
+
+## Plan validation
+
+`plan_validation()` describes the selected source-to-current route without
+executing a migration:
+
+```python
+plan = APP_CONFIG_SCHEMA.plan_validation("1")
+
+assert plan.operation == "validate"
+assert plan.source_version == "1"
+assert plan.target_version == "2"
+assert [step.kind for step in plan.steps] == [
+    "metadata",
+    "wire_validation",
+    "custom_transition",
+    "current_validation",
+]
+```
+
+Validation plans contain source metadata and wire-validation boundaries,
+version-specific projections, every adjacent upgrade or identity edge, and the
+final current-model validation boundary. Their overall semantics are
+`not_applicable`; individual identity steps are marked `exact`.
+
+Each step has a deterministic `pv1-` ID followed by the full 64-character
+SHA-256 digest of safe schema identity. IDs never depend on Python's
+process-randomized hash, callable `repr()`, object identity, or payload values.
+
+## Preflight rendering
+
+`plan_render()` describes a current-to-target route. It is conservative: a
+custom upgrade with no declared downgrade makes the complete reverse route
+unavailable.
+
+```python
+import pytest
+
+from pydantic_versions import IrreversibleTransitionError
+
+
+with pytest.raises(IrreversibleTransitionError):
+    APP_CONFIG_SCHEMA.plan_render("1")
+```
+
+The method takes no payload and raises before any user transition can run.
+Structural rename and default projections are exact. A target projection that
+removes a current field is available but marks its step and the complete render
+plan as `lossy`.
+
+Custom downgrade declarations are still rejected by the current compiler and
+are not executed yet. Consequently, the only available reverse transition in
+this implementation slice is an implicit identity. Downgrade execution lands
+in its dedicated conversion work.
+
+Planning is intentionally ahead of runtime routing during this implementation
+stage. `validate()` and the dictionary-returning `dump()` compatibility path do
+not yet execute these public plans. In particular, a failed `plan_render()`
+means no safe reverse route is declared even if legacy `dump()` can still
+project a target-shaped dictionary; do not treat that dictionary as execution
+of a custom downgrade.
+
+## Plans are not traces
+
+A plan is a static, payload-free description of what an operation would need to
+do. It contains safe schema paths and conditional templates, never actual list
+indices, mapping keys, values, exception messages, or timing data. Creating or
+serializing a plan does not emit logs.
+
+An execution trace records what actually happened for one payload. Structured
+per-step traces are separate later work. Until then,
+`VersionedValidation.migrations_applied` remains the compatibility view of
+top-level custom upgrades that completed; it intentionally excludes implicit
+identity steps.
 
 ## Return values
 
