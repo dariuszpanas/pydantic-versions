@@ -4,7 +4,15 @@ import warnings
 from typing import Any, cast
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_serializer,
+)
 
 from pydantic_versions import (
     DuplicateSchemaVersionError,
@@ -142,6 +150,31 @@ def test_validate_versioned_handles_current_version() -> None:
     assert result.migrations_applied == ()
 
 
+def test_validate_versioned_normalizes_alias_paths_in_upgrade_output() -> None:
+    @versioned_schema(
+        name="alias_path_migration_target",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    @schema_version("1")
+    class AliasPathMigrationTarget(BaseModel):
+        value: int = Field(validation_alias=AliasPath("payload", "value"))
+
+    @migration(AliasPathMigrationTarget, "1", "2")
+    def migrate_alias_path(data: dict) -> dict:
+        return {"payload": {"value": data["value"]}}
+
+    result = validate_versioned(
+        AliasPathMigrationTarget,
+        {"schema_version": "1", "value": 4},
+    )
+
+    assert result.current_model == AliasPathMigrationTarget.model_validate(
+        {"payload": {"value": 4}}
+    )
+
+
 def test_dump_versioned_renders_defaults_for_requested_schema() -> None:
     assert dump_versioned(AppConfig, version="1") == {
         "timeout": 5.0,
@@ -170,6 +203,26 @@ def test_dump_versioned_accepts_mapping_data_for_historical_schema() -> None:
     )
 
     assert dumped == {"timeout": 6.5, "attempts": 5}
+
+
+def test_dump_versioned_normalizes_alias_paths_and_choices_in_input() -> None:
+    @versioned_schema(
+        name="aliased_dump_input",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class AliasRuntimeDumpInput(BaseModel):
+        value: int = Field(validation_alias=AliasChoices("legacy", AliasPath("payload", "value")))
+
+    dumped = dump_versioned(
+        AliasRuntimeDumpInput,
+        version="1",
+        data={"legacy": 1, "value": 3, "payload": {"value": 2}},
+        include_version=False,
+    )
+
+    assert dumped == {"value": 3}
 
 
 def test_dump_versioned_rejects_non_mapping_data() -> None:
