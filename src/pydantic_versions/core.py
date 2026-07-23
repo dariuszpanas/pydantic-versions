@@ -62,13 +62,22 @@ _REGISTRY: dict[type[BaseModel], _VersionedSchema] = {}
 _PENDING_ATTR = "__pydantic_versions_pending__"
 
 
+def _ensure_pydantic_v2_model(model_cls: object) -> None:
+    if isinstance(model_cls, type) and issubclass(model_cls, BaseModel):
+        return
+    model_name = getattr(model_cls, "__name__", repr(model_cls))
+    msg = f"{model_name!r} must inherit from pydantic.BaseModel from Pydantic v2"
+    raise SchemaVersionError(msg)
+
+
 def schema_version(version: str, *, patches: Sequence[VersionPatch] = ()):
     return schema_versions([version], patches=patches)
 
 
 def schema_versions(versions: Sequence[str], *, patches: Sequence[VersionPatch] = ()):
     def decorator[T: BaseModel](model_cls: type[T]) -> type[T]:
-        pending = list(getattr(model_cls, _PENDING_ATTR, ()))
+        _ensure_pydantic_v2_model(model_cls)
+        pending: list[_VersionSpec] = list(getattr(model_cls, _PENDING_ATTR, ()))
         version_order = tuple(str(version) for version in versions)
         _ensure_unique_versions(version_order, schema_name=model_cls.__name__)
         for version in version_order:
@@ -88,6 +97,7 @@ def versioned_schema(
     missing_version: str | None = None,
 ):
     def decorator[T: BaseModel](model_cls: type[T]) -> type[T]:
+        _ensure_pydantic_v2_model(model_cls)
         version_order = tuple(str(version) for version in versions)
         _ensure_unique_versions(version_order, schema_name=name)
         normalized_version_field = _normalize_version_field(version_field)
