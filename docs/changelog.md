@@ -13,6 +13,9 @@
   tests, and hardened workflow dependencies, credentials, permissions, and gates.
 - Refreshed the development lockfile, including the current Django security fixes.
 - Fixed the README hero image URL for rendering on PyPI.
+- Expanded commit and PR guidance so every retained logical commit provides a
+  portable change record, exact validation evidence, and useful investigation
+  context, with a tracked commit-message template for local checkouts.
 
 ## 0.1.0 - 2026-05-18
 

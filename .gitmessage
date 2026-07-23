@@ -1,0 +1,28 @@
+<type>[optional scope][!]: <imperative summary>
+
+; A retained logical commit is the portable change record for Git-only readers.
+; Headings are optional, and one large atomic commit is valid. Keep detail
+; proportional to the change.
+## Summary
+
+- <Describe the observable change and why it is needed.>
+
+## Boundaries and compatibility
+
+- <Record important invariants, non-goals, and compatibility impact.>
+- <Record migration, rollout, or release details when applicable.>
+
+## Investigation
+
+- <Point to useful repository-local modules, tests, ADRs, issues, or docs.>
+
+## Validation
+
+- `<command>`: <result>
+
+; Or use: Validation: not run because <specific reason>.
+; Delete optional sections that do not apply and remove every template token.
+; PR metadata supplements this body. Wrap commit prose at about 72 columns;
+; use natural Markdown without artificial hard wrapping in PR descriptions.
+; Add `BREAKING CHANGE: <impact and migration>` below Validation when useful.
+; Add issue trailers such as `Closes #3` last.
