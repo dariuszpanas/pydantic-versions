@@ -175,7 +175,11 @@ def test_dump_versioned_accepts_mapping_data_for_historical_schema() -> None:
 
 def test_dump_versioned_rejects_non_mapping_data() -> None:
     with pytest.raises(ValidationError):
-        dump_versioned(AppConfig, version="1", data=["not", "a", "mapping"])
+        dump_versioned(
+            AppConfig,
+            version="1",
+            data=cast(Any, ["not", "a", "mapping"]),
+        )
 
 
 def test_dump_versioned_removes_historical_fields_before_validation() -> None:
@@ -366,7 +370,7 @@ def test_patch_helpers_validate_default_arguments() -> None:
 
 
 def test_field_default_supports_default_factory() -> None:
-    @versioned_schema(name="factory_default", versions=["1"], current="1")
+    @versioned_schema(name="factory_default", versions=["1", "2"], current="2")
     @schema_version("1", patches=[field_default("items", default_factory=list)])
     class FactoryDefault(BaseModel):
         items: list[str]

@@ -200,6 +200,40 @@ jobs:
       - name: Build package
         run: uv build
 
+      - name: Verify built-package typing
+        shell: bash
+        run: |
+          uv sync --frozen --python 3.12 --no-install-project
+
+          mapfile -t WHEELS < <(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -type f -name '*.whl')
+          test "${#WHEELS[@]}" -eq 1
+
+          VENV_DIR="$RUNNER_TEMP/built-package-typing-venv"
+          CONSUMER_DIR="$RUNNER_TEMP/built-package-typing-consumer"
+          uv venv --python 3.12 "$VENV_DIR"
+          uv pip install --python "$VENV_DIR/bin/python" "${WHEELS[0]}"
+          mkdir -p "$CONSUMER_DIR"
+          cp tests/typing/schema_family_contract.py "$CONSUMER_DIR/"
+
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/.venv/bin/ty" check \
+            --python "$VENV_DIR" \
+            --project "$CONSUMER_DIR" \
+            "$CONSUMER_DIR/schema_family_contract.py"
+          "$VENV_DIR/bin/python" "$CONSUMER_DIR/schema_family_contract.py"
+          "$VENV_DIR/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+
+          import pydantic_versions
+
+          package_file = Path(pydantic_versions.__file__).resolve()
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          assert not package_file.is_relative_to(workspace), package_file
+          marker = package_file.with_name("py.typed")
+          assert marker.is_file(), marker
+          PY
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

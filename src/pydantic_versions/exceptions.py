@@ -5,6 +5,14 @@ class SchemaVersionError(Exception):
     """Base exception for schema version configuration and runtime errors."""
 
 
+class SchemaCompilationError(SchemaVersionError):
+    """Raised when a schema-family declaration cannot be compiled safely."""
+
+
+class SchemaFamilySelectionError(SchemaVersionError):
+    """Raised when a model-only call has no unambiguous explicit default family."""
+
+
 class MissingSchemaVersionError(SchemaVersionError):
     """Raised when a schema version cannot be discovered for input data."""
 
