@@ -51,6 +51,7 @@ from pydantic import (
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
 
 from pydantic_versions import (
+    NestedFamily,
     SchemaCompilationError,
     SchemaFamily,
     SchemaVersion,
@@ -59,6 +60,7 @@ from pydantic_versions import (
     VersionTransition,
     field_default,
     field_renamed,
+    matching_labels,
 )
 
 
@@ -1137,6 +1139,71 @@ def test_nested_family_owned_discriminator_is_an_exact_literal_document_wrapper(
             wire.model_validate(
                 {"meta": {"details": {"version": "wrong"}}},
             )
+
+
+def test_unused_nested_declarations_are_rejected() -> None:
+    class NestedPayload(BaseModel):
+        value: int = 1
+
+    nested_family = SchemaFamily(
+        model=NestedPayload,
+        name="unused_nested_payload",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class RootPayload(BaseModel):
+        value: int = 1
+
+    family = SchemaFamily(
+        model=RootPayload,
+        name="unused_nested_root",
+        versions=(SchemaVersion("1"),),
+        nested=(
+            NestedFamily("unused", nested_family, matching_labels()),
+            NestedFamily(("value", "also_unused"), nested_family, matching_labels()),
+        ),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="2 nested declarations do not match"):
+        family.model_for("1")
+
+
+def test_nested_projection_rewrites_deeply_nested_models() -> None:
+    class InnerPayload(BaseModel):
+        label: int
+
+    inner_family = SchemaFamily(
+        model=InnerPayload,
+        name="nested_projection_inner_family",
+        versions=(
+            SchemaVersion("legacy", patches=(field_renamed("label", "value"),)),
+            SchemaVersion("current"),
+        ),
+        missing_version="legacy",
+    )
+
+    class NestedPayload(BaseModel):
+        inner: InnerPayload
+
+    class RootPayload(BaseModel):
+        nested: NestedPayload
+
+    family = SchemaFamily(
+        model=RootPayload,
+        name="nested_projection_rewrite",
+        versions=(SchemaVersion("legacy"), SchemaVersion("current")),
+        nested=(NestedFamily(("nested", "inner"), inner_family, matching_labels()),),
+        missing_version="legacy",
+    )
+
+    legacy_wire = family.model_for("legacy")
+    current_wire = family.model_for("current")
+
+    legacy = legacy_wire.model_validate({"nested": {"inner": {"value": 1}}})
+    current = current_wire.model_validate({"nested": {"inner": {"label": 1}}})
+
+    assert legacy.model_dump()["nested"]["inner"]["value"] == 1
+    assert current.model_dump()["nested"]["inner"]["label"] == 1
 
 
 def test_single_segment_tuple_metadata_keeps_tuple_path_semantics() -> None:

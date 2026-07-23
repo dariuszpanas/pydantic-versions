@@ -46,7 +46,11 @@ family: SchemaFamily[AppConfig] = SchemaFamily(
         SchemaVersion("1", patches=(patch,)),
         SchemaVersion("2"),
     ),
-    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
+    transitions=(
+        VersionTransition(
+            "1", "2", upgrade=upgrade_v1, downgrade=lambda d: d, downgrade_semantics="exact"
+        ),
+    ),
 )
 
 assert_type(family.compile(), SchemaFamily[AppConfig])

@@ -53,13 +53,28 @@ _PENDING_ATTR = "__pydantic_versions_pending__"
 class _VersionSpec:
     label: str
     patches: tuple[VersionPatch, ...] = ()
+    wire_model: type[BaseModel] | None = None
 
 
-def schema_version(version: str, *, patches: Sequence[VersionPatch] = ()):
-    return schema_versions((version,), patches=patches)
+def schema_version(
+    version: str,
+    *,
+    patches: Sequence[VersionPatch] = (),
+    wire_model: type[BaseModel] | None = None,
+):
+    return schema_versions(
+        (version,),
+        patches=patches,
+        wire_model=wire_model,
+    )
 
 
-def schema_versions(versions: Sequence[str], *, patches: Sequence[VersionPatch] = ()):
+def schema_versions(
+    versions: Sequence[str],
+    *,
+    patches: Sequence[VersionPatch] = (),
+    wire_model: type[BaseModel] | None = None,
+):
     version_order = _freeze_sequence(versions, parameter="schema_versions.versions")
     patch_order = _freeze_sequence(patches, parameter="schema_versions.patches")
     labels = tuple(
@@ -70,7 +85,10 @@ def schema_versions(versions: Sequence[str], *, patches: Sequence[VersionPatch] 
     def decorator[T: BaseModel](model_cls: type[T]) -> type[T]:
         _ensure_pydantic_v2_model(model_cls)
         pending: list[_VersionSpec] = list(model_cls.__dict__.get(_PENDING_ATTR, ()))
-        pending.extend(_VersionSpec(label=label, patches=patch_order) for label in labels)
+        pending.extend(
+            _VersionSpec(label=label, patches=patch_order, wire_model=wire_model)
+            for label in labels
+        )
         setattr(model_cls, _PENDING_ATTR, tuple(pending))
         return model_cls
 
@@ -111,7 +129,12 @@ def versioned_schema(
         _ensure_pydantic_v2_model(model_cls)
         pending = tuple(model_cls.__dict__.get(_PENDING_ATTR, ()))
         patches_by_label: dict[str, tuple[VersionPatch, ...]] = dict.fromkeys(labels, ())
+        wire_models_by_label: dict[str, type[BaseModel] | None] = dict.fromkeys(
+            labels,
+            None,
+        )
         declared_patch_labels: set[str] = set()
+        declared_wire_model_labels: set[str] = set()
         for spec in pending:
             if spec.label not in labels:
                 msg = f"Patch schema version {spec.label!r} is not in versions for {name!r}"
@@ -121,12 +144,26 @@ def versioned_schema(
                 raise DuplicateSchemaVersionError(msg)
             declared_patch_labels.add(spec.label)
             patches_by_label[spec.label] = spec.patches
+            if spec.wire_model is not None:
+                if spec.label in declared_wire_model_labels:
+                    msg = (
+                        f"Schema version {spec.label!r} has multiple wire-model declarations for "
+                        f"{name!r}"
+                    )
+                    raise DuplicateSchemaVersionError(msg)
+                declared_wire_model_labels.add(spec.label)
+                wire_models_by_label[spec.label] = spec.wire_model
 
         owner = metadata_owner
         if owner is None:
             owner = _infer_metadata_owner(model_cls, normalized_path)
         declarations = tuple(
-            SchemaVersion(label=label, patches=patches_by_label[label]) for label in labels
+            SchemaVersion(
+                label=label,
+                patches=patches_by_label[label],
+                wire_model=wire_models_by_label[label],
+            )
+            for label in labels
         )
         family = SchemaFamily(
             model=model_cls,

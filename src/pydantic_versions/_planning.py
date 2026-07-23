@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_versions._compiler import (
     _CompiledField,
+    _CompiledNestedFamily,
     _CompiledTransition,
     _CompiledVersion,
     _stable_digest,
@@ -14,6 +15,7 @@ from pydantic_versions.declarations import VersionPath
 from pydantic_versions.exceptions import SchemaCompilationError
 from pydantic_versions.inspection import (
     ConversionPlan,
+    NestedFamilyDescription,
     PlanStep,
     ProjectionDescription,
     SchemaInventory,
@@ -40,6 +42,7 @@ def _build_planning_catalog(
     family: SchemaFamily[Any],
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
+    nested: tuple[_CompiledNestedFamily, ...] = (),
 ) -> _PlanningCatalog:
     version_descriptions = tuple(_describe_version(version) for version in versions)
     transition_descriptions = tuple(_describe_transition(transition) for transition in transitions)
@@ -49,7 +52,9 @@ def _build_planning_catalog(
         current_version=family.current_version,
         versions=version_descriptions,
         transitions=transition_descriptions,
-        nested=(),
+        nested=tuple(
+            _describe_nested_family(nested_family=family_entry) for family_entry in nested
+        ),
         version_metadata=family.version_metadata,
     )
     validation_plans = tuple(
@@ -74,6 +79,16 @@ def _build_planning_catalog(
         inventory=inventory,
         validation_plans=validation_plans,
         render_plans=render_plans,
+    )
+
+
+def _describe_nested_family(
+    nested_family: _CompiledNestedFamily,
+) -> NestedFamilyDescription:
+    return NestedFamilyDescription(
+        schema_path=_schema_path(nested_family.path),
+        family=nested_family.family.name,
+        versions=nested_family.versions,
     )
 
 

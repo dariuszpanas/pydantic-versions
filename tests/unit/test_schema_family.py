@@ -464,10 +464,6 @@ def test_compatibility_declarations_reject_coercion_and_nonterminal_current() ->
             VersionTransition("1", "2", upgrade=_identity, downgrade_semantics="exact"),
             SchemaCompilationError,
         ),
-        (
-            VersionTransition("1", "2", downgrade=_identity),
-            SchemaCompilationError,
-        ),
     ],
 )
 def test_transition_topology_is_validated(
@@ -484,6 +480,28 @@ def test_transition_topology_is_validated(
             versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
             transitions=(transition,),
         )
+
+
+def test_downgrade_only_transitions_are_accepted_when_declared_explicitly() -> None:
+    class DowngradeConfig(BaseModel):
+        value: int = 1
+
+    family = SchemaFamily(
+        model=DowngradeConfig,
+        name="downgrade_only",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=_identity,
+                downgrade_semantics="lossy",
+            ),
+        ),
+    )
+
+    assert family.describe().transitions[0].downgrade == "custom"
+    assert family.plan_render("1").semantics == "lossy"
 
 
 def test_duplicate_transition_edge_is_rejected() -> None:
@@ -540,12 +558,13 @@ def test_future_declarations_are_rejected_instead_of_ignored() -> None:
         ),
     )
 
-    with pytest.raises(SchemaCompilationError, match="Explicit wire models"):
-        wire_family.compile()
-    with pytest.raises(SchemaCompilationError, match="nested family"):
+    wire_family.compile()
+    with pytest.raises(SchemaCompilationError, match="same owning model"):
         nested_family.compile()
-    with pytest.raises(SchemaCompilationError, match="Downgrade execution"):
-        downgrade_family.compile()
+    downgrade_family.compile()
+
+    assert wire_family.describe().versions[0].wire_model == "explicit"
+    assert wire_family.model_for("1") is HistoricalConfig
 
 
 def test_current_and_mutually_exclusive_wire_declarations_are_rejected() -> None:

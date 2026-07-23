@@ -1,0 +1,55 @@
+name: Commit Messages
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, synchronize, reopened, edited, converted_to_draft]
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-commits:
+    name: Commit Messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.repository.default_branch || github.sha }}
+
+      - name: Validate PR title and commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request_target" ]; then
+            pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
+            git fetch --no-tags --force origin \
+              "refs/pull/${PR_NUMBER}/head:${pr_ref}"
+
+            fetched_head="$(git rev-parse "$pr_ref")"
+            if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then
+              echo "Fetched PR head does not match the event head SHA." >&2
+              exit 1
+            fi
+            git cat-file -e "${PR_BASE_SHA}^{commit}"
+
+            python scripts/check_conventional_commits.py \
+              --title "$PR_TITLE" \
+              --range "${PR_BASE_SHA}..${pr_ref}"
+          else
+            if git cat-file -e "${PUSH_BEFORE_SHA}^{commit}" 2>/dev/null; then
+              python scripts/check_conventional_commits.py \
+                --range "${PUSH_BEFORE_SHA}..${PUSH_SHA}"
+            else
+              python scripts/check_conventional_commits.py \
+                --commit "$(git log -1 --pretty=%B "$PUSH_SHA")"
+            fi
+          fi
