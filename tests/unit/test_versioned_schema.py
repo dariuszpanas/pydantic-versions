@@ -4,7 +4,7 @@ import warnings
 from typing import Any, cast
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_serializer
 
 from pydantic_versions import (
     DuplicateSchemaVersionError,
@@ -12,6 +12,7 @@ from pydantic_versions import (
     MissingSchemaVersionError,
     SchemaVersionError,
     UnknownSchemaVersionError,
+    UnsupportedWireModelError,
     dump_versioned,
     field_default,
     field_removed,
@@ -118,15 +119,13 @@ def test_validate_versioned_uses_embedded_version_and_applies_migrations() -> No
     assert result.migrations_applied == (("1", "2"),)
 
 
-def test_validate_versioned_uses_explicit_version_over_embedded_version() -> None:
-    result = validate_versioned(
-        AppConfig,
-        {"schema_version": "3", "attempts": 1},
-        version="1",
-    )
-
-    assert result.source_version == "1"
-    assert result.current_model.timeout == 5.0
+def test_validate_versioned_does_not_overwrite_a_conflicting_embedded_version() -> None:
+    with pytest.raises(ValidationError):
+        validate_versioned(
+            AppConfig,
+            {"schema_version": "3", "attempts": 1},
+            version="1",
+        )
 
 
 def test_validate_versioned_uses_missing_version_fallback() -> None:
@@ -221,7 +220,10 @@ def test_nested_version_field_can_live_outside_model_payload() -> None:
     )
 
     assert result.source_version == "v1"
-    assert result.source_model.model_dump() == {"timeout": 3.5}
+    assert result.source_model.model_dump() == {
+        "timeout": 3.5,
+        "metadata": {"schema_version": "v1"},
+    }
     assert result.current_model == MetadataConfig(timeout=3.5)
 
 
@@ -229,7 +231,10 @@ def test_nested_version_field_can_be_supplied_explicitly_when_missing_from_paylo
     result = validate_versioned(MetadataConfig, {"timeout": 4.5}, version="v1")
 
     assert result.source_version == "v1"
-    assert result.source_model.model_dump() == {"timeout": 4.5}
+    assert result.source_model.model_dump() == {
+        "timeout": 4.5,
+        "metadata": {"schema_version": "v1"},
+    }
 
 
 def test_nested_version_field_is_rendered_and_removed_on_request() -> None:
@@ -499,5 +504,193 @@ def test_nested_default_instances_use_matching_version_models() -> None:
 
     assert service_v1().model_dump() == {
         "database": {"host": "localhost", "port": 5432, "schema_version": "1"},
+        "schema_version": "1",
+    }
+
+
+def test_nested_patched_instance_and_factory_defaults_use_the_historical_child() -> None:
+    @versioned_schema(
+        name="patched_default_child",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    @schema_version("1", patches=[field_default("port", 5432)])
+    class PatchedDefaultChild(BaseModel):
+        port: int = 6432
+
+    @versioned_schema(
+        name="patched_default_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    @schema_version(
+        "1",
+        patches=[
+            field_default("instance_child", PatchedDefaultChild(port=6432)),
+            field_default("factory_child", default_factory=PatchedDefaultChild),
+        ],
+    )
+    class PatchedDefaultParent(BaseModel):
+        instance_child: PatchedDefaultChild = Field(default_factory=PatchedDefaultChild)
+        factory_child: PatchedDefaultChild = Field(default_factory=PatchedDefaultChild)
+
+    parent_v1 = model_for_version(PatchedDefaultParent, "1")()
+    typed_parent_v1 = cast(Any, parent_v1)
+
+    assert not isinstance(typed_parent_v1.instance_child, PatchedDefaultChild)
+    assert not isinstance(typed_parent_v1.factory_child, PatchedDefaultChild)
+    assert parent_v1.model_dump() == {
+        "instance_child": {"port": 6432, "schema_version": "1"},
+        "factory_child": {"port": 5432, "schema_version": "1"},
+        "schema_version": "1",
+    }
+
+
+def test_opaque_nested_child_factory_is_rejected_without_execution() -> None:
+    factory_events: list[str] = []
+
+    @versioned_schema(
+        name="opaque_factory_child",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class OpaqueFactoryChild(BaseModel):
+        value: int = 1
+
+    def make_child() -> OpaqueFactoryChild:
+        factory_events.append("factory")
+        return OpaqueFactoryChild()
+
+    @versioned_schema(
+        name="opaque_factory_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class OpaqueFactoryParent(BaseModel):
+        child: OpaqueFactoryChild = Field(default_factory=make_child)
+
+    with pytest.raises(UnsupportedWireModelError, match="opaque factory"):
+        model_for_version(OpaqueFactoryParent, "1")
+
+    assert factory_events == []
+
+
+def test_nested_default_projection_does_not_run_current_child_serializers() -> None:
+    serialization_events: list[int] = []
+
+    @versioned_schema(
+        name="serializer_default_child",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class SerializerDefaultChild(BaseModel):
+        value: int = 1
+
+        @field_serializer("value")
+        def serialize_value(self, value: int) -> int:
+            serialization_events.append(value)
+            return value
+
+    child_default = SerializerDefaultChild()
+
+    @versioned_schema(
+        name="serializer_default_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class SerializerDefaultParent(BaseModel):
+        child: SerializerDefaultChild = child_default
+
+    baseline = list(serialization_events)
+    parent_v1 = model_for_version(SerializerDefaultParent, "1")
+
+    assert serialization_events == baseline
+    assert parent_v1().model_dump() == {
+        "child": {"value": 1, "schema_version": "1"},
+        "schema_version": "1",
+    }
+    assert serialization_events == baseline
+
+
+def test_nested_model_owned_metadata_default_is_normalized_to_the_target_version() -> None:
+    @versioned_schema(
+        name="model_owned_default_child",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class ModelOwnedDefaultChild(BaseModel):
+        schema_version: str = "2"
+        value: int = 1
+
+    @versioned_schema(
+        name="model_owned_default_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class ModelOwnedDefaultParent(BaseModel):
+        child: ModelOwnedDefaultChild = ModelOwnedDefaultChild(schema_version="2")
+
+    parent_v1 = model_for_version(ModelOwnedDefaultParent, "1")()
+
+    assert parent_v1.model_dump() == {
+        "child": {"schema_version": "1", "value": 1},
+        "schema_version": "1",
+    }
+
+
+def test_nested_family_metadata_defaults_are_normalized_without_user_factories() -> None:
+    @versioned_schema(
+        name="family_default_child",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class FamilyDefaultChild(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        value: int = 1
+
+    @versioned_schema(
+        name="family_default_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class FamilyDefaultParent(BaseModel):
+        child: FamilyDefaultChild = FamilyDefaultChild.model_validate({"schema_version": "2"})
+
+    direct_v1 = model_for_version(FamilyDefaultParent, "1")()
+    assert direct_v1.model_dump()["child"]["schema_version"] == "1"
+
+    @versioned_schema(
+        name="nested_metadata_default_child",
+        versions=["1", "2"],
+        current="2",
+        version_field=("meta", "version"),
+        missing_version="1",
+    )
+    class NestedMetadataDefaultChild(BaseModel):
+        value: int = 1
+
+    @versioned_schema(
+        name="nested_metadata_default_parent",
+        versions=["1", "2"],
+        current="2",
+        missing_version="1",
+    )
+    class NestedMetadataDefaultParent(BaseModel):
+        child: NestedMetadataDefaultChild = NestedMetadataDefaultChild()
+
+    nested_v1 = model_for_version(NestedMetadataDefaultParent, "1")()
+    assert nested_v1.model_dump() == {
+        "child": {"value": 1, "meta": {"version": "1"}},
         "schema_version": "1",
     }

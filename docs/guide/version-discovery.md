@@ -9,12 +9,13 @@
 
 ## Explicit version
 
-An explicit version wins over anything in the payload:
+An explicit version selects the expected wire contract when the version is
+known outside the payload:
 
 ```python
 result = validate_versioned(
     AppConfig,
-    {"schema_version": "2"},
+    {"timeout": 5.0},
     version="1",
 )
 
@@ -22,7 +23,9 @@ assert result.source_version == "1"
 ```
 
 Use this when the version is known from a filename, database column, API route,
-or another source outside the config body.
+or another source outside the config body. If the payload also carries version
+metadata, that discriminator must match the selected contract; the package does
+not overwrite a conflicting value.
 
 ## Top-level version fields
 
@@ -76,9 +79,10 @@ metadata:
 timeout: 5
 ```
 
-The metadata wrapper does not have to be part of the Pydantic model. The version
-field is removed before source-model validation, so strict models can still
-reject unrelated extra fields.
+The metadata wrapper does not have to be part of the authoritative application
+model. The generated wire model includes and validates the complete wrapper,
+then family-owned metadata is removed only from the private transition value.
+Strict application models can therefore still reject unrelated extra fields.
 
 ## Legacy unversioned configs
 

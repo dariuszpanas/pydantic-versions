@@ -15,6 +15,7 @@ nav = [
   { "User Guide" = [
     { "Getting Started" = "guide/getting-started.md" },
     { "Concepts" = "guide/concepts.md" },
+    { "Generated Wire Contracts" = "guide/generated-wire-contracts.md" },
     { "External Schema Families" = "guide/external-families.md" },
     { "Complex Config Example" = "guide/complex-config-example.md" },
     { "Django Ninja" = "guide/django-ninja.md" },

@@ -250,9 +250,10 @@ class PipelineDocument(BaseModel):
     spec: PipelineConfig
 ```
 
-For nested paths, the metadata wrapper does not have to be part of the Pydantic
-model. The version field is read before validation and removed before the source
-model is validated.
+For nested paths, the metadata wrapper does not have to be part of the
+authoritative application model. The generated wire model validates the
+complete wrapper, and family-owned metadata is removed only from the private
+transition value before final application-model validation.
 
 ## Rendering Older Configs
 

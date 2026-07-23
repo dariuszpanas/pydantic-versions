@@ -13,6 +13,7 @@ The compatibility tests cover both schema-level behavior and a minimal real
 
 - generated historical schemas work as request body types;
 - current generated schemas work as request body types;
+- generated historical schemas work as response body types;
 - route handlers can upgrade historical payloads into the current schema;
 - generated historical models appear in the OpenAPI schema with historical field names.
 - `ModelSchema` classes preserve Django-derived field metadata such as string length constraints.
@@ -59,10 +60,10 @@ assert result.current_model == TaskPayload(
 )
 ```
 
-## Generated Historical Schemas
+## Generated Wire Schemas
 
-`model_for_version()` returns a generated Pydantic model that Django Ninja can
-inspect for JSON Schema/OpenAPI generation:
+`model_for_version()` returns an object-shaped Pydantic wire contract that
+Django Ninja can inspect for JSON Schema/OpenAPI generation:
 
 ```python
 from pydantic_versions import model_for_version
@@ -74,6 +75,13 @@ schema = TaskPayloadV1.model_json_schema()
 assert "is_completed" in schema["properties"]
 assert "completed" not in schema["properties"]
 ```
+
+The generated model preserves supported fields, constraints, defaults, and
+aliases, but it is not a behavioral subclass of `TaskPayload`. Model validators,
+methods, computed fields, and private attributes are not copied. Family
+validation still finishes with the authoritative current `TaskPayload` model.
+See [generated wire contracts](generated-wire-contracts.md) for the supported
+boundary.
 
 This supports explicit route-level schemas:
 
@@ -136,7 +144,9 @@ class TaskPayload(ModelSchema):
 
 The generated v1 schema exposes `completed`, keeps the historical timeout
 default, and preserves the `maxLength` constraint derived from the Django model's
-`CharField`.
+`CharField`. A model that uses an unsupported automatic-projection feature
+raises `UnsupportedWireModelError` during family compilation instead of
+producing a misleading OpenAPI schema.
 
 ## What To Test In Applications
 

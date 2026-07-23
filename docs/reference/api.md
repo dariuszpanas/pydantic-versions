@@ -30,7 +30,8 @@ declaration sequence and has no default-selection side effect.
 - `describe()`: return the frozen compiled `SchemaInventory`.
 - `plan_validation(source_version)`: return the cached source-to-current `ConversionPlan`.
 - `plan_render(target_version)`: return the cached current-to-target `ConversionPlan`, or raise `IrreversibleTransitionError` if no complete reverse route exists.
-- `model_for(version)`: return the family-local generated wire model.
+- `model_for(version)`: return the family-local, object-shaped generated wire
+  contract for that declared version.
 - `validate(data, *, version=None)`: validate historical input and upgrade it to the current model.
 - `defaults_for(*, version, include_version=True, **dump_kwargs)`: render target defaults.
 - `dump(*, version, data=None, include_version=True, **dump_kwargs)`: return a target-version dictionary.
@@ -85,6 +86,41 @@ class VersionMetadata:
 Describes the version-discriminator path and its ownership. Full collision and
 alias semantics are defined by the 0.2 architecture decision and implemented by
 the later top-level conversion work.
+
+### Generated wire models
+
+`SchemaFamily.model_for()` and `model_for_version()` return generated Pydantic
+v2 wire contracts, not behavioral subclasses of the current model. Generated
+current and historical projections are object-shaped and preserve supported
+field annotations, constraints, defaults, factories, aliases, declarative model
+configuration, and static non-structural model schema metadata. Model metadata
+cannot replace generated object properties, requirements, or composition.
+
+They do not copy model or field validators, field serializers, computed fields,
+private attributes, methods, `model_post_init`, or lifecycle-only configuration.
+The authoritative current model remains responsible for final application
+validation.
+
+When version metadata is family-owned, the complete generated document adapter
+has an exact `Literal[label]` discriminator for every version, including
+current, with default `label`. With a supported validation-capable direct
+model-owned field or alias, every generated document projection, including
+current, declares its metadata field with exact annotation `Literal[label]` and
+default `label`. Output-only or disabled validation locations are rejected.
+That location must remain invariant; nested model-owned paths are rejected
+until the top-level conversion compiler can resolve them safely. No
+discriminator is added when `version_metadata=None`.
+
+Automatic projection raises `UnsupportedWireModelError` for a `RootModel`,
+unresolved generic, model-level serializer, overridden model core/JSON Schema
+hook, application-defined annotation hook, behavioral dataclass, callable or
+non-JSON schema mutation, structural model schema override, validated-data
+factory, legacy `json_encoders`, arbitrary-type escape hatch, serialization
+exclusion, or non-object validation or serialization shape. Pydantic v1 models
+instead fail registration with `SchemaVersionError`.
+See
+[generated wire contracts](../guide/generated-wire-contracts.md) for the full
+supported preserve, omit, and reject boundary.
 
 ### Reserved nested declarations
 
@@ -147,6 +183,9 @@ class SchemaInventory:
 `SchemaFamily.describe()` compiles the family if necessary and returns its
 cached inventory. Versions and transitions retain canonical declared order, and
 every adjacent edge is present even when its upgrade is an implicit identity.
+The inventory value `wire_model="current"` identifies the current version's
+semantic role; `model_for(current_version)` still returns a generated wire
+projection rather than the authoritative application class.
 Projection descriptions reveal whether a historical version changes a default,
 removes a field, or renames it, but never reveal a default value or factory.
 
@@ -277,8 +316,8 @@ during upgrade validation. Returns `FieldRenamed`.
 
 `model_for_version(subject, version)`
 
-Returns the generated Pydantic model for a declared version. `subject` may be a
-family or a model with an explicit default family.
+Returns the generated object-shaped Pydantic wire contract for a declared
+version. `subject` may be a family or a model with an explicit default family.
 
 `validate_versioned(subject, data, *, version=None)`
 
@@ -318,6 +357,7 @@ class VersionedValidation[T: BaseModel]:
 
 - `SchemaVersionError`
   - `SchemaCompilationError`
+    - `UnsupportedWireModelError`
   - `SchemaFamilySelectionError`
   - `IrreversibleTransitionError`
   - `MissingSchemaVersionError`
@@ -325,3 +365,10 @@ class VersionedValidation[T: BaseModel]:
   - `DuplicateSchemaVersionError`
   - `InvalidMigrationError`
   - `VersionedValidationError`
+
+`UnsupportedWireModelError` reports that automatic projection cannot safely
+produce the required object-shaped Pydantic v2 wire contract. It is raised
+during compilation and includes safe family, model, and unsupported-reason
+context, plus the version for projection-specific failures. Direct validation
+of a successfully generated wire model still raises Pydantic's native
+`ValidationError`.

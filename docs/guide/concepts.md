@@ -32,11 +32,13 @@ result = APP_CONFIG_SCHEMA.validate({"schema_version": "2"})
 config = result.current_model
 ```
 
-## Historical schemas
+## Generated wire schemas
 
-Historical schemas are independently derived from the current model with
-patches. This keeps simple default-only versions compact while still allowing
-validation against the older shape:
+Current and historical wire schemas are object-shaped Pydantic models generated
+from the current model's supported declarative field contract. They are not
+behavioral subclasses of the current model. Historical patches keep
+default-only versions compact while still allowing validation against an older
+shape:
 
 ```python
 from pydantic_versions import SchemaFamily, SchemaVersion, field_default
@@ -55,6 +57,14 @@ APP_CONFIG_SCHEMA = SchemaFamily(
     ),
 )
 ```
+
+Generated models preserve supported field constraints, defaults, factories,
+aliases, and declarative model configuration. Application validators, methods,
+computed fields, private attributes, and lifecycle configuration are not copied.
+The authoritative current model still performs final application validation.
+
+See [generated wire contracts](generated-wire-contracts.md) for the supported
+preserve, omit, and reject boundary.
 
 For a larger nested example that shows why this matters in practice, see the
 [complex config example](complex-config-example.md).
