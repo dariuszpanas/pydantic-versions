@@ -122,6 +122,22 @@ See
 [generated wire contracts](../guide/generated-wire-contracts.md) for the full
 supported preserve, omit, and reject boundary.
 
+### 0.2.0 prerelease behavior contract
+
+The generated plan inventory and plans are the preferred compatibility artifacts:
+
+- validation and rendering compatibility helpers are required to use a declared
+  `SchemaFamily` rather than hidden model-first heuristics;
+- downgrade declaration of a route that cannot be executed as a reverse plan still
+  compiles in declaration-time validation, while `plan_render` rejects the
+  operation with `IrreversibleTransitionError` and callers must remain
+  conservative;
+- unsafe declarations fail at registration and keep payloads unchanged by never
+  running custom transitions before full validation;
+- execution errors from transitions are represented as wrapped, contextual
+  operation errors and do not persist payload values in diagnostics or public
+  traces.
+
 ### Reserved nested declarations
 
 `NestedFamily`, `MatchingLabels`, and `matching_labels()` are exported as frozen
