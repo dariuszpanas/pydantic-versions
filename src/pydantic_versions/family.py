@@ -139,10 +139,10 @@ class SchemaFamily[T: BaseModel]:
             self._compiling = True
             try:
                 self._validate_declarations()
-                _validate_compilation_boundary(
+                nested = _validate_compilation_boundary(
                     name=self.name,
-                    versions=self.versions,
-                    transitions=self.transitions,
+                    model=self.model,
+                    labels=tuple(version.label for version in self.versions),
                     nested=self.nested,
                 )
                 _validate_automatic_wire_model(self)
@@ -158,7 +158,12 @@ class SchemaFamily[T: BaseModel]:
                 compiled_versions = tuple(
                     _CompiledVersion(
                         projection=projection,
-                        model=_build_model_for_projection(self, projection),
+                        model=_build_model_for_projection(
+                            self,
+                            projection,
+                            declaration.wire_model,
+                            nested=nested,
+                        ),
                         wire_model_kind=(
                             "current"
                             if index == len(projections) - 1
@@ -187,6 +192,7 @@ class SchemaFamily[T: BaseModel]:
                     self,
                     compiled_versions,
                     compiled_transitions,
+                    nested,
                 )
                 self._compiled = _CompiledFamily(
                     model=self.model,
@@ -196,6 +202,7 @@ class SchemaFamily[T: BaseModel]:
                     version_metadata=self.version_metadata,
                     missing_version=self.missing_version,
                     catalog=catalog,
+                    nested=nested,
                 )
             finally:
                 self._compiling = False

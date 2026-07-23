@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from typing import Any, cast
 
 import pytest
@@ -17,14 +18,20 @@ from pydantic import (
 from pydantic_versions import (
     DuplicateSchemaVersionError,
     InvalidMigrationError,
+    IrreversibleTransitionError,
     MissingSchemaVersionError,
+    NestedFamily,
+    SchemaFamily,
+    SchemaVersion,
     SchemaVersionError,
     UnknownSchemaVersionError,
     UnsupportedWireModelError,
+    VersionTransition,
     dump_versioned,
     field_default,
     field_removed,
     field_renamed,
+    matching_labels,
     migration,
     model_for_version,
     schema_version,
@@ -60,6 +67,10 @@ class AppConfig(BaseModel):
 def migrate_v1_to_v2(data: dict) -> dict:
     data["new_feature"] = data["retries"] > 1
     return data
+
+
+def _to_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(data)
 
 
 class PlainModel(BaseModel):
@@ -176,33 +187,177 @@ def test_validate_versioned_normalizes_alias_paths_in_upgrade_output() -> None:
 
 
 def test_dump_versioned_renders_defaults_for_requested_schema() -> None:
-    assert dump_versioned(AppConfig, version="1") == {
-        "timeout": 5.0,
-        "attempts": 3,
-        "schema_version": "1",
-    }
+    with pytest.raises(IrreversibleTransitionError):
+        dump_versioned(AppConfig, version="1")
+
+
+def test_dump_versioned_executes_explicit_downgrades_in_reverse_edge_order() -> None:
+    order: list[str] = []
+
+    def downgrade_to_one(data: dict[str, Any]) -> dict[str, Any]:
+        order.append("3->2")
+        return {"value": data["value"], "marker": data["marker"]}
+
+    def downgrade_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        order.append("2->1")
+        return {"value": data["value"] * 2, "marker": data["marker"]}
+
+    @versioned_schema(
+        name="downgrade_chain_render",
+        versions=["1", "2", "3"],
+        current="3",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=downgrade_to_one,
+                downgrade_semantics="lossy",
+            ),
+            VersionTransition(
+                "2",
+                "3",
+                downgrade=downgrade_to_two,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    @schema_version("1", patches=[field_renamed("value", "legacy_value")])
+    class DowngradeChainRender(BaseModel):
+        value: int = 10
+        marker: int = 4
+
+    result = dump_versioned(
+        DowngradeChainRender,
+        version="1",
+        data=DowngradeChainRender(value=2, marker=5),
+    )
+
+    assert result["legacy_value"] == 4
+    assert result["marker"] == 5
+    assert result["schema_version"] == "1"
+    assert order == ["2->1", "3->2"]
+
+
+def test_dump_versioned_rejects_irreversible_render_routes() -> None:
+    @versioned_schema(
+        name="irreversible_chain_render",
+        versions=["1", "2"],
+        current="2",
+    )
+    class IrreversibleRenderConfig(BaseModel):
+        value: int
+
+    @migration(IrreversibleRenderConfig, "1", "2")
+    def migrate_value_up(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": data["value"]}
+
+    with pytest.raises(IrreversibleTransitionError):
+        dump_versioned(
+            IrreversibleRenderConfig,
+            version="1",
+            data=IrreversibleRenderConfig(value=1),
+        )
+
+
+def test_explicit_wire_model_enables_typeful_historical_rendering_and_validation() -> None:
+    class HistoricalTimeoutConfig(BaseModel):
+        timeout: str
+
+    def upgrade_timeout(data: dict[str, Any]) -> dict[str, Any]:
+        return {"timeout": float(data["timeout"])}
+
+    def downgrade_timeout(data: dict[str, Any]) -> dict[str, Any]:
+        return {"timeout": str(data["timeout"])}
+
+    @versioned_schema(
+        name="historical_wire_type_change",
+        versions=("1", "2"),
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade_timeout,
+                downgrade=downgrade_timeout,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    @schema_version("1", wire_model=HistoricalTimeoutConfig)
+    class HistoricalTypeConfig(BaseModel):
+        timeout: float = 2.5
+
+    validated = validate_versioned(
+        HistoricalTypeConfig,
+        {"schema_version": "1", "timeout": "12.75"},
+    )
+    assert validated.source_model.model_dump()["timeout"] == "12.75"
+    assert validated.current_model.timeout == 12.75
+
+    rendered = dump_versioned(
+        HistoricalTypeConfig,
+        version="1",
+        data=HistoricalTypeConfig(timeout=9.5),
+    )
+
+    assert rendered == {"timeout": "9.5", "schema_version": "1"}
+    assert model_for_version(HistoricalTypeConfig, "1") is HistoricalTimeoutConfig
 
 
 def test_dump_versioned_accepts_current_model_data_for_historical_schema() -> None:
+    @versioned_schema(
+        name="historical_dump_accepts_current_model_data",
+        versions=["1", "2"],
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=_to_dict,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    @schema_version("1")
+    class ReversibleHistorical(BaseModel):
+        value: int = 10
+
     dumped = dump_versioned(
-        AppConfig,
+        ReversibleHistorical,
         version="1",
-        data=AppConfig(timeout=7.5, retries=6, new_feature=True),
+        data=ReversibleHistorical(value=7),
         include_version=False,
     )
 
-    assert dumped == {"timeout": 7.5, "attempts": 6}
+    assert dumped == {"value": 7}
 
 
 def test_dump_versioned_accepts_mapping_data_for_historical_schema() -> None:
+    @versioned_schema(
+        name="historical_dump_accepts_mapping_data",
+        versions=["1", "2"],
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=_to_dict,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    @schema_version("1")
+    class ReversibleHistorical(BaseModel):
+        value: int = 10
+
     dumped = dump_versioned(
-        AppConfig,
+        ReversibleHistorical,
         version="1",
-        data={"timeout": 6.5, "retries": 5, "new_feature": True},
+        data={"value": 6},
         include_version=False,
     )
 
-    assert dumped == {"timeout": 6.5, "attempts": 5}
+    assert dumped == {"value": 6}
 
 
 def test_dump_versioned_normalizes_alias_paths_and_choices_in_input() -> None:
@@ -226,9 +381,26 @@ def test_dump_versioned_normalizes_alias_paths_and_choices_in_input() -> None:
 
 
 def test_dump_versioned_rejects_non_mapping_data() -> None:
-    with pytest.raises(ValidationError):
+    @versioned_schema(
+        name="historical_dump_rejects_non_mapping",
+        versions=["1", "2"],
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=_to_dict,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    @schema_version("1")
+    class ReversibleHistorical(BaseModel):
+        value: int = 10
+
+    with pytest.raises((TypeError, ValueError)):
         dump_versioned(
-            AppConfig,
+            ReversibleHistorical,
             version="1",
             data=cast(Any, ["not", "a", "mapping"]),
         )
@@ -747,3 +919,296 @@ def test_nested_family_metadata_defaults_are_normalized_without_user_factories()
         "child": {"value": 1, "meta": {"version": "1"}},
         "schema_version": "1",
     }
+
+
+def test_nested_runtime_migrations_execute_before_parent_migrations_for_validation() -> None:
+    events: list[str] = []
+
+    def child_migrate_up_from_one_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("child 1->2 0")
+        return {"value": data["value"] + 1}
+
+    def child_migrate_up_from_two_to_three(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("child 2->3 0")
+        return {"value": data["value"] + 10}
+
+    def parent_migrate_up_from_one_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("parent 1->2")
+        return {**data, "value": data["value"] + 100}
+
+    def parent_migrate_up_from_two_to_three(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("parent 2->3")
+        return {**data, "value": data["value"] + 1000}
+
+    class NestedChild(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=NestedChild,
+        name="nested_issue11_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(
+            VersionTransition("1", "2", upgrade=child_migrate_up_from_one_to_two),
+            VersionTransition("2", "3", upgrade=child_migrate_up_from_two_to_three),
+        ),
+        missing_version="1",
+    )
+
+    class NestedParent(BaseModel):
+        value: int
+        children: list[NestedChild]
+
+    parent_family = SchemaFamily(
+        model=NestedParent,
+        name="nested_issue11_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(
+            VersionTransition("1", "2", upgrade=parent_migrate_up_from_one_to_two),
+            VersionTransition("2", "3", upgrade=parent_migrate_up_from_two_to_three),
+        ),
+        nested=(NestedFamily("children", child_family, matching_labels()),),
+        missing_version="1",
+    )
+
+    result = validate_versioned(
+        parent_family,
+        {"schema_version": "1", "value": 1, "children": [{"value": 1}, {"value": 2}]},
+    )
+
+    assert result.current_model.value == 1101
+    assert [child.value for child in result.current_model.children] == [12, 13]
+    assert events == [
+        "child 1->2 0",
+        "child 1->2 0",
+        "parent 1->2",
+        "child 2->3 0",
+        "child 2->3 0",
+        "parent 2->3",
+    ]
+
+
+def test_nested_runtime_migrations_execute_before_parent_migrations_for_rendering() -> None:
+    events: list[str] = []
+
+    def child_migrate_up_from_one_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": data["value"] + 1}
+
+    def child_migrate_up_from_two_to_three(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": data["value"] + 10}
+
+    def parent_migrate_up_from_one_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, "value": data["value"] + 100}
+
+    def parent_migrate_up_from_two_to_three(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, "value": data["value"] + 1000}
+
+    def child_migrate_down_from_two_to_one(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("child 2->1 0")
+        return {"value": data["value"] - 1}
+
+    def child_migrate_down_from_three_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("child 3->2 0")
+        return {"value": data["value"] - 10}
+
+    def parent_migrate_down_from_two_to_one(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("parent 2->1")
+        return {**data, "value": data["value"] - 100}
+
+    def parent_migrate_down_from_three_to_two(data: dict[str, Any]) -> dict[str, Any]:
+        events.append("parent 3->2")
+        return {**data, "value": data["value"] - 1000}
+
+    class NestedChild(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=NestedChild,
+        name="nested_issue11_child_downgrade",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=child_migrate_up_from_one_to_two,
+                downgrade=child_migrate_down_from_two_to_one,
+                downgrade_semantics="exact",
+            ),
+            VersionTransition(
+                "2",
+                "3",
+                upgrade=child_migrate_up_from_two_to_three,
+                downgrade=child_migrate_down_from_three_to_two,
+                downgrade_semantics="exact",
+            ),
+        ),
+        missing_version="1",
+    )
+
+    class NestedParent(BaseModel):
+        value: int
+        children: list[NestedChild]
+
+    parent_family = SchemaFamily(
+        model=NestedParent,
+        name="nested_issue11_parent_downgrade",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=parent_migrate_up_from_one_to_two,
+                downgrade=parent_migrate_down_from_two_to_one,
+                downgrade_semantics="exact",
+            ),
+            VersionTransition(
+                "2",
+                "3",
+                upgrade=parent_migrate_up_from_two_to_three,
+                downgrade=parent_migrate_down_from_three_to_two,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily("children", child_family, matching_labels()),),
+        missing_version="1",
+    )
+    current_payload = parent_family.model_for("3").model_validate(
+        {"value": 111, "children": [{"value": 12}, {"value": 13}]},
+    )
+    rendered = dump_versioned(cast(Any, parent_family), version="1", data=current_payload)
+
+    assert rendered == {
+        "value": -989,
+        "children": [{"value": 1}, {"value": 2}],
+        "schema_version": "1",
+    }
+    assert events == [
+        "child 3->2 0",
+        "child 3->2 0",
+        "parent 3->2",
+        "child 2->1 0",
+        "child 2->1 0",
+        "parent 2->1",
+    ]
+
+
+def test_nested_runtime_handles_set_tuple_and_frozenset_payloads() -> None:
+    def child_migrate_to_current(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": data["value"] + 1}
+
+    def child_migrate_to_historical(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": data["value"] - 1}
+
+    class NestedCollectionChild(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=NestedCollectionChild,
+        name="nested_collection_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=child_migrate_to_current,
+                downgrade=child_migrate_to_historical,
+                downgrade_semantics="exact",
+            ),
+        ),
+        missing_version="1",
+    )
+
+    class NestedCollectionParent(BaseModel):
+        values: set[NestedCollectionChild]
+        tuple_values: tuple[NestedCollectionChild, ...]
+        frozenset_values: frozenset[NestedCollectionChild]
+        value: int = 2
+
+    parent_family = SchemaFamily(
+        model=NestedCollectionParent,
+        name="nested_collection_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=lambda data: {**data, "value": data["value"] + 10},
+                downgrade=lambda data: {**data, "value": data["value"] - 10},
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(
+            NestedFamily("values", child_family, matching_labels()),
+            NestedFamily("tuple_values", child_family, matching_labels()),
+            NestedFamily("frozenset_values", child_family, matching_labels()),
+        ),
+        missing_version="1",
+    )
+
+    current_payload = parent_family.model_for("2").model_validate(
+        {
+            "schema_version": "2",
+            "values": [
+                {"schema_version": "2", "value": 2},
+                {"schema_version": "2", "value": 3},
+            ],
+            "tuple_values": [
+                {"schema_version": "2", "value": 4},
+                {"schema_version": "2", "value": 5},
+            ],
+            "frozenset_values": [
+                {"schema_version": "2", "value": 6},
+            ],
+            "value": 20,
+        },
+    )
+
+    rendered = dump_versioned(cast(Any, parent_family), version="1", data=current_payload)
+
+    assert rendered["value"] == 10
+    assert len(rendered["values"]) == 2
+    assert len(rendered["tuple_values"]) == 2
+    assert len(rendered["frozenset_values"]) == 1
+    assert all(item["schema_version"] == "1" for item in rendered["values"])
+    assert all(item["schema_version"] == "1" for item in rendered["tuple_values"])
+    assert all(item["schema_version"] == "1" for item in rendered["frozenset_values"])
+
+
+def test_nested_runtime_set_conversion_preserves_collection_membership_or_raises() -> None:
+    def child_migrate_down(data: dict[str, Any]) -> dict[str, Any]:
+        return {"value": 1}
+
+    def parent_migrate_down(data: dict[str, Any]) -> dict[str, Any]:
+        return data
+
+    class DuplicateNestedChild(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=DuplicateNestedChild,
+        name="nested_set_collision_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition("1", "2", downgrade=child_migrate_down, downgrade_semantics="exact"),
+        ),
+        missing_version="1",
+    )
+
+    class DuplicateNestedParent(BaseModel):
+        items: set[DuplicateNestedChild]
+
+    parent_family = SchemaFamily(
+        model=DuplicateNestedParent,
+        name="nested_set_collision_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition("1", "2", downgrade=parent_migrate_down, downgrade_semantics="exact"),
+        ),
+        nested=(NestedFamily("items", child_family, matching_labels()),),
+        missing_version="1",
+    )
+
+    current_payload = parent_family.model_for("2").model_validate(
+        {"schema_version": "2", "items": [{"value": 3}, {"value": 4}]},
+    )
+    with pytest.raises(InvalidMigrationError, match="cannot preserve set cardinality"):
+        dump_versioned(cast(Any, parent_family), version="1", data=current_payload)

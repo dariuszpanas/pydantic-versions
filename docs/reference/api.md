@@ -51,9 +51,8 @@ class SchemaVersion:
 ```
 
 Labels are exact non-empty strings. The final label is current and cannot carry
-historical patches or an explicit wire model. `wire_model` is reserved by the
-0.2 contract; the current foundation rejects non-empty use until explicit
-historical-model support lands.
+historical patches or an explicit wire model. `wire_model` is the bounded
+historical escape hatch for behavior that automatic projection cannot model.
 
 ### `VersionTransition`
 

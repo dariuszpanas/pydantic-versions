@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
 from pydantic_versions.declarations import (
+    MatchingLabels,
     NestedFamily,
     SchemaVersion,
     TransitionFunc,
@@ -25,10 +27,12 @@ from pydantic_versions.patches import FieldDefault, FieldRemoved, FieldRenamed, 
 
 if TYPE_CHECKING:
     from pydantic_versions._planning import _PlanningCatalog
+    from pydantic_versions.family import SchemaFamily
 
 type UpgradeKind = Literal["implicit_identity", "custom_transition"]
 type DowngradeKind = Literal["implicit_identity", "custom_transition", "unavailable"]
 type WireModelKind = Literal["current", "generated", "explicit"]
+type _NestedLabelPairs = tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -65,8 +69,23 @@ class _CompiledTransition:
     target: str
     upgrade_kind: UpgradeKind
     upgrade: TransitionFunc | None
+    downgrade: TransitionFunc | None
     downgrade_kind: DowngradeKind
     downgrade_semantics: Literal["exact", "lossy", "unavailable"]
+
+
+@dataclass(frozen=True)
+class _CompiledNestedFamily:
+    path: tuple[str, ...]
+    family: SchemaFamily[Any]
+    versions: _NestedLabelPairs
+
+    def child_label(self, parent_label: str) -> str:
+        for parent, child in self.versions:
+            if parent == parent_label:
+                return child
+        msg = f"Nested mapping for path {self.path!r} has no child label for {parent_label!r}"
+        raise SchemaCompilationError(msg)
 
 
 @dataclass(frozen=True)
@@ -78,6 +97,7 @@ class _CompiledFamily:
     version_metadata: VersionMetadata | None
     missing_version: str | None
     catalog: _PlanningCatalog
+    nested: tuple[_CompiledNestedFamily, ...]
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -161,23 +181,97 @@ def _validate_family_declarations(
 def _validate_compilation_boundary(
     *,
     name: str,
-    versions: tuple[SchemaVersion, ...],
-    transitions: tuple[VersionTransition, ...],
+    model: type[BaseModel],
+    labels: tuple[str, ...],
     nested: tuple[NestedFamily, ...],
-) -> None:
-    explicit = [version.label for version in versions if version.wire_model is not None]
-    if explicit:
-        msg = (
-            f"Explicit wire models are not supported by the foundation compiler for "
-            f"{name!r}: {explicit!r}"
+) -> tuple[_CompiledNestedFamily, ...]:
+    from pydantic_versions.family import SchemaFamily
+
+    if not nested:
+        return ()
+
+    compiled_nested: list[_CompiledNestedFamily] = []
+    used_paths: set[tuple[str, ...]] = set()
+    for declaration in nested:
+        path = (declaration.path,) if isinstance(declaration.path, str) else tuple(declaration.path)
+        if path in used_paths:
+            msg = f"Duplicate nested family declaration path {path!r} for {name!r}"
+            raise SchemaCompilationError(msg)
+        used_paths.add(path)
+
+        declaration_family = declaration.family
+        if isinstance(declaration_family, SchemaFamily):
+            child_family = declaration_family
+        elif callable(declaration_family):
+            resolved = declaration_family()
+            if not isinstance(resolved, SchemaFamily):
+                msg = (
+                    f"Nested family declaration at path {path!r} for {name!r} must resolve to a "
+                    "SchemaFamily"
+                )
+                raise SchemaCompilationError(msg)
+            child_family = resolved
+        else:
+            msg = (
+                f"Nested family declaration at path {path!r} for {name!r} must use a SchemaFamily "
+                "or callable provider"
+            )
+            raise SchemaCompilationError(msg)
+
+        if child_family.model == model:
+            msg = (
+                f"Nested family declaration at path {path!r} for {name!r} cannot reference "
+                "the same owning model"
+            )
+            raise SchemaCompilationError(msg)
+
+        parent_labels = labels
+        child_labels = tuple(version.label for version in child_family.versions)
+        if isinstance(declaration.versions, MatchingLabels):
+            if child_labels != parent_labels:
+                msg = (
+                    f"Nested family declaration at path {path!r} for {name!r} must use matching "
+                    f"labels {parent_labels!r}"
+                )
+                raise SchemaCompilationError(msg)
+            nested_versions: _NestedLabelPairs = tuple(
+                zip(parent_labels, parent_labels, strict=False)
+            )
+        else:
+            if not isinstance(declaration.versions, Mapping):
+                msg = f"Nested family declaration at path {path!r} for {name!r} must be a mapping"
+                raise SchemaCompilationError(msg)
+            parent_map = dict(declaration.versions)
+            missing = tuple(label for label in parent_labels if label not in parent_map)
+            if missing:
+                msg = (
+                    f"Nested family declaration at path {path!r} for {name!r} is missing mappings "
+                    f"for parent labels {missing!r}"
+                )
+                raise SchemaCompilationError(msg)
+            unknown = tuple(parent for parent in parent_map if parent not in parent_labels)
+            if unknown:
+                msg = (
+                    f"Nested family declaration at path {path!r} for {name!r} has unknown parent labels "
+                    f"{unknown!r}"
+                )
+                raise SchemaCompilationError(msg)
+            child_unknown = tuple(
+                child for child in parent_map.values() if child not in child_labels
+            )
+            if child_unknown:
+                msg = (
+                    f"Nested family declaration at path {path!r} for {name!r} has unknown child labels "
+                    f"{child_unknown!r}"
+                )
+                raise SchemaCompilationError(msg)
+            nested_versions = tuple((parent, parent_map[parent]) for parent in parent_labels)
+
+        compiled_nested.append(
+            _CompiledNestedFamily(path=path, family=child_family, versions=nested_versions),
         )
-        raise SchemaCompilationError(msg)
-    if nested:
-        msg = f"Explicit nested family compilation is not supported yet for {name!r}"
-        raise SchemaCompilationError(msg)
-    if any(transition.downgrade is not None for transition in transitions):
-        msg = f"Downgrade execution is not supported yet for {name!r}"
-        raise SchemaCompilationError(msg)
+
+    return tuple(compiled_nested)
 
 
 def _validate_required_field_introductions(
@@ -402,6 +496,7 @@ def _compile_transition(
         target=target,
         upgrade_kind="implicit_identity" if upgrade is None else "custom_transition",
         upgrade=upgrade,
+        downgrade=downgrade,
         downgrade_kind=downgrade_kind,
         downgrade_semantics=downgrade_semantics,
     )

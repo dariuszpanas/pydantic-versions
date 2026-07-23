@@ -47,6 +47,7 @@ from pydantic_core import PydanticUndefined
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
 
 from pydantic_versions._compiler import (
+    _CompiledNestedFamily,
     _generated_model_name,
     _identifier_component,
     _stable_digest,
@@ -208,6 +209,7 @@ _CUSTOM_MODEL_HOOKS = (
     "__get_pydantic_json_schema__",
     "model_json_schema",
 )
+_HASHABLE_MODEL_CACHE: dict[type[BaseModel], type[BaseModel]] = {}
 
 
 def _validate_automatic_wire_model(family: SchemaFamily[Any]) -> None:
@@ -242,9 +244,17 @@ def _validate_automatic_wire_model(family: SchemaFamily[Any]) -> None:
 def _build_model_for_projection(
     family: SchemaFamily[Any],
     projection: _VersionProjection,
+    wire_model: type[BaseModel] | None,
+    nested: tuple[_CompiledNestedFamily, ...] = (),
 ) -> type[BaseModel]:
+    if wire_model is not None:
+        return _validate_explicit_wire_model(family, projection, wire_model)
     try:
-        return _build_model_for_projection_unchecked(family, projection)
+        return _build_model_for_projection_unchecked(
+            family,
+            projection,
+            nested=nested,
+        )
     except UnsupportedWireModelError:
         raise
     except Exception as exc:
@@ -256,11 +266,85 @@ def _build_model_for_projection(
         raise UnsupportedWireModelError(msg) from exc
 
 
+def _validate_explicit_wire_model(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    wire_model: type[BaseModel],
+) -> type[BaseModel]:
+    _validate_explicit_wire_model_metadata(family, projection, wire_model)
+    _validate_object_schema(
+        family,
+        projection,
+        wire_model,
+        mode="validation",
+    )
+    _validate_object_schema(
+        family,
+        projection,
+        wire_model,
+        mode="serialization",
+    )
+    return wire_model
+
+
+def _validate_explicit_wire_model_metadata(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    wire_model: type[BaseModel],
+) -> None:
+    metadata = family.version_metadata
+    if metadata is None or metadata.owner != "model":
+        return
+
+    metadata_field = _model_metadata_field(family)
+    if metadata_field is None:
+        _raise_projection_unsupported(
+            family,
+            projection,
+            "explicit wire models do not yet support nested model-owned metadata",
+        )
+    if metadata_field not in wire_model.model_fields:
+        _raise_projection_unsupported(
+            family,
+            projection,
+            "explicit wire model for model-owned metadata must declare the same "
+            f"model metadata field {metadata_field!r}",
+        )
+
+    field_info = wire_model.model_fields[metadata_field]
+    model_label_type = _literal_type(projection.label)
+    model_field_type = field_info.annotation
+    if get_origin(model_field_type) is Annotated:
+        model_field_type = get_args(model_field_type)[0]
+
+    if model_field_type != model_label_type:
+        msg = (
+            "explicit wire model for model-owned metadata must annotate "
+            f"field {metadata_field!r} as {model_label_type!r}"
+        )
+        _raise_projection_unsupported(
+            family,
+            projection,
+            msg,
+        )
+    if field_info.default is PydanticUndefined or field_info.default != projection.label:
+        _raise_projection_unsupported(
+            family,
+            projection,
+            "explicit wire model for model-owned metadata must provide "
+            f"the exact default {projection.label!r}",
+        )
+
+
 def _build_model_for_projection_unchecked(
     family: SchemaFamily[Any],
     projection: _VersionProjection,
+    nested: tuple[_CompiledNestedFamily, ...] = (),
 ) -> type[BaseModel]:
     model_metadata_field = _model_metadata_field(family)
+    used_nested: set[tuple[str, ...]] = set()
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None] = {}
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str]] = set()
     fields: dict[str, Any] = {}
     for compiled_field in projection.fields:
         if compiled_field.version_name is None:
@@ -295,8 +379,13 @@ def _build_model_for_projection_unchecked(
             field_dict["annotation"],
             projection.label,
             family,
+            nested=nested,
+            field_path=(compiled_field.current_name,),
+            used_nested=used_nested,
             field_name=compiled_field.current_name,
             allow_child_projection=True,
+            nested_projection_cache=nested_projection_cache,
+            nested_projection_stack=nested_projection_stack,
         )
         attributes = _wire_field_attributes(
             family,
@@ -329,6 +418,9 @@ def _build_model_for_projection_unchecked(
             field_dict["annotation"],
             annotation,
             family,
+            nested=nested,
+            field_path=(compiled_field.current_name,),
+            used_nested=used_nested,
             field_name=compiled_field.current_name,
             version=projection.label,
         )
@@ -354,6 +446,7 @@ def _build_model_for_projection_unchecked(
         ]
 
     _validate_metadata_field_name_collision(family, projection, fields)
+    _validate_nested_projection_coverage(family, projection, nested, used_nested)
     _add_family_metadata_field(family, projection.label, fields)
 
     generated = create_model(
@@ -1280,6 +1373,82 @@ def _model_display(model: type[BaseModel]) -> str:
     return f"{model.__module__}.{model.__qualname__}"
 
 
+def _find_nested_family_for_path(
+    nested: tuple[_CompiledNestedFamily, ...],
+    field_path: tuple[str, ...],
+) -> _CompiledNestedFamily | None:
+    for family in nested:
+        if family.path == field_path:
+            return family
+    return None
+
+
+def _find_nested_families_under_path(
+    nested: tuple[_CompiledNestedFamily, ...],
+    field_path: tuple[str, ...],
+) -> tuple[_CompiledNestedFamily, ...]:
+    if not nested:
+        return ()
+    return tuple(
+        family
+        for family in nested
+        if len(family.path) > len(field_path) and family.path[: len(field_path)] == field_path
+    )
+
+
+def _nested_projection_cache_key(
+    nested_model: type[BaseModel],
+    field_path: tuple[str, ...],
+    version: str,
+) -> tuple[int, tuple[str, ...], str]:
+    return (id(nested_model), field_path, version)
+
+
+def _nested_model_name(
+    parent: SchemaFamily[Any],
+    nested_model: type[BaseModel],
+    field_path: tuple[str, ...],
+    version: str,
+) -> str:
+    components = (
+        parent.model.__module__,
+        parent.model.__qualname__,
+        parent.name,
+        version,
+        "nested",
+        nested_model.__qualname__,
+        *field_path,
+    )
+    suffix = _stable_digest(components)[:10]
+    return f"{_generated_model_name(parent.model, parent.name, version)}_Nested_{suffix}"
+
+
+def _nested_wire_model_config(model: type[BaseModel]) -> ConfigDict:
+    config: dict[str, Any] = {
+        key: value for key, value in model.model_config.items() if key in _WIRE_CONFIG_KEYS
+    }
+    schema_extra = model.model_config.get("json_schema_extra")
+    if isinstance(schema_extra, Mapping):
+        config["json_schema_extra"] = schema_extra
+    return ConfigDict(**config)
+
+
+def _validate_nested_projection_coverage(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    nested: tuple[_CompiledNestedFamily, ...],
+    used_nested: set[tuple[str, ...]],
+) -> None:
+    unused = tuple(family_path for family_path in nested if family_path.path not in used_nested)
+    if unused:
+        first = unused[0].path
+        if len(unused) == 1:
+            msg = f"nested declaration path {first!r} does not match any rewritable field path"
+        else:
+            msg = f"{len(unused)} nested declarations do not match any rewritable field path"
+        _raise_projection_unsupported(family, projection, msg)
+
+
 def _compat_child_family(
     owner: SchemaFamily[Any],
     annotation: Any,
@@ -1304,22 +1473,77 @@ def _compat_child_family(
     return child
 
 
+def _set_element_wire_model(model: type[BaseModel]) -> type[BaseModel]:
+    if model.model_config.get("frozen"):
+        return model
+    cached = _HASHABLE_MODEL_CACHE.get(model)
+    if cached is not None:
+        return cached
+    frozen_model = create_model(
+        f"{model.__name__}__HashableSetElement",
+        __base__=model,
+        __module__=model.__module__,
+        __config__=ConfigDict(frozen=True),
+    )
+    frozen_model.model_rebuild(force=True)
+    _HASHABLE_MODEL_CACHE[model] = frozen_model
+    return frozen_model
+
+
 def _rewrite_annotation(
     annotation: Any,
     version: str,
     family: SchemaFamily[Any],
     *,
+    nested: tuple[_CompiledNestedFamily, ...],
+    field_path: tuple[str, ...],
+    used_nested: set[tuple[str, ...]],
     field_name: str,
     allow_child_projection: bool,
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None],
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str]],
+    in_set_element: bool = False,
 ) -> Any:
+    child = _find_nested_family_for_path(nested, field_path)
+    if (
+        child is not None
+        and isinstance(annotation, type)
+        and issubclass(
+            annotation,
+            BaseModel,
+        )
+    ):
+        used_nested.add(child.path)
+        family_model = child.family.model_for(child.child_label(version))
+        return _set_element_wire_model(family_model) if in_set_element else family_model
     child = _compat_child_family(family, annotation) if allow_child_projection else None
     if child is not None:
-        return child.model_for(version)
+        family_model = child.model_for(version)
+        return _set_element_wire_model(family_model) if in_set_element else family_model
 
     if isinstance(annotation, _TYPE_ALIAS_TYPES):
         _validate_type_alias(family, field_name, annotation)
         return annotation
     _validate_annotation_behavior(family, field_name, annotation)
+    if (
+        allow_child_projection
+        and isinstance(annotation, type)
+        and issubclass(annotation, BaseModel)
+    ):
+        nested_families = _find_nested_families_under_path(nested, field_path)
+        if nested_families:
+            return _rewrite_nested_model(
+                annotation,
+                version,
+                family,
+                field_name=field_name,
+                field_path=field_path,
+                nested=nested_families,
+                in_set_element=in_set_element,
+                nested_projection_cache=nested_projection_cache,
+                nested_projection_stack=nested_projection_stack,
+                used_nested=used_nested,
+            )
 
     origin = get_origin(annotation)
     if isinstance(origin, _TYPE_ALIAS_TYPES):
@@ -1332,8 +1556,14 @@ def _rewrite_annotation(
             base,
             version,
             family,
+            nested=nested,
+            field_path=field_path,
+            used_nested=used_nested,
             field_name=field_name,
             allow_child_projection=allow_child_projection,
+            nested_projection_cache=nested_projection_cache,
+            nested_projection_stack=nested_projection_stack,
+            in_set_element=in_set_element,
         )
         metadata = _snapshot_wire_metadata(
             family,
@@ -1357,13 +1587,20 @@ def _rewrite_annotation(
         Union,
         UnionType,
     )
+    set_context = in_set_element or origin in (set, frozenset)
     args = tuple(
         _rewrite_annotation(
             arg,
             version,
             family,
             field_name=field_name,
+            field_path=field_path,
             allow_child_projection=allow_child_projection and legacy_container,
+            nested=nested,
+            used_nested=used_nested,
+            nested_projection_cache=nested_projection_cache,
+            nested_projection_stack=nested_projection_stack,
+            in_set_element=set_context,
         )
         for arg in source_args
     )
@@ -1385,6 +1622,93 @@ def _rewrite_annotation(
             f"for field {field_name!r}"
         )
         raise UnsupportedWireModelError(msg) from exc
+
+
+def _rewrite_nested_model(
+    annotation: type[BaseModel],
+    version: str,
+    owner: SchemaFamily[Any],
+    *,
+    field_name: str,
+    field_path: tuple[str, ...],
+    nested: tuple[_CompiledNestedFamily, ...],
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None],
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str]],
+    used_nested: set[tuple[str, ...]],
+    in_set_element: bool = False,
+) -> type[BaseModel]:
+    cache_key = _nested_projection_cache_key(annotation, field_path, version)
+    nested_projection = nested_projection_cache.get(cache_key)
+    if nested_projection is not None:
+        return nested_projection
+    if cache_key in nested_projection_stack:
+        msg = (
+            f"nested declaration path {field_path!r} on model {annotation.__qualname__!r} "
+            "is self-referential and cannot be projected safely"
+        )
+        _raise_unsupported(owner, msg)
+
+    placeholder = create_model(
+        _nested_model_name(owner, annotation, field_path, version),
+        __module__=annotation.__module__,
+    )
+    nested_projection_cache[cache_key] = placeholder
+    nested_projection_stack.add(cache_key)
+    try:
+        fields: dict[str, Any] = {}
+        for source_name, source_field_info in annotation.model_fields.items():
+            source = source_field_info.asdict()
+            rewritten_annotation = _rewrite_annotation(
+                source["annotation"],
+                version,
+                owner,
+                nested=nested,
+                field_path=field_path + (source_name,),
+                used_nested=used_nested,
+                field_name=source_name,
+                allow_child_projection=True,
+                in_set_element=in_set_element,
+                nested_projection_cache=nested_projection_cache,
+                nested_projection_stack=nested_projection_stack,
+            )
+            attributes = _wire_field_attributes(owner, source_name, source["attributes"])
+            metadata = _wire_field_metadata(owner, source_name, source["metadata"])
+            _rewrite_nested_default(
+                attributes,
+                source["annotation"],
+                rewritten_annotation,
+                owner,
+                nested=nested,
+                field_path=field_path + (source_name,),
+                used_nested=used_nested,
+                field_name=source_name,
+                version=version,
+            )
+            fields[source_name] = Annotated[
+                rewritten_annotation,
+                *metadata,
+                Field(**attributes),
+            ]
+        nested_projection = create_model(
+            _nested_model_name(owner, annotation, field_path, version),
+            __module__=annotation.__module__,
+            __config__=_nested_wire_model_config(annotation),
+            **fields,
+        )
+        nested_projection.model_rebuild(force=True)
+    except Exception as exc:
+        msg = (
+            f"Automatic wire model for family {owner.name!r}, version {version!r}, and model "
+            f"{_model_display(annotation)!r} cannot safely project nested model for path "
+            f"{field_path!r}"
+        )
+        raise UnsupportedWireModelError(msg) from exc
+    finally:
+        nested_projection_stack.remove(cache_key)
+    nested_projection_cache[cache_key] = nested_projection
+    if nested_projection is not None:
+        nested_projection_cache[cache_key] = nested_projection
+    return nested_projection
 
 
 def _validate_type_alias(
@@ -1475,12 +1799,21 @@ def _rewrite_nested_default(
     version_annotation: Any,
     family: SchemaFamily[Any],
     *,
+    nested: tuple[_CompiledNestedFamily, ...],
+    field_path: tuple[str, ...],
+    used_nested: set[tuple[str, ...]],
     field_name: str,
     version: str,
 ) -> None:
     if original_annotation == version_annotation:
         return
-    child = _compat_child_family(family, original_annotation)
+    declaration = _find_nested_family_for_path(nested, field_path)
+    if declaration is not None:
+        used_nested.add(declaration.path)
+        child = declaration.family
+        version_annotation = child.model_for(declaration.child_label(version))
+    else:
+        child = _compat_child_family(family, original_annotation)
     if child is None or not (
         isinstance(version_annotation, type) and issubclass(version_annotation, BaseModel)
     ):
@@ -1494,7 +1827,13 @@ def _rewrite_nested_default(
             f"field {field_name!r} uses an opaque factory for a projected nested model",
         )
     default = attributes.get("default", PydanticUndefined)
-    if isinstance(default, original_annotation):
+    if default is PydanticUndefined:
+        return
+    try:
+        is_default_from_source = isinstance(default, original_annotation)
+    except TypeError:
+        return
+    if is_default_from_source:
         attributes["default"] = _project_child_default_value(
             default,
             source_model=original_annotation,

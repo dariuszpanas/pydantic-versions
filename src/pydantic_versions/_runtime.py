@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin
 
 from pydantic import AliasChoices, AliasPath, BaseModel
 
@@ -38,11 +38,22 @@ def _validate_family[T: BaseModel](
     source_version = _detect_version(compiled, data, explicit_version=version)
     source = compiled.version(source_version)
     source_model = source.model.model_validate(data, by_name=True)
-    payload = _to_current_names(compiled, source, source_model.model_dump(by_alias=False))
+    payload = _to_current_names(
+        compiled,
+        source,
+        source_model.model_dump(by_alias=False, mode="json"),
+    )
 
     migrations_applied: list[tuple[str, str]] = []
     source_index = compiled.index(source_version)
     for transition in compiled.transitions[source_index:]:
+        if source_version != compiled.current_version:
+            payload = _apply_nested_family_migrations(
+                payload=payload,
+                compiled=compiled,
+                source_label=transition.source,
+                target_label=transition.target,
+            )
         if transition.upgrade is None:
             continue
         migrated = transition.upgrade(dict(payload))
@@ -76,24 +87,537 @@ def _dump_family[T: BaseModel](
     compiled = family._compiled_family()
     requested = _runtime_label(version, family_name=family.name)
     target = compiled.version(requested)
+    target_index = compiled.index(requested)
+    current_index = len(compiled.versions) - 1
+    if requested != compiled.current_version:
+        family.plan_render(requested)
 
     if data is None:
-        target_model = target.model()
+        payload = {}
     elif isinstance(data, BaseModel):
-        target_model = target.model.model_validate(
-            _to_version_names(target, data.model_dump(by_alias=False)),
-            by_name=True,
-        )
+        raw_payload = data.model_dump(by_alias=False, mode="json")
+        if requested == compiled.current_version:
+            payload = raw_payload
+        else:
+            payload = _to_current_names(
+                compiled,
+                compiled.version(compiled.current_version),
+                raw_payload,
+            )
     else:
-        target_model = target.model.model_validate(_to_version_names(target, data), by_name=True)
+        payload = dict(data)
 
-    dumped = target_model.model_dump(**dump_kwargs)
+    if requested != compiled.current_version:
+        for edge_index in range(current_index - 1, target_index - 1, -1):
+            transition = compiled.transitions[edge_index]
+            payload = _apply_nested_family_migrations(
+                payload=payload,
+                compiled=compiled,
+                source_label=transition.target,
+                target_label=transition.source,
+            )
+            if transition.downgrade is None:
+                continue
+            migrated = transition.downgrade(dict(payload))
+            if not isinstance(migrated, dict):
+                msg = (
+                    f"Migration {transition.source!r} -> {transition.target!r} "
+                    f"downgrade must return a dict"
+                )
+                raise InvalidMigrationError(msg)
+            payload = migrated
+
+    if (
+        requested != compiled.current_version
+        and compiled.version_metadata is not None
+        and compiled.version_metadata.owner == "family"
+    ):
+        payload = dict(payload)
+        _set_version_field(payload, compiled.version_metadata.path, requested)
+
+    target_model = target.model.model_validate(_to_version_names(target, payload), by_name=True)
+    if "mode" in dump_kwargs:
+        dumped = target_model.model_dump(**dump_kwargs)
+    else:
+        dumped = target_model.model_dump(mode="json", **dump_kwargs)
+    if compiled.nested:
+        for nested in compiled.nested:
+            collection_kind = _nested_family_collection_kind(
+                model=compiled.model,
+                path=nested.path,
+            )
+            if collection_kind != "list":
+                continue
+            _prune_nested_family_metadata_at_path(
+                payload=dumped,
+                path=nested.path,
+                family=nested.family,
+            )
     if compiled.version_metadata is not None:
         if include_version:
             _set_version_field(dumped, compiled.version_metadata.path, requested)
         else:
             _remove_version_field(dumped, compiled.version_metadata.path)
     return dumped
+
+
+def _apply_nested_family_migrations(
+    *,
+    payload: dict[str, Any],
+    compiled: _CompiledFamily,
+    source_label: str,
+    target_label: str,
+) -> dict[str, Any]:
+    if not compiled.nested:
+        return payload
+    current_payload: dict[str, Any] = payload
+    if source_label == target_label:
+        return current_payload
+    for nested in compiled.nested:
+        nested_source = nested.child_label(source_label)
+        nested_target = nested.child_label(target_label)
+        if nested_source == nested_target:
+            continue
+        current_payload = _convert_nested_child_family(
+            payload=current_payload,
+            path=nested.path,
+            family=nested.family,
+            source_label=nested_source,
+            target_label=nested_target,
+            collection_kind=_nested_family_collection_kind(
+                model=compiled.model,
+                path=nested.path,
+            ),
+        )
+    return current_payload
+
+
+def _nested_family_collection_kind(
+    *,
+    model: type[BaseModel],
+    path: tuple[str, ...],
+) -> Literal["list", "tuple", "set", "frozenset"] | None:
+    annotation: Any = model
+    for index, key in enumerate(path):
+        if not isinstance(annotation, type) or not issubclass(annotation, BaseModel):
+            return None
+        field_info = annotation.model_fields.get(key)
+        if field_info is None:
+            return None
+        annotation = _strip_annotated(field_info.annotation)
+        kind = _collection_kind(annotation)
+        if index == len(path) - 1:
+            return kind
+        if kind is None:
+            continue
+        args = get_args(annotation)
+        if not args:
+            return None
+        annotation = args[0]
+    return None
+
+
+def _collection_kind(
+    annotation: Any,
+) -> Literal["list", "tuple", "set", "frozenset"] | None:
+    origin = get_origin(annotation)
+    if origin is list:
+        return "list"
+    if origin is tuple:
+        return "tuple"
+    if origin is set:
+        return "set"
+    if origin is frozenset:
+        return "frozenset"
+    return None
+
+
+def _strip_annotated(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        args = get_args(annotation)
+        if not args:
+            return annotation
+        return args[0]
+    return annotation
+
+
+def _has_duplicate_payload(payload: list[Any]) -> bool:
+    for index, item in enumerate(payload):
+        if item in payload[:index]:
+            return True
+    return False
+
+
+def _prune_nested_family_metadata(
+    *,
+    payload: dict[str, Any],
+    compiled: _CompiledFamily,
+) -> None:
+    for nested in compiled.nested:
+        _prune_nested_family_metadata_at_path(
+            payload=payload,
+            path=nested.path,
+            family=nested.family,
+        )
+
+
+def _prune_nested_family_metadata_payload(
+    payload: Any,
+    family: _CompiledFamily,
+) -> None:
+    metadata = family.version_metadata
+    if metadata is not None and metadata.owner == "family" and isinstance(payload, Mapping):
+        _remove_version_field(payload, metadata.path)
+
+    if not family.nested:
+        return
+
+    for child in family.nested:
+        _prune_nested_family_metadata_at_path(
+            payload=payload,
+            path=child.path,
+            family=child.family,
+        )
+
+
+def _prune_nested_family_metadata_at_path(
+    *,
+    payload: Any,
+    path: tuple[str, ...],
+    family: SchemaFamily[Any],
+) -> None:
+    if not path:
+        compiled_family = family._compiled_family()
+        if isinstance(payload, Mapping | list | tuple | set | frozenset):
+            if isinstance(payload, list):
+                for item in payload:
+                    _prune_nested_family_metadata_payload(item, compiled_family)
+                return
+            if isinstance(payload, tuple):
+                for item in payload:
+                    _prune_nested_family_metadata_payload(item, compiled_family)
+                return
+            if isinstance(payload, set):
+                for item in payload:
+                    _prune_nested_family_metadata_payload(item, compiled_family)
+                return
+            if isinstance(payload, frozenset):
+                for item in payload:
+                    _prune_nested_family_metadata_payload(item, compiled_family)
+                return
+            _prune_nested_family_metadata_payload(payload, compiled_family)
+        return
+
+    key, *remaining = path
+    if isinstance(payload, Mapping):
+        if key in payload:
+            _prune_nested_family_metadata_at_path(
+                payload=payload[key],
+                path=tuple(remaining),
+                family=family,
+            )
+            return
+        for field_value in payload.values():
+            _prune_nested_family_metadata_at_path(
+                payload=field_value,
+                path=path,
+                family=family,
+            )
+        return
+
+    if isinstance(payload, list):
+        for field_value in payload:
+            _prune_nested_family_metadata_at_path(
+                payload=field_value,
+                path=path,
+                family=family,
+            )
+        return
+
+    if isinstance(payload, tuple):
+        for field_value in payload:
+            _prune_nested_family_metadata_at_path(
+                payload=field_value,
+                path=path,
+                family=family,
+            )
+        return
+
+    if isinstance(payload, set):
+        for field_value in payload:
+            _prune_nested_family_metadata_at_path(
+                payload=field_value,
+                path=path,
+                family=family,
+            )
+        return
+
+    if isinstance(payload, frozenset):
+        for field_value in payload:
+            _prune_nested_family_metadata_at_path(
+                payload=field_value,
+                path=path,
+                family=family,
+            )
+
+
+def _convert_nested_child_family(
+    *,
+    payload: Any,
+    path: tuple[str, ...],
+    family: SchemaFamily[Any],
+    source_label: str,
+    target_label: str,
+    collection_kind: Literal["list", "tuple", "set", "frozenset"] | None = None,
+) -> Any:
+    if not path:
+        return _convert_nested_family_payload(
+            family=family,
+            payload=payload,
+            source_label=source_label,
+            target_label=target_label,
+            collection_kind=collection_kind,
+        )
+    key, *remaining = path
+    if isinstance(payload, Mapping):
+        if key in payload:
+            nested_payload = payload[key]
+            converted = _convert_nested_child_family(
+                payload=nested_payload,
+                path=tuple(remaining),
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            if converted is nested_payload:
+                return payload
+            updated = dict(payload)
+            updated[key] = converted
+            return updated
+        converted_children = {
+            field_name: _convert_nested_child_family(
+                payload=field_value,
+                path=path,
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for field_name, field_value in payload.items()
+        }
+        if any(
+            converted_children[field_name] is not field_value
+            for field_name, field_value in payload.items()
+        ):
+            return converted_children
+        return payload
+    if isinstance(payload, list):
+        converted_items = [
+            _convert_nested_child_family(
+                payload=item,
+                path=path,
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        ]
+        if all(converted is item for converted, item in zip(converted_items, payload, strict=True)):
+            return payload
+        return converted_items
+    if isinstance(payload, tuple):
+        converted_items = tuple(
+            _convert_nested_child_family(
+                payload=item,
+                path=path,
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        )
+        if all(converted is item for converted, item in zip(converted_items, payload, strict=True)):
+            return payload
+        return converted_items
+    if isinstance(payload, set):
+        converted_items = {
+            _convert_nested_child_family(
+                payload=item,
+                path=path,
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        }
+        if len(converted_items) != len(payload):
+            msg = (
+                f"Nested migration for family {family.name!r} "
+                "cannot preserve set cardinality while converting mixed payload values"
+            )
+            raise InvalidMigrationError(msg)
+        return converted_items
+    if isinstance(payload, frozenset):
+        converted_items = frozenset(
+            _convert_nested_child_family(
+                payload=item,
+                path=path,
+                family=family,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        )
+        if len(converted_items) != len(payload):
+            msg = (
+                f"Nested migration for family {family.name!r} "
+                "cannot preserve set cardinality while converting mixed payload values"
+            )
+            raise InvalidMigrationError(msg)
+        return converted_items
+    return payload
+
+
+def _convert_nested_family_payload(
+    family: SchemaFamily[Any],
+    payload: Any,
+    source_label: str,
+    target_label: str,
+    collection_kind: Literal["list", "tuple", "set", "frozenset"] | None = None,
+) -> Any:
+    if payload is None:
+        return payload
+    if isinstance(payload, list):
+        converted = [
+            _convert_nested_family_payload(
+                family=family,
+                payload=item,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        ]
+        if any(
+            converted_item is not item
+            for converted_item, item in zip(converted, payload, strict=True)
+        ):
+            if collection_kind in ("set", "frozenset") and _has_duplicate_payload(converted):
+                msg = (
+                    f"Nested migration for family {family.name!r} "
+                    "cannot preserve set cardinality while converting mixed payload values"
+                )
+                raise InvalidMigrationError(msg)
+            return converted
+        return payload
+    if isinstance(payload, tuple):
+        converted = tuple(
+            _convert_nested_family_payload(
+                family=family,
+                payload=item,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        )
+        if any(
+            converted_item is not item
+            for converted_item, item in zip(converted, payload, strict=True)
+        ):
+            return converted
+        return payload
+    if isinstance(payload, set):
+        converted = {
+            _convert_nested_family_payload(
+                family=family,
+                payload=item,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        }
+        if len(converted) != len(payload):
+            msg = (
+                f"Nested migration for family {family.name!r} "
+                "cannot preserve set cardinality while converting mixed payload values"
+            )
+            raise InvalidMigrationError(msg)
+        return converted
+    if isinstance(payload, frozenset):
+        converted = frozenset(
+            _convert_nested_family_payload(
+                family=family,
+                payload=item,
+                source_label=source_label,
+                target_label=target_label,
+                collection_kind=collection_kind,
+            )
+            for item in payload
+        )
+        if len(converted) != len(payload):
+            msg = (
+                f"Nested migration for family {family.name!r} "
+                "cannot preserve set cardinality while converting mixed payload values"
+            )
+            raise InvalidMigrationError(msg)
+        return converted
+    if not isinstance(payload, Mapping):
+        return payload
+    compiled = family._compiled_family()
+    source_index = compiled.index(source_label)
+    target_index = compiled.index(target_label)
+    if source_index == target_index:
+        return dict(payload)
+    source_version = compiled.version(source_label)
+    source_model = source_version.model
+    source_data = source_model.model_validate(payload, by_name=True)
+    current_payload = dict(
+        _to_current_names(
+            compiled,
+            source_version,
+            source_data.model_dump(by_alias=False, mode="json"),
+        )
+    )
+    if source_index < target_index:
+        for edge_index in range(source_index, target_index):
+            transition = compiled.transitions[edge_index]
+            if transition.upgrade is None:
+                continue
+            migrated = transition.upgrade(dict(current_payload))
+            if not isinstance(migrated, dict):
+                msg = (
+                    f"Nested migration {source_label!r} -> {target_label!r} for family "
+                    f"{family.name!r} must return a dict"
+                )
+                raise InvalidMigrationError(msg)
+            current_payload = migrated
+    else:
+        for edge_index in range(source_index - 1, target_index - 1, -1):
+            transition = compiled.transitions[edge_index]
+            if transition.downgrade is None:
+                continue
+            migrated = transition.downgrade(dict(current_payload))
+            if not isinstance(migrated, dict):
+                msg = (
+                    f"Nested migration {source_label!r} -> {target_label!r} for family "
+                    f"{family.name!r} must return a dict"
+                )
+                raise InvalidMigrationError(msg)
+            current_payload = migrated
+    if compiled.version_metadata is not None and compiled.version_metadata.owner == "family":
+        if collection_kind in ("set", "tuple", "frozenset"):
+            _set_version_field(current_payload, compiled.version_metadata.path, target_label)
+        else:
+            _remove_version_field(current_payload, compiled.version_metadata.path)
+    return current_payload
 
 
 def _infer_metadata_owner(
