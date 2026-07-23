@@ -27,6 +27,9 @@ declaration sequence and has no default-selection side effect.
 - `current_version`: the final declared version label.
 - `compile()`: lazily and atomically compile the immutable family state; returns the family.
 - `as_default()`: deliberately select this family for model-only compatibility calls; returns the family.
+- `describe()`: return the frozen compiled `SchemaInventory`.
+- `plan_validation(source_version)`: return the cached source-to-current `ConversionPlan`.
+- `plan_render(target_version)`: return the cached current-to-target `ConversionPlan`, or raise `IrreversibleTransitionError` if no complete reverse route exists.
 - `model_for(version)`: return the family-local generated wire model.
 - `validate(data, *, version=None)`: validate historical input and upgrade it to the current model.
 - `defaults_for(*, version, include_version=True, **dump_kwargs)`: render target defaults.
@@ -89,6 +92,147 @@ the later top-level conversion work.
 declaration types so the final constructor remains stable. Non-empty explicit
 nested mappings currently fail compilation instead of being ignored; graph
 compilation and nested execution land in their dedicated 0.2 changes.
+
+## Compiled inventory and plans
+
+The public inspection records are frozen value objects. Their `to_dict()`
+methods return fresh deterministic dictionaries containing JSON-safe
+primitives.
+
+### Inventory records
+
+```python
+@dataclass(frozen=True)
+class ProjectionDescription:
+    kind: Literal["default", "removed", "renamed"]
+    current_field: str
+    historical_field: str | None
+    has_default: bool
+
+
+@dataclass(frozen=True)
+class VersionDescription:
+    label: str
+    wire_model: Literal["current", "generated", "explicit"]
+    projections: tuple[ProjectionDescription, ...]
+
+
+@dataclass(frozen=True)
+class TransitionDescription:
+    source: str
+    target: str
+    upgrade: Literal["implicit_identity", "custom"]
+    downgrade: Literal["implicit_identity", "custom", "unavailable"]
+    downgrade_semantics: StepSemantics
+
+
+@dataclass(frozen=True)
+class NestedFamilyDescription:
+    schema_path: str
+    family: str
+    versions: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class SchemaInventory:
+    family: str
+    model: str
+    current_version: str
+    versions: tuple[VersionDescription, ...]
+    transitions: tuple[TransitionDescription, ...]
+    nested: tuple[NestedFamilyDescription, ...]
+    version_metadata: VersionMetadata | None
+```
+
+`SchemaFamily.describe()` compiles the family if necessary and returns its
+cached inventory. Versions and transitions retain canonical declared order, and
+every adjacent edge is present even when its upgrade is an implicit identity.
+Projection descriptions reveal whether a historical version changes a default,
+removes a field, or renames it, but never reveal a default value or factory.
+
+The model is represented by its qualified name rather than a class object.
+`NestedFamilyDescription` is part of the stable output contract, but inventories
+remain flat while explicit nested compilation is unsupported.
+
+### Plan records
+
+```python
+type StepKind = Literal[
+    "wire_validation",
+    "projection",
+    "implicit_identity",
+    "custom_transition",
+    "nested",
+    "current_validation",
+    "serialization",
+    "metadata",
+]
+type StepSemantics = Literal[
+    "not_applicable",
+    "exact",
+    "lossy",
+    "unavailable",
+]
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    id: str
+    family: str
+    source_version: str
+    target_version: str
+    operation: Literal["validate", "render"]
+    direction: Literal["upgrade", "downgrade"]
+    kind: StepKind
+    schema_path: str
+    semantics: StepSemantics
+    conditional: bool
+
+
+@dataclass(frozen=True)
+class ConversionPlan:
+    family: str
+    source_version: str
+    target_version: str
+    operation: Literal["validate", "render"]
+    semantics: StepSemantics
+    steps: tuple[PlanStep, ...]
+```
+
+`plan_validation(source_version)` exposes source metadata and wire validation,
+field projections, each adjacent upgrade or identity edge, and current-model
+validation. Its overall semantics are `not_applicable`.
+
+`plan_render(target_version)` exposes current validation, reverse edges, target
+projections and metadata, target wire validation, and serialization. Exact
+structural changes produce an `exact` plan; removing a current field produces a
+`lossy` plan. A custom upgrade without a declared downgrade makes the route
+unavailable, so the method raises `IrreversibleTransitionError` instead of
+returning that candidate.
+
+Plan construction is data-independent and does not execute transition
+callables or default factories. Step IDs use `pv1-` plus a full 64-character
+SHA-256 digest and do not depend on object identity, callable representations,
+or Python's randomized hash. Root-level steps use `$`; a plain metadata field
+uses its field name, while tuple paths use an unambiguous `$.*` schema pattern
+and literal special characters use JSON-style bracket quoting. Paths never
+contain payload-derived indices or keys.
+
+Inventories and plans never contain payloads, model objects, callable objects,
+default values, exception messages, tracebacks, timing, or host/user
+identifiers, and creating them does not log. A plan describes a possible
+operation; it is not an execution trace. Structured per-payload traces are a
+separate API.
+
+Calling `describe()`, `plan_validation()`, or `plan_render()` performs the
+family's first compilation when needed. A later legacy `@migration`
+registration therefore fails instead of mutating the published inventory and
+plans.
+
+The current validation and dictionary-dump compatibility paths are not yet
+driven by these public plans. In particular, a rejected render plan means that
+no safe reverse transition is declared even if legacy dumping can still apply a
+structural target projection.
 
 ## Decorator compatibility
 
@@ -167,12 +311,15 @@ class VersionedValidation[T: BaseModel]:
 - `TransitionFunc`: `Callable[[TransitionData], TransitionData]`
 - `VersionPath`: `str | tuple[str, ...]`
 - `JsonValue`: recursive JSON-safe primitive type
+- `StepKind`: supported inventory/plan operation-step kinds
+- `StepSemantics`: `not_applicable`, `exact`, `lossy`, or `unavailable`
 
 ## Exceptions
 
 - `SchemaVersionError`
   - `SchemaCompilationError`
   - `SchemaFamilySelectionError`
+  - `IrreversibleTransitionError`
   - `MissingSchemaVersionError`
   - `UnknownSchemaVersionError`
   - `DuplicateSchemaVersionError`
