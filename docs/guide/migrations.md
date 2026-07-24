@@ -172,17 +172,13 @@ Structural rename and default projections are exact. A target projection that
 removes a current field is available but marks its step and the complete render
 plan as `lossy`.
 
-Custom downgrade declarations are still rejected by the current compiler and
-are not executed yet. Consequently, the only available reverse transition in
-this implementation slice is an implicit identity. Downgrade execution lands
-in its dedicated conversion work.
+Custom downgrade declarations are fully supported. When an explicit downgrade is
+declared on a `VersionTransition`, rendering a historical schema will execute the
+downgrade logic in reverse edge order.
 
-Planning is intentionally ahead of runtime routing during this implementation
-stage. `validate()` and the dictionary-returning `dump()` compatibility path do
-not yet execute these public plans. In particular, a failed `plan_render()`
-means no safe reverse route is declared even if legacy `dump()` can still
-project a target-shaped dictionary; do not treat that dictionary as execution
-of a custom downgrade.
+Planning ensures that missing downgrades appropriately refuse rendering for
+lossy migrations. The `dump_versioned()` function executes these public plans
+to safely downgrade and project historical dictionaries.
 
 ## Plans are not traces
 
@@ -204,6 +200,5 @@ must return a dictionary. Returning any other type raises
 `InvalidMigrationError`.
 
 Downgrade declarations and historical rendering across value-changing upgrades
-are part of the broader 0.2 conversion contract, but this foundation does not
-execute them yet. A downgrade declaration is rejected rather than accepted and
-silently ignored.
+are executed natively by the 0.2 conversion contract. A missing downgrade across
+a value-changing upgrade makes historical rendering irreversible and raises an error.

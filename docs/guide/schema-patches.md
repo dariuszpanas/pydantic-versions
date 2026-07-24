@@ -61,5 +61,5 @@ class AppConfig(BaseModel):
 ```
 
 Only explicitly listed versions are patched. Pattern or regex matching is not
-enabled in the first release because schema versions are arbitrary ordered
-strings, not necessarily semantic versions.
+enabled because schema versions are arbitrary ordered strings, not necessarily
+semantic versions.
