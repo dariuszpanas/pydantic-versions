@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydantic-versions"
-version = "0.2.0rc1"
+version = "0.2.0"
 description = "Bring version control and history to your Pydantic schemas"
 readme = "README.md"
 license = "Apache-2.0"

@@ -130,7 +130,7 @@ def validate_app_config(data):
 
 
 def render_app_config(model, version: str):
-    return dump_versioned(model, family=APP_CONFIG_SCHEMA, version=version)
+    return dump_versioned(APP_CONFIG_SCHEMA, version=version, data=model)
 ```
 
 In most migrations, this change is behaviorally identical, but the version

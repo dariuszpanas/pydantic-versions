@@ -68,10 +68,8 @@ class VersionTransition:
 
 Custom transitions must connect adjacent forward labels. An adjacent pair with
 no `VersionTransition` declaration is compiled as an identity edge; every
-declared transition must contain at least one callable. The current foundation
-executes forward upgrades; downgrade execution lands with the
-historical-rendering work and non-empty downgrade declarations are rejected in
-the meantime.
+declared transition must contain at least one callable. Upgrades are executed
+during validation, and downgrades are executed during historical rendering.
 
 ### `VersionMetadata`
 
@@ -121,7 +119,7 @@ See
 [generated wire contracts](../guide/generated-wire-contracts.md) for the full
 supported preserve, omit, and reject boundary.
 
-### 0.2.0 prerelease behavior contract
+### 0.2.0 behavior contract
 
 The generated plan inventory and plans are the preferred compatibility artifacts:
 
@@ -140,9 +138,8 @@ The generated plan inventory and plans are the preferred compatibility artifacts
 ### Reserved nested declarations
 
 `NestedFamily`, `MatchingLabels`, and `matching_labels()` are exported as frozen
-declaration types so the final constructor remains stable. Non-empty explicit
-nested mappings currently fail compilation instead of being ignored; graph
-compilation and nested execution land in their dedicated 0.2 changes.
+declaration types so the final constructor remains stable. These allow complex
+nested schema execution and graph compilation to handle tree-structured data safely.
 
 ## Compiled inventory and plans
 
@@ -205,8 +202,7 @@ Projection descriptions reveal whether a historical version changes a default,
 removes a field, or renames it, but never reveal a default value or factory.
 
 The model is represented by its qualified name rather than a class object.
-`NestedFamilyDescription` is part of the stable output contract, but inventories
-remain flat while explicit nested compilation is unsupported.
+`NestedFamilyDescription` is part of the stable output contract.
 
 ### Plan records
 
@@ -283,10 +279,8 @@ family's first compilation when needed. A later legacy `@migration`
 registration therefore fails instead of mutating the published inventory and
 plans.
 
-The current validation and dictionary-dump compatibility paths are not yet
-driven by these public plans. In particular, a rejected render plan means that
-no safe reverse transition is declared even if legacy dumping can still apply a
-structural target projection.
+Validation and dictionary-dumping are fully driven by these public plans. A rejected
+render plan means that no safe reverse transition is declared.
 
 ## Decorator compatibility
 

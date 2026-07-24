@@ -144,7 +144,5 @@ already be non-empty strings, the final label is current, and custom transitions
 must connect adjacent forward labels. Duplicate, reverse, skipped, or otherwise
 unreachable transitions fail instead of becoming silent dead code.
 
-The current foundation covers flat patch projections and forward upgrades.
-Explicit historical wire models, explicit nested-family mappings, and downgrade
-execution are rejected rather than silently ignored until their dedicated 0.2
-runtime support lands.
+The current foundation covers flat patch projections, explicit wire models,
+explicit nested-family mappings, upgrades, and downgrades.
