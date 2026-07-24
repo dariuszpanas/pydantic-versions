@@ -211,9 +211,10 @@ jobs:
           VENV_DIR="$RUNNER_TEMP/built-package-typing-venv"
           CONSUMER_DIR="$RUNNER_TEMP/built-package-typing-consumer"
           uv venv --python 3.12 "$VENV_DIR"
-          uv pip install --python "$VENV_DIR/bin/python" "${WHEELS[0]}"
+          uv pip install --python "$VENV_DIR/bin/python" "${WHEELS[0]}" pytest
           mkdir -p "$CONSUMER_DIR"
           cp tests/typing/schema_family_contract.py "$CONSUMER_DIR/"
+          cp tests/integration/test_consumer_scenario.py "$CONSUMER_DIR/"
 
           cd "$RUNNER_TEMP"
           "$GITHUB_WORKSPACE/.venv/bin/ty" check \
@@ -221,6 +222,7 @@ jobs:
             --project "$CONSUMER_DIR" \
             "$CONSUMER_DIR/schema_family_contract.py"
           "$VENV_DIR/bin/python" "$CONSUMER_DIR/schema_family_contract.py"
+          "$VENV_DIR/bin/python" -m pytest "$CONSUMER_DIR/test_consumer_scenario.py"
           "$VENV_DIR/bin/python" - <<'PY'
           import os
           from pathlib import Path

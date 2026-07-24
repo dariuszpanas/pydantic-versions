@@ -29,6 +29,9 @@ from pydantic import BaseModel
 django.setup()
 
 from pydantic_versions import (  # noqa: E402
+    SchemaFamily,
+    SchemaVersion,
+    VersionTransition,
     dump_versioned,
     field_default,
     field_renamed,
@@ -365,9 +368,6 @@ create_model_task_v1.__annotations__["payload"] = TaskModelPayloadV1
 api.post("/v1/model-tasks")(create_model_task_v1)
 
 
-urlpatterns = [path("api/", api.urls)]
-
-
 def test_generated_model_schema_works_as_real_ninja_request_body() -> None:
     response = Client().post(
         "/api/v1/model-tasks",
@@ -395,3 +395,80 @@ def test_ninja_openapi_uses_generated_historical_model_schema() -> None:
     assert payload_schema["properties"]["title"]["maxLength"] == 100
     assert "completed" in payload_schema["properties"]
     assert "is_done" not in payload_schema["properties"]
+
+
+class ExternalFamilyConfig(BaseModel):
+    timeout: float = 10.0
+
+
+def upgrade_v1_to_v2_external(data: dict) -> dict:
+    data.setdefault("timeout", 5.0)
+    return data
+
+
+def downgrade_v2_to_v1_external(data: dict) -> dict:
+    return data
+
+
+EXTERNAL_FAMILY_SCHEMA = SchemaFamily(
+    model=ExternalFamilyConfig,
+    name="ninja_external_payload",
+    versions=(
+        SchemaVersion("1", patches=(field_default("timeout", 5.0),)),
+        SchemaVersion("2"),
+    ),
+    transitions=(
+        VersionTransition(
+            "1",
+            "2",
+            upgrade=upgrade_v1_to_v2_external,
+            downgrade=downgrade_v2_to_v1_external,
+            downgrade_semantics="exact",
+        ),
+    ),
+)
+
+
+ExternalPayloadV1 = EXTERNAL_FAMILY_SCHEMA.model_for("1")
+
+
+def create_external_task_v1(request, payload):
+    result = validate_versioned(EXTERNAL_FAMILY_SCHEMA, payload.model_dump(), version="1")
+    return {
+        "version": result.source_version,
+        "timeout": result.current_model.timeout,
+    }
+
+
+create_external_task_v1.__annotations__["payload"] = ExternalPayloadV1
+api.post("/v1/external-tasks")(create_external_task_v1)
+
+
+def test_ninja_openapi_uses_external_family_historical_schema() -> None:
+    openapi = api.get_openapi_schema()
+    request_schema = openapi["paths"]["/api/v1/external-tasks"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    ref_name = request_schema["$ref"].split("/")[-1]
+    payload_schema = openapi["components"]["schemas"][ref_name]
+
+    assert payload_schema["properties"]["timeout"]["default"] == 5.0
+    assert "schema_version" in payload_schema["properties"]
+    assert payload_schema["properties"]["schema_version"]["const"] == "1"
+
+
+def test_external_family_schema_works_as_real_ninja_request_body() -> None:
+    response = Client().post(
+        "/api/v1/external-tasks",
+        data=json.dumps({"schema_version": "1"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "version": "1",
+        "timeout": 5.0,
+    }
+
+
+urlpatterns = [path("api/", api.urls)]
