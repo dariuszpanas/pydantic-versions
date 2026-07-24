@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0rc1 - 2026-07-23
 
 - Defined generated current and historical models as object-shaped Pydantic v2
   wire contracts, with explicit preservation and behavior boundaries, exact
