@@ -52,7 +52,10 @@ def changelog_has_version(changelog_path: Path, version: str) -> bool:
         msg = f"could not read {changelog_path}: {exc}"
         raise ReleaseValidationError(msg) from exc
 
-    heading = re.compile(rf"^##[ \t]+{re.escape(version)}(?:[ \t]+.*)?$", re.MULTILINE)
+    # Allow [version] to support Keep A Changelog format
+    heading = re.compile(
+        rf"^##[ \t]+(?:\[)?{re.escape(version)}(?:\])?(?:[ \t]+.*)?$", re.MULTILINE
+    )
     return heading.search(changelog) is not None
 
 
