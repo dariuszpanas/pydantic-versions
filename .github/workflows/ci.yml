@@ -105,7 +105,11 @@ jobs:
           uv sync --frozen --python 3.12
 
       - name: Audit installed dependencies
-        run: uv run pip-audit --strict
+        run: |
+          uv export --frozen --no-emit-project \
+            --output-file "$RUNNER_TEMP/audit-requirements.txt"
+          uv run pip-audit --strict \
+            --requirement "$RUNNER_TEMP/audit-requirements.txt"
 
   test:
     name: Test (Python ${{ matrix.python-version }}, Pydantic ${{ matrix.pydantic-profile }})
