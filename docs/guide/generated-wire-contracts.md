@@ -25,12 +25,21 @@ Pydantic's declarative handling of that shape:
 | Omitted | Lifecycle-only configuration such as assignment validation and frozen instances | Generated models describe documents rather than application-object lifecycle behavior. |
 | Rejected | `RootModel`, an incomplete or unresolved generic model, or another non-object validation or serialization shape | Compilation raises `UnsupportedWireModelError`; resolve and rebuild an incomplete model, or wrap a root or scalar value in a named object field. |
 | Rejected | A model-level serializer, application-defined annotation or model schema hooks, behavioral dataclasses, callable schema/title mutation, non-JSON schema metadata, model schema metadata that replaces generated structure, legacy `json_encoders`, or arbitrary-type escape hatches | Automatic projection cannot safely reproduce that custom behavior and raises `UnsupportedWireModelError`. |
-| Rejected | Serialization exclusions such as `exclude`/`exclude_if`, callable discriminators, and unknown behavior-changing model or field settings | The automatic compiler fails closed instead of silently changing the wire document. |
+| Omitted | Server-internal fields marked with `Field(exclude=True)` or `Field(exclude_if=...)` | The field is absent from every generated wire projection; it remains available on the authoritative application model. |
+| Rejected | Callable discriminators and unknown behavior-changing model or field settings | The automatic compiler fails closed instead of silently changing the wire document. |
 | Rejected at registration | Pydantic v1 compatibility models | The family raises `SchemaVersionError` before automatic projection; wire models must inherit from Pydantic v2's `BaseModel`. |
 
 Historical patches are applied to this preserved declaration state. A removed
 field is absent, a renamed field uses its historical Python name, and a default
 patch replaces the projected field's required/default/factory state.
+
+An excluded field is also absent from the generated wire model. This is the
+supported way to keep server-internal state on the authoritative model while
+using that model as the source for a document contract. The exclusion is not
+copied as a Pydantic serialization option because doing so would leave the
+field present during wire validation. Conditional exclusions are treated the
+same way: the field is omitted unconditionally from generated projections.
+The configured model-owned version field may not be excluded.
 
 Zero-argument factories remain safe when the field annotation is unchanged. A
 decorator-owned child annotation can replace the child class itself as a
@@ -71,6 +80,13 @@ This is a statement about the generated Pydantic and JSON Schema shape.
 Conversion-time version discovery, conflict handling, and metadata mutation are
 separate runtime concerns.
 
+Content discriminators are separate from schema-version metadata. A supported
+string discriminator declared on a field remains part of the generated wire
+contract, and its discriminator mapping and literal branch values are preserved
+across version projections. Callable discriminators remain unsupported because
+their runtime selection behavior cannot be reproduced safely by automatic
+projection.
+
 ## Current-Model Validation
 
 The current application model remains authoritative. Its validators, methods,
@@ -81,6 +97,13 @@ Directly validating a generated model exercises only that wire contract and
 raises Pydantic's native `ValidationError` on invalid input. Use the family
 validation API when the desired result is an instance of the authoritative
 current model.
+
+Field and model validators follow the same boundary. They are intentionally not
+copied to generated wire models, so a `mode="before"` validator may coerce or
+reshape input for the authoritative model while the generated JSON Schema
+describes the post-coercion wire shape. Consumers should validate against the
+generated model for the document contract and use the family API when they need
+the authoritative model's runtime behavior.
 
 ## Unsupported Models
 
