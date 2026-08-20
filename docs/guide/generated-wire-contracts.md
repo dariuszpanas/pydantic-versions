@@ -105,6 +105,35 @@ describes the post-coercion wire shape. Consumers should validate against the
 generated model for the document contract and use the family API when they need
 the authoritative model's runtime behavior.
 
+Family validation has two deliberate stages: it validates the source document
+against the generated wire model first, then runs the authoritative current
+model after migrations. Consequently, raw input accepted only by an omitted
+validator is not automatically accepted as a wire document. Once the payload
+has the generated wire shape, authoritative validators can still normalize it
+or enforce application invariants at the final boundary.
+
+The boundary applies consistently to every Pydantic validator mode:
+
+| Validator behavior | Authoritative model | Generated wire model and schema |
+| --- | --- | --- |
+| `mode="before"` | May coerce or reshape raw input before annotation validation once the wire document has passed. | Accepts the declared annotation shape only; the schema does not advertise raw values accepted only by the validator. |
+| `mode="after"` | May normalize or enforce invariants after annotation validation. | Keeps the declarative annotation validation but does not run the normalization or invariant check. |
+| `mode="plain"` | Replaces Pydantic's normal annotation validation at the authoritative boundary. | Retains the annotation's generated wire schema and core validation; inputs accepted only by the plain validator are not wire inputs. |
+| `mode="wrap"` | May preprocess input, delegate to core validation, or replace its result after wire validation. | Does not copy the wrapper; direct validation follows the generated annotation and constraints. |
+
+Model-level `before`, `after`, and `wrap` validators follow the same rule. They
+are authoritative application behavior, not generated wire behavior. Field and
+model serializers are also omitted: a generated `model_dump()` represents the
+wire contract, while serialization of the authoritative model may still apply
+the application's serializer. `model_post_init` is omitted for the same reason.
+
+For example, a `mode="before"` validator that turns `"1,2"` into `[1, 2]`
+does not make the generated model accept the string, and `SchemaFamily.validate`
+also rejects it at the source wire boundary. A wire-shaped `[1, 2]` payload can
+then be normalized by the authoritative validator before the final current
+model is returned. This keeps framework/OpenAPI consumers on the wire contract
+while preserving application behavior at the final boundary.
+
 ## Unsupported Models
 
 `UnsupportedWireModelError` is a `SchemaCompilationError`. It is raised during
