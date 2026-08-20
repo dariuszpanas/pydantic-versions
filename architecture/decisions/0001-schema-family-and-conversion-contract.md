@@ -1,10 +1,19 @@
 # ADR 0001: Schema-family and conversion contract
 
-- **Status:** Accepted
+- **Status:** Historical target; partially implemented
 - **Target:** 0.2.0
 - **Decision date:** 2026-07-22
 - **Tracking issue:** [#3](https://github.com/dariuszpanas/pydantic-versions/issues/3)
 - **Parent roadmap:** [#2](https://github.com/dariuszpanas/pydantic-versions/issues/2)
+
+> [!IMPORTANT]
+> This ADR records the target design used to guide the 0.2.0 work. It is not the
+> authoritative reference for the shipped package. External schema families,
+> generated wire contracts, inventories, plans, downgrade execution, explicit
+> wire models, and nested conversion were delivered. The proposed execution
+> traces, rendering result API, and contextual error hierarchy were not.
+> User-facing guides, the API reference, exported symbols, and tests define the
+> implemented contract.
 
 This record defines the target 0.2.0 contract. It is not a claim that the API is
 already implemented in 0.1. Implementation is split across the linked roadmap

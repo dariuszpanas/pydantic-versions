@@ -18,6 +18,7 @@ nav = [
     { "Generated Wire Contracts" = "guide/generated-wire-contracts.md" },
     { "Pydantic Compatibility Matrix" = "guide/pydantic-compatibility-matrix.md" },
     { "External Schema Families" = "guide/external-families.md" },
+    { "Application-to-Application Exchange" = "guide/application-exchange.md" },
     { "Complex Config Example" = "guide/complex-config-example.md" },
     { "Django Ninja" = "guide/django-ninja.md" },
     { "Version Discovery" = "guide/version-discovery.md" },
@@ -25,9 +26,6 @@ nav = [
     { "Migrations" = "guide/migrations.md" },
     { "Rendering Configs" = "guide/rendering.md" },
     { "Adoption Guidance" = "guide/adoption-guidance.md" },
-  ] },
-  { "Architecture Decisions" = [
-    { "Schema-family and conversion contract" = "decisions/0001-schema-family-and-conversion-contract.md" },
   ] },
   { "Reference" = [
     { "API" = "reference/api.md" },

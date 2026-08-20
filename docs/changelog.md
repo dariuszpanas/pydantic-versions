@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Added dark-mode documentation support and theme-aware project artwork.
+- Added compatibility coverage for nested concrete generics, content
+  discriminators, nested exclusions, and validator-to-wire-schema boundaries.
+- Added a published Pydantic compatibility matrix.
+- Added an application-to-application schema exchange guide and integration
+  scenario covering compatibility selection, historical defaults, and version
+  metadata ownership.
+
+### Changed
+- Omit fields marked with `Field(exclude=True)` or `exclude_if` from generated
+  wire projections.
+- Refreshed development dependencies and GitHub Actions.
+
+### Security
+- Added weekly Dependabot updates and a strict dependency vulnerability audit
+  to CI.
+
 ## [0.2.0] - 2026-07-23
 
 ### Added
@@ -57,5 +77,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Django Ninja compatibility tests and documentation for versioned API schemas.
 - Added install and getting-started documentation.
 
+[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dariuszpanas/pydantic-versions/releases/tag/v0.1.0

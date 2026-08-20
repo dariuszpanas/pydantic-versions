@@ -116,8 +116,8 @@ Automatic projection raises `UnsupportedWireModelError` for a `RootModel`,
 unresolved generic, model-level serializer, overridden model core/JSON Schema
 hook, application-defined annotation hook, behavioral dataclass, callable or
 non-JSON schema mutation, structural model schema override, validated-data
-factory, legacy `json_encoders`, arbitrary-type escape hatch, serialization
-exclusion, or non-object validation or serialization shape. Pydantic v1 models
+factory, legacy `json_encoders`, arbitrary-type escape hatch, or non-object
+validation or serialization shape. Pydantic v1 models
 instead fail registration with `SchemaVersionError`.
 See
 [generated wire contracts](../guide/generated-wire-contracts.md) for the full
@@ -275,8 +275,9 @@ contain payload-derived indices or keys.
 Inventories and plans never contain payloads, model objects, callable objects,
 default values, exception messages, tracebacks, timing, or host/user
 identifiers, and creating them does not log. A plan describes a possible
-operation; it is not an execution trace. Structured per-payload traces are a
-separate API.
+operation; it is not an execution trace. The package does not currently expose
+structured per-payload traces; `VersionedValidation.migrations_applied` remains
+the compatibility view of completed top-level custom upgrades.
 
 Calling `describe()`, `plan_validation()`, or `plan_render()` performs the
 family's first compilation when needed. A later legacy `@migration`
