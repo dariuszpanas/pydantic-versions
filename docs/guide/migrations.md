@@ -23,9 +23,7 @@ APP_CONFIG_SCHEMA = SchemaFamily(
     model=AppConfig,
     name="app_config",
     versions=(SchemaVersion("1"), SchemaVersion("2")),
-    transitions=(
-        VersionTransition("1", "2", upgrade=upgrade_v1),
-    ),
+    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
 )
 ```
 
@@ -65,8 +63,7 @@ from pydantic_versions import versioned_schema
 
 
 @versioned_schema(name="app_config", versions=("1", "2", "3"), current="3")
-class AppConfig(BaseModel):
-    ...
+class AppConfig(BaseModel): ...
 ```
 
 Valid edges are `1 -> 2` and `2 -> 3`. A direct `1 -> 3` registration, a reverse

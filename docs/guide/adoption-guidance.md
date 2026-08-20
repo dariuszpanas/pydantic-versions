@@ -149,8 +149,7 @@ schema those files represent and set `missing_version`:
     current="2",
     missing_version="1",
 )
-class AppConfig(BaseModel):
-    ...
+class AppConfig(BaseModel): ...
 ```
 
 Do this only for real legacy compatibility. For new formats, prefer requiring an
