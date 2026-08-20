@@ -1,7 +1,7 @@
 # pydantic-versions
 
 <p align="center">
-  <img src="assets/images/pydantic-versions-hero.png" alt="pydantic-versions logo" width="760">
+  <img src="assets/images/pydantic-versions-hero-transparent.png" alt="pydantic-versions logo" width="760">
 </p>
 
 `pydantic-versions` brings explicit schema versioning to Pydantic models.

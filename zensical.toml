@@ -41,7 +41,6 @@ nav = [
 [project.theme]
 logo = "assets/images/pydantic-versions-icon.svg"
 favicon = "assets/images/pydantic-versions-icon.svg"
-palette = { scheme = "default", primary = "blue", accent = "amber" }
 font = { text = "Manrope", code = "Roboto Mono" }
 features = [
   "navigation.sections",
@@ -51,3 +50,17 @@ features = [
   "content.action.edit",
   "content.action.view",
 ]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "blue"
+accent = "amber"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "blue"
+accent = "amber"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
