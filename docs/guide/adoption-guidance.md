@@ -204,3 +204,31 @@ For each schema family, test these cases:
 
 These tests become the compatibility contract for users who keep config files in
 Git, object storage, databases, or generated deployment manifests.
+
+## Generic and nested consumer models
+
+Bind generic parameters before creating a schema family. The generic base is a
+type template, not an object-shaped wire contract:
+
+```python
+class BenchmarkConfig[T: GeneralConfig](BaseModel):
+    general: T
+    results: ResultsConfig
+
+
+BENCHMARK_SCHEMA = SchemaFamily(
+    model=BenchmarkConfig[GeneralConfig],
+    name="benchmark_config",
+    versions=(SchemaVersion("v1"), SchemaVersion("v2")),
+    nested=(
+        NestedFamily("general", GENERAL_SCHEMA, matching_labels()),
+        NestedFamily("results", RESULTS_SCHEMA, matching_labels()),
+    ),
+)
+```
+
+An unresolved generic base such as `BenchmarkConfig` is rejected during
+automatic projection because its wire field types are not concrete. A resolved
+specialization such as `BenchmarkConfig[GeneralConfig]` is supported. Declare a
+nested family at each model path whose child schema history must be projected;
+the child family can use matching labels or an explicit parent-to-child mapping.
