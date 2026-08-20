@@ -96,7 +96,11 @@ cannot replace generated object properties, requirements, or composition.
 They do not copy model or field validators, field serializers, computed fields,
 private attributes, methods, `model_post_init`, or lifecycle-only configuration.
 The authoritative current model remains responsible for final application
-validation.
+validation. `model_for(...).model_validate(...)` is the direct source-wire
+check; `SchemaFamily.validate(...)` performs that wire check first and then
+validates the migrated payload with the authoritative current model. Neither
+API treats a validator-only raw input shape as part of the generated wire
+contract.
 
 When version metadata is family-owned, the complete generated document adapter
 has an exact `Literal[label]` discriminator for every version, including
