@@ -872,6 +872,11 @@ def _line_length_errors(
     generated_header: bool = False,
 ) -> list[str]:
     """Validate wrappable prose while tolerating mechanical Markdown structures."""
+    if generated_header:
+        # Dependabot's signed, metadata-backed messages are generated records;
+        # preserve their canonical summaries and release links verbatim.
+        return []
+
     errors: list[str] = []
     table_lines = _markdown_table_lines(lines)
     for index, line in enumerate(lines):
