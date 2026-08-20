@@ -195,7 +195,8 @@ _WIRE_FIELD_ATTRIBUTES = frozenset(
     }
 )
 _DROPPED_FIELD_ATTRIBUTES = frozenset({"frozen", "init", "init_var", "kw_only", "repr"})
-_REJECTED_FIELD_ATTRIBUTES = frozenset({"exclude", "exclude_if", "field_title_generator"})
+_OMITTED_FIELD_ATTRIBUTES = frozenset({"exclude", "exclude_if"})
+_REJECTED_FIELD_ATTRIBUTES = frozenset({"field_title_generator"})
 _FUNCTIONAL_FIELD_BEHAVIOR = (
     AfterValidator,
     BeforeValidator,
@@ -359,7 +360,7 @@ def _build_model_for_projection_unchecked(
         field_dict = field_info.asdict()
         excluded = any(
             key in field_dict["attributes"] and _has_effect(field_dict["attributes"][key])
-            for key in ("exclude", "exclude_if")
+            for key in _OMITTED_FIELD_ATTRIBUTES
         )
         if excluded:
             if compiled_field.current_name == model_metadata_field:
@@ -558,6 +559,7 @@ def _wire_field_attributes(
         set(source)
         - _WIRE_FIELD_ATTRIBUTES
         - _DROPPED_FIELD_ATTRIBUTES
+        - _OMITTED_FIELD_ATTRIBUTES
         - _REJECTED_FIELD_ATTRIBUTES
     )
     if unknown:
@@ -1673,6 +1675,12 @@ def _rewrite_nested_model(
         fields: dict[str, Any] = {}
         for source_name, source_field_info in annotation.model_fields.items():
             source = source_field_info.asdict()
+            excluded = any(
+                key in source["attributes"] and _has_effect(source["attributes"][key])
+                for key in _OMITTED_FIELD_ATTRIBUTES
+            )
+            if excluded:
+                continue
             rewritten_annotation = _rewrite_annotation(
                 source["annotation"],
                 version,

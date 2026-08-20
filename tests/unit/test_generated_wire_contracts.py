@@ -1206,6 +1206,47 @@ def test_nested_projection_rewrites_deeply_nested_models() -> None:
     assert current.model_dump()["nested"]["inner"]["label"] == 1
 
 
+def test_nested_projection_omits_excluded_application_fields() -> None:
+    class LeafPayload(BaseModel):
+        label: int
+
+    class InnerPayload(BaseModel):
+        value: int
+        object_store: dict[str, str] = Field(default_factory=dict, exclude=True)
+        cache_key: str = Field(default="", exclude_if=lambda value: not value)
+        child: LeafPayload
+
+    class RootPayload(BaseModel):
+        inner: InnerPayload
+
+    family = SchemaFamily(
+        model=RootPayload,
+        name="nested_excluded_fields",
+        versions=(SchemaVersion("1"),),
+        nested=(
+            NestedFamily(
+                ("inner", "child"),
+                SchemaFamily(
+                    model=LeafPayload,
+                    name="nested_excluded_leaf",
+                    versions=(SchemaVersion("1"),),
+                    version_metadata=None,
+                ),
+                matching_labels(),
+            ),
+        ),
+        version_metadata=None,
+    )
+
+    wire = family.model_for("1")
+    nested_wire = wire.model_fields["inner"].annotation
+
+    assert set(nested_wire.model_fields) == {"value", "child"}
+    assert wire.model_validate({"inner": {"value": 3, "child": {"label": 4}}}).model_dump() == {
+        "inner": {"value": 3, "child": {"label": 4}},
+    }
+
+
 def test_single_segment_tuple_metadata_keeps_tuple_path_semantics() -> None:
     class TupleMetadataPayload(BaseModel):
         value: int = 1
