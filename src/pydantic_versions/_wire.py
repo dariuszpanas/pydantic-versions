@@ -356,6 +356,22 @@ def _build_model_for_projection_unchecked(
             continue
 
         field_info = family.model.model_fields[compiled_field.current_name]
+        field_dict = field_info.asdict()
+        excluded = any(
+            key in field_dict["attributes"] and _has_effect(field_dict["attributes"][key])
+            for key in ("exclude", "exclude_if")
+        )
+        if excluded:
+            if compiled_field.current_name == model_metadata_field:
+                _raise_projection_unsupported(
+                    family,
+                    projection,
+                    "model-owned version metadata cannot be excluded from the wire model",
+                )
+            # These fields are application/server state, not part of the document
+            # contract.  Omit them from every generated projection rather than
+            # pretending that Pydantic's serialization-only exclusion is wire-safe.
+            continue
         if (
             compiled_field.current_name == model_metadata_field
             and compiled_field.default is not None
@@ -374,7 +390,6 @@ def _build_model_for_projection_unchecked(
                 f"validated-data default factory for field {compiled_field.current_name!r} "
                 "cannot be projected without materializing current-model behavior",
             )
-        field_dict = field_info.asdict()
         annotation = _rewrite_annotation(
             field_dict["annotation"],
             projection.label,

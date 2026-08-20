@@ -1431,19 +1431,42 @@ def test_legacy_json_encoders_fail_automatic_projection() -> None:
     assert encoder_calls == 0
 
 
-def test_serialization_exclusions_fail_automatic_projection() -> None:
+def test_serialization_exclusions_are_omitted_from_automatic_projection() -> None:
     class ExcludedPayload(BaseModel):
         value: int = Field(default=1, exclude=True)
 
     class ConditionalExclusionPayload(BaseModel):
         value: int = Field(default=1, exclude_if=lambda value: value == 0)
 
-    unsupported = (
+    for suffix, model in (
         ("exclude", ExcludedPayload),
         ("exclude_if", ConditionalExclusionPayload),
+    ):
+        family = SchemaFamily(
+            model=model,
+            name=f"excluded_{suffix}",
+            versions=(SchemaVersion("1"),),
+            version_metadata=None,
+        )
+        wire = family.model_for("1")
+        assert "value" not in wire.model_fields
+        assert wire.model_validate({}).model_dump() == {}
+
+
+def test_model_owned_version_field_cannot_be_excluded() -> None:
+    class ExcludedVersionPayload(BaseModel):
+        schema_version: Literal["1"] = Field("1", exclude=True)
+        value: int
+
+    family = SchemaFamily(
+        model=ExcludedVersionPayload,
+        name="excluded_version_metadata",
+        versions=(SchemaVersion("1"),),
+        version_metadata=VersionMetadata("schema_version", owner="model"),
     )
-    for suffix, model in unsupported:
-        _assert_unsupported(model, family_name=f"unsupported_{suffix}")
+
+    with pytest.raises(UnsupportedWireModelError, match="cannot be excluded"):
+        family.compile()
 
 
 def test_callable_discriminators_fail_in_field_and_annotated_forms() -> None:
