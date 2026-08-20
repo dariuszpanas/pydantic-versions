@@ -36,6 +36,16 @@
   color: #ffffff;
 }
 
+.md-header .md-header__button {
+  color: #ffffff;
+}
+
+.md-header .md-header__button:focus,
+.md-header .md-header__button:hover {
+  color: #ffffff;
+  opacity: 1;
+}
+
 .md-header__title,
 .md-nav__title,
 .md-typeset h1,
@@ -66,7 +76,9 @@
 }
 
 .md-logo img {
+  background: #ffffff;
   border-radius: 0.24rem;
+  padding: 0.1rem;
 }
 
 .md-typeset h1,
