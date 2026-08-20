@@ -83,6 +83,30 @@ jobs:
       - name: Type check
         run: uv run ty check
 
+  security:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.31"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install locked dependencies
+        run: |
+          uv lock --check
+          uv sync --frozen --python 3.12
+
+      - name: Audit installed dependencies
+        run: uv run pip-audit --strict
+
   test:
     name: Test (Python ${{ matrix.python-version }}, Pydantic ${{ matrix.pydantic-profile }})
     runs-on: ubuntu-latest

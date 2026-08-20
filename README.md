@@ -60,9 +60,7 @@ APP_CONFIG_SCHEMA = SchemaFamily(
         ),
         SchemaVersion("2"),
     ),
-    transitions=(
-        VersionTransition("1", "2", upgrade=upgrade_v1),
-    ),
+    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
     missing_version="1",
 )
 

@@ -124,9 +124,7 @@ from pydantic import BaseModel
 type TransitionData = dict[str, Any]
 type TransitionFunc = Callable[[TransitionData], TransitionData]
 type VersionPath = str | tuple[str, ...]
-type JsonValue = (
-    None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
-)
+type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
 @dataclass(frozen=True)
