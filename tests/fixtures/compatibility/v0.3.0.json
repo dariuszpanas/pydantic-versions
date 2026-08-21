@@ -1,0 +1,549 @@
+{
+  "provenance": {
+    "package": "pydantic-versions",
+    "version": "0.3.0",
+    "git_tag": "v0.3.0",
+    "git_commit": "a03e67e5adc83e0087773383c3d55ed9e8da9bde",
+    "artifact_format": 1
+  },
+  "payloads": {
+    "historical_embedded_v1": {
+      "schema_version": "1",
+      "endpoint": "worker.example",
+      "attempts": 4,
+      "credentials": {
+        "schema_version": "1",
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    },
+    "normalized_from_v1": {
+      "endpoint": "https://worker.example",
+      "timeout": 5,
+      "retry_limit": 4,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    },
+    "exact_embedded_v2": {
+      "endpoint": "https://worker.example",
+      "timeout": 5,
+      "retries": 4,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1",
+        "schema_version": "2"
+      },
+      "schema_version": "2"
+    },
+    "exact_transport_v2": {
+      "endpoint": "https://worker.example",
+      "timeout": 5,
+      "retries": 4,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1",
+        "schema_version": "2"
+      }
+    },
+    "lossy_source_v3": {
+      "endpoint": "https://worker.example",
+      "timeout": 12,
+      "retry_limit": 6,
+      "telemetry": false,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    },
+    "lossy_embedded_v1": {
+      "endpoint": "worker.example",
+      "timeout": 12,
+      "attempts": 6,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1",
+        "schema_version": "1"
+      },
+      "schema_version": "1"
+    }
+  },
+  "consumer_results": {
+    "exact_embedded_v2": {
+      "endpoint": "https://worker.example",
+      "timeout": 5,
+      "retries": 4,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    },
+    "exact_transport_v2": {
+      "endpoint": "https://worker.example",
+      "timeout": 5,
+      "retries": 4,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    },
+    "lossy_embedded_v1": {
+      "endpoint": "https://worker.example",
+      "timeout": 12,
+      "retries": 6,
+      "telemetry": true,
+      "credentials": {
+        "token": "fixture-token",
+        "region": "eu-west-1"
+      }
+    }
+  },
+  "inspection": {
+    "producer_inventory": {
+      "family": "com.example.golden-service-config",
+      "model": "pydantic_versions_compatibility_v0_3_0.ProducerConfig",
+      "current_version": "3",
+      "versions": [
+        {
+          "label": "1",
+          "wire_model": "generated",
+          "projections": [
+            {
+              "kind": "default",
+              "current_field": "timeout",
+              "historical_field": "timeout",
+              "has_default": true
+            },
+            {
+              "kind": "renamed",
+              "current_field": "retry_limit",
+              "historical_field": "attempts",
+              "has_default": false
+            },
+            {
+              "kind": "removed",
+              "current_field": "telemetry",
+              "historical_field": null,
+              "has_default": false
+            }
+          ]
+        },
+        {
+          "label": "2",
+          "wire_model": "generated",
+          "projections": [
+            {
+              "kind": "default",
+              "current_field": "timeout",
+              "historical_field": "timeout",
+              "has_default": true
+            },
+            {
+              "kind": "renamed",
+              "current_field": "retry_limit",
+              "historical_field": "retries",
+              "has_default": false
+            }
+          ]
+        },
+        {
+          "label": "3",
+          "wire_model": "current",
+          "projections": []
+        }
+      ],
+      "transitions": [
+        {
+          "source": "1",
+          "target": "2",
+          "upgrade": "custom",
+          "downgrade": "custom",
+          "downgrade_semantics": "exact"
+        },
+        {
+          "source": "2",
+          "target": "3",
+          "upgrade": "implicit_identity",
+          "downgrade": "implicit_identity",
+          "downgrade_semantics": "exact"
+        }
+      ],
+      "nested": [
+        {
+          "schema_path": "$.credentials",
+          "family": "com.example.golden-service-config.credentials",
+          "versions": [
+            [
+              "1",
+              "1"
+            ],
+            [
+              "2",
+              "2"
+            ],
+            [
+              "3",
+              "2"
+            ]
+          ]
+        }
+      ],
+      "version_metadata": {
+        "path": "schema_version",
+        "owner": "family"
+      }
+    },
+    "credentials_inventory": {
+      "family": "com.example.golden-service-config.credentials",
+      "model": "pydantic_versions_compatibility_v0_3_0.ProducerCredentials",
+      "current_version": "2",
+      "versions": [
+        {
+          "label": "1",
+          "wire_model": "generated",
+          "projections": []
+        },
+        {
+          "label": "2",
+          "wire_model": "current",
+          "projections": []
+        }
+      ],
+      "transitions": [
+        {
+          "source": "1",
+          "target": "2",
+          "upgrade": "implicit_identity",
+          "downgrade": "implicit_identity",
+          "downgrade_semantics": "exact"
+        }
+      ],
+      "nested": [],
+      "version_metadata": {
+        "path": "schema_version",
+        "owner": "family"
+      }
+    },
+    "validate_v1": {
+      "family": "com.example.golden-service-config",
+      "source_version": "1",
+      "target_version": "3",
+      "operation": "validate",
+      "semantics": "not_applicable",
+      "steps": [
+        {
+          "id": "pv1-48693958654db270dd21ec64c53a9f6c26e7973c79baf074aba6166616dc28d2",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "metadata",
+          "schema_path": "schema_version",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-978fca195076ee84e1d3dcdbfd8c22df91fada38279a0aa7684e7658782f4ca6",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "wire_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-7d90277a1e82ac6d73b37eb2114d78b8264331b12ff25406243a6393b4dd037b",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "projection",
+          "schema_path": "timeout",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-78dcdf532ae7972ef4f6fb99307424ff8f05edc518b6266c841ab60f8b6cd4c1",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "projection",
+          "schema_path": "retry_limit",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-1475806598783d8093eda135a5d1233a53572bba95e5a1b56cc2014e1faa87a4",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "projection",
+          "schema_path": "telemetry",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-4e531e5e4ad4f54c2971167c7da787f2d33e96f8713ee5fb9d9f3af51514b32c",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "2",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "custom_transition",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-33a4091ab0a775a34f19d35ca62a17f3d307a761217222f503098b6a87b8a11a",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "3",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "implicit_identity",
+          "schema_path": "$",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-85ec5fc4876cadad348d0f2779b148f7d548a3ea155c65bef0459b0ba13c671b",
+          "family": "com.example.golden-service-config",
+          "source_version": "3",
+          "target_version": "3",
+          "operation": "validate",
+          "direction": "upgrade",
+          "kind": "current_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        }
+      ]
+    },
+    "render_v2_exact": {
+      "family": "com.example.golden-service-config",
+      "source_version": "3",
+      "target_version": "2",
+      "operation": "render",
+      "semantics": "exact",
+      "steps": [
+        {
+          "id": "pv1-8c24e75b967e62a86951614c5cd9fc8465facae54099ab52163e7b4cdef4bdd6",
+          "family": "com.example.golden-service-config",
+          "source_version": "3",
+          "target_version": "3",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "current_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-72b02f75096bd6e54d3419390566c1aef2155230fd019717d608500aeacd4daf",
+          "family": "com.example.golden-service-config",
+          "source_version": "3",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "implicit_identity",
+          "schema_path": "$",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-1449902be225f4af099a3f5beea7775a971062074ded2cd022a689cc6a7f9b5c",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "projection",
+          "schema_path": "timeout",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-d9fb41dfc049c37bb3881a8eb9d180672f6b337d745e2514095cdea0a1be3ea1",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "projection",
+          "schema_path": "retry_limit",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-743f3b2e738ad7c69284d10e6ad218dfa8b19f66bdfdd49cca312ac7da39120c",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "metadata",
+          "schema_path": "schema_version",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-20371f835f2321012149d15841464189184afd991237eb7967d4a2b9b3d9af93",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "wire_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-4e2ca39767e964321afbc111f8198f26eac0ab694d11588a39d79dd9c3ce482e",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "serialization",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        }
+      ]
+    },
+    "render_v1_lossy": {
+      "family": "com.example.golden-service-config",
+      "source_version": "3",
+      "target_version": "1",
+      "operation": "render",
+      "semantics": "lossy",
+      "steps": [
+        {
+          "id": "pv1-8c24e75b967e62a86951614c5cd9fc8465facae54099ab52163e7b4cdef4bdd6",
+          "family": "com.example.golden-service-config",
+          "source_version": "3",
+          "target_version": "3",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "current_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-72b02f75096bd6e54d3419390566c1aef2155230fd019717d608500aeacd4daf",
+          "family": "com.example.golden-service-config",
+          "source_version": "3",
+          "target_version": "2",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "implicit_identity",
+          "schema_path": "$",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-e4054d80fff357a46244b427c480e943b37a1481c17c471d50296f94ae7f5374",
+          "family": "com.example.golden-service-config",
+          "source_version": "2",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "custom_transition",
+          "schema_path": "$",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-ae4b0deee900c83aebb52c5138cb73119fe05eb073ac2e59d277cd9a1738f98a",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "projection",
+          "schema_path": "timeout",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-2fb24a18807da75a5a19e78018c8d79a273e7f7a2a059b6bb4a7f7694da20005",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "projection",
+          "schema_path": "retry_limit",
+          "semantics": "exact",
+          "conditional": false
+        },
+        {
+          "id": "pv1-e743b9c076b883e5438b70ef3b6aad0f0f7a5dcb4814016c8dda6e3f3d220d74",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "projection",
+          "schema_path": "telemetry",
+          "semantics": "lossy",
+          "conditional": false
+        },
+        {
+          "id": "pv1-521a99305d1cef48a4d834d6c455bab4f16ea4d459b0a5e6ad2fd4ffb1f75be5",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "metadata",
+          "schema_path": "schema_version",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-c00bbf410a24eefa967185e5a7501f11772884ad30bc5a7cbe80cbd0e1e41bc8",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "wire_validation",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        },
+        {
+          "id": "pv1-52615468ba78031a13199251d2e03150d5b9111a9145ff2ca549b03e119ddb44",
+          "family": "com.example.golden-service-config",
+          "source_version": "1",
+          "target_version": "1",
+          "operation": "render",
+          "direction": "downgrade",
+          "kind": "serialization",
+          "schema_path": "$",
+          "semantics": "not_applicable",
+          "conditional": false
+        }
+      ]
+    }
+  }
+}

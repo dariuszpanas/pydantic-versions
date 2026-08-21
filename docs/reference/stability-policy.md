@@ -124,6 +124,11 @@ cross-release golden, unit, integration, supported-version, documentation,
 security, and isolated-package tests. A green narrow test is not evidence for a
 broad compatibility claim; the complete relevant gate must pass.
 
+Cross-release fixtures record their exact released-package provenance and have
+an explicit regeneration command. Current code must consume the persisted
+payloads and reproduce the stable inspection data. Fixture changes require
+review and an explanation under this policy; CI never updates them implicitly.
+
 Once the package solves its defined problem, work is driven by concrete user
 feedback, bug and security reports, dependency/runtime updates, current
 ecosystem standards, and bounded polish. These are responses to real needs,
