@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added an explicit stability and compatibility policy plus executable public
+  API and typing contract gates for the path to 1.0.0.
+
+### Changed
+- Corrected the API reference to document that user transition exceptions
+  propagate unchanged while invalid transition return values raise
+  `InvalidMigrationError`.
+
+### Removed
+- Removed the unused `VersionedValidationError` placeholder from the public
+  package surface before the 1.0.0 contract freeze.
+
 ## [0.3.0] - 2026-08-20
 
 ### Added
