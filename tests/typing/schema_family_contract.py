@@ -6,7 +6,16 @@ from pydantic import BaseModel
 
 from pydantic_versions import (
     ConversionPlan,
+    DuplicateSchemaVersionError,
+    FieldDefault,
+    FieldRemoved,
+    FieldRenamed,
+    InvalidMigrationError,
     IrreversibleTransitionError,
+    JsonValue,
+    MatchingLabels,
+    MissingSchemaVersionError,
+    NestedFamily,
     NestedFamilyDescription,
     PlanStep,
     ProjectionDescription,
@@ -15,16 +24,21 @@ from pydantic_versions import (
     SchemaFamilySelectionError,
     SchemaInventory,
     SchemaVersion,
+    SchemaVersionError,
     StepKind,
     StepSemantics,
     TransitionDescription,
     UnsupportedWireModelError,
     VersionDescription,
     VersionedValidation,
+    VersionMetadata,
     VersionPatch,
     VersionTransition,
     dump_versioned,
     field_default,
+    field_removed,
+    field_renamed,
+    matching_labels,
     model_for_version,
     validate_versioned,
 )
@@ -39,6 +53,11 @@ def upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
 
 
 patch: VersionPatch = field_default("timeout", 5.0)
+default_patch: FieldDefault = field_default("timeout", 5.0)
+removed_patch: FieldRemoved = field_removed("timeout")
+renamed_patch: FieldRenamed = field_renamed("timeout", "request_timeout")
+labels: MatchingLabels = matching_labels()
+metadata = VersionMetadata(path="schema_version", owner="family")
 family: SchemaFamily[AppConfig] = SchemaFamily(
     model=AppConfig,
     name="app_config",
@@ -52,6 +71,13 @@ family: SchemaFamily[AppConfig] = SchemaFamily(
         ),
     ),
 )
+nested: NestedFamily = NestedFamily(path="child", family=family, versions=labels)
+json_value: JsonValue = {"version": "1"}
+assert_type(default_patch, FieldDefault)
+assert_type(removed_patch, FieldRemoved)
+assert_type(renamed_patch, FieldRenamed)
+assert_type(nested, NestedFamily)
+assert_type(metadata, VersionMetadata)
 
 assert_type(family.compile(), SchemaFamily[AppConfig])
 assert_type(family.as_default(), SchemaFamily[AppConfig])
@@ -81,6 +107,10 @@ assert_type(family.dump(version="1"), dict[str, Any])
 assert_type(dump_versioned(family, version="1"), dict[str, Any])
 
 compilation_error: type[Exception] = SchemaCompilationError
+schema_error: type[Exception] = SchemaVersionError
 unsupported_wire_error: type[SchemaCompilationError] = UnsupportedWireModelError
 selection_error: type[Exception] = SchemaFamilySelectionError
 irreversible_error: type[Exception] = IrreversibleTransitionError
+missing_error: type[Exception] = MissingSchemaVersionError
+duplicate_error: type[Exception] = DuplicateSchemaVersionError
+invalid_migration_error: type[Exception] = InvalidMigrationError

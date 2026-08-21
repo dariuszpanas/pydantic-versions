@@ -29,6 +29,7 @@ nav = [
   ] },
   { "Reference" = [
     { "API" = "reference/api.md" },
+    { "Stability and Compatibility" = "reference/stability-policy.md" },
   ] },
   { "Development" = [
     { "Contributing" = "contributing.md" },

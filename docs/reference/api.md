@@ -123,7 +123,7 @@ See
 [generated wire contracts](../guide/generated-wire-contracts.md) for the full
 supported preserve, omit, and reject boundary.
 
-### 0.2.0 behavior contract
+### Behavior contract
 
 The generated plan inventory and plans are the preferred compatibility artifacts:
 
@@ -135,9 +135,11 @@ The generated plan inventory and plans are the preferred compatibility artifacts
   conservative;
 - unsafe declarations fail at registration and keep payloads unchanged by never
   running custom transitions before full validation;
-- execution errors from transitions are represented as wrapped, contextual
-  operation errors and do not persist payload values in diagnostics or public
-  traces.
+- exceptions raised by user transition callables propagate with their original
+  type and traceback. A transition that violates the dictionary return contract
+  raises `InvalidMigrationError`; discovery, compilation, and rendering failures
+  use the documented `SchemaVersionError` subclasses. Exception messages are
+  diagnostic text rather than structured API.
 
 ### Reserved nested declarations
 
@@ -377,8 +379,7 @@ class VersionedValidation[T: BaseModel]:
   - `MissingSchemaVersionError`
   - `UnknownSchemaVersionError`
   - `DuplicateSchemaVersionError`
-  - `InvalidMigrationError`
-  - `VersionedValidationError`
+- `InvalidMigrationError`
 
 `UnsupportedWireModelError` reports that automatic projection cannot safely
 produce the required object-shaped Pydantic v2 wire contract. It is raised
@@ -386,3 +387,6 @@ during compilation and includes safe family, model, and unsupported-reason
 context, plus the version for projection-specific failures. Direct validation
 of a successfully generated wire model still raises Pydantic's native
 `ValidationError`.
+
+See the [stability and compatibility policy](stability-policy.md) for the exact
+public/private boundary and the Semantic Versioning rules applied to this API.

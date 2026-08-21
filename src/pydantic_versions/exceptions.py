@@ -35,7 +35,3 @@ class DuplicateSchemaVersionError(SchemaVersionError):
 
 class InvalidMigrationError(SchemaVersionError):
     """Raised when a migration is invalid or returns an invalid value."""
-
-
-class VersionedValidationError(SchemaVersionError):
-    """Raised when versioned validation cannot be completed."""

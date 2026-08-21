@@ -34,7 +34,6 @@ from pydantic_versions.exceptions import (
     SchemaVersionError,
     UnknownSchemaVersionError,
     UnsupportedWireModelError,
-    VersionedValidationError,
 )
 from pydantic_versions.family import SchemaFamily
 from pydantic_versions.inspection import (
@@ -101,7 +100,6 @@ __all__ = [
     "VersionPath",
     "VersionTransition",
     "VersionedValidation",
-    "VersionedValidationError",
     "VersionDescription",
     "__version__",
     "dump_versioned",
