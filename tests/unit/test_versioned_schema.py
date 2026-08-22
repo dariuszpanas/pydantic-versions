@@ -178,7 +178,7 @@ def test_validate_versioned_normalizes_alias_paths_in_upgrade_output() -> None:
 
     result = validate_versioned(
         AliasPathMigrationTarget,
-        {"schema_version": "1", "value": 4},
+        {"schema_version": "1", "payload": {"value": 4}},
     )
 
     assert result.current_model == AliasPathMigrationTarget.model_validate(
