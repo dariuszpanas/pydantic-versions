@@ -15,11 +15,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   families, and serialized inventories and plans.
 
 ### Changed
+- Corrected the pre-1.0 rendering contract so `defaults_for()` constructs the
+  requested target wire model directly, while `dump(data=None)` delegates to
+  it and an empty mapping remains current data. Complete output now defaults to
+  JSON serialization aliases and rejects omission, polymorphic, round-trip,
+  and unknown options that can weaken the declared target shape.
 - Corrected the API reference to document that user transition exceptions
   propagate unchanged while invalid transition return values raise
   `InvalidMigrationError`.
 
 ### Fixed
+- Made explicit historical wire models with family-owned metadata expose a
+  complete document adapter, including safe metadata composition, nested JSON
+  Schema definitions, ordinary Pydantic construction/copy/assignment behavior,
+  and once-only body validation and serialization. Serializer-controlled
+  metadata collisions and unsafe serializer relocation of managed nested
+  families now fail closed. These generated adapters are final, reserve complete
+  nested metadata envelopes, preflight declared attribute input, and reject
+  output-name collisions from allowed extras.
+- Removed redundant family-owned discriminators from embedded child output
+  across built-in and decorator-discovered nested routes while retaining
+  model-owned child metadata.
 - Replaced the redirecting Read the Docs badge source with a directly rendered
   Shields endpoint so the documentation status appears on PyPI.
 - Rejected nested-family mappings, heterogeneous branches, and child-model

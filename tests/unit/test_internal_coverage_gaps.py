@@ -1312,18 +1312,30 @@ def test_runtime_nested_cardinality_and_prune_coverage() -> None:
             target_label="v2",
         )
 
-    # _prune_nested_family_metadata_at_path with tuple, set, frozenset
-    item_meta = HashableDict({"schema_version": "v1", "val": 1})
+    # _prune_nested_family_metadata_at_path through declared collection shapes
+    class TupleParent(BaseModel):
+        items: tuple[ChildModel, ...]
+
+    class SetParent(BaseModel):
+        items: set[ChildModel]
+
+    tuple_item = HashableDict({"schema_version": "v2", "val": 1})
     _prune_nested_family_metadata_at_path(
-        payload=(item_meta,),
-        path=(),
+        payload={"items": (tuple_item,)},
+        model=TupleParent,
+        path=("items",),
         family=fam,
     )
+    assert tuple_item == {"val": 1}
+
+    set_item = HashableDict({"schema_version": "v2", "val": 1})
     _prune_nested_family_metadata_at_path(
-        payload={item_meta},
-        path=(),
+        payload={"items": {set_item}},
+        model=SetParent,
+        path=("items",),
         family=fam,
     )
+    assert set_item == {"val": 1}
 
 
 def test_runtime_more_pruning_and_nested_collection_kinds() -> None:

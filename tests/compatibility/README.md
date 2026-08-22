@@ -27,3 +27,10 @@ The write command refuses a different package version. Review the resulting
 human-readable diff before committing it. Never regenerate solely to make a
 compatibility failure disappear: either preserve the stable contract or
 document and version the intentional change according to the stability policy.
+
+The immutable artifact also preserves 0.3.0's redundant family-owned version
+metadata inside nested child payloads. Before 1.0, rendering was corrected to
+let the parent mapping own that selection consistently for direct and
+collection children. The checker derives the current expected contract by
+removing only those three reviewed nested discriminator paths; every other
+payload and inspection value must still match the released golden exactly.

@@ -60,6 +60,11 @@ _REVIEWED_NESTED_PLAN_OVERLAY: tuple[tuple[str, str, dict[str, Any]], ...] = (
         },
     ),
 )
+_REVIEWED_NESTED_METADATA_REMOVALS = (
+    "exact_embedded_v2",
+    "exact_transport_v2",
+    "lossy_embedded_v1",
+)
 
 
 def _upgrade_endpoint(data: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +284,9 @@ def render_artifact() -> str:
 
 def _expected_current_artifact(baseline: dict[str, Any]) -> dict[str, Any]:
     expected = deepcopy(baseline)
+    payloads = expected["payloads"]
+    for payload_name in _REVIEWED_NESTED_METADATA_REMOVALS:
+        payloads[payload_name]["credentials"].pop("schema_version")
     inspection = expected["inspection"]
     for plan_name, owning_step_id, nested_step in _REVIEWED_NESTED_PLAN_OVERLAY:
         steps = inspection[plan_name]["steps"]

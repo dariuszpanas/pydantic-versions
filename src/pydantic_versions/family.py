@@ -18,6 +18,7 @@ from pydantic_versions._compiler import (
 )
 from pydantic_versions._planning import _build_planning_catalog, _schema_path
 from pydantic_versions._runtime import (
+    _defaults_family,
     _dump_family,
     _runtime_label,
     _validate_family,
@@ -292,10 +293,11 @@ class SchemaFamily[T: BaseModel]:
         include_version: bool = True,
         **dump_kwargs: Any,
     ) -> dict[str, Any]:
-        return self.dump(
+        return _defaults_family(
+            self,
             version=version,
             include_version=include_version,
-            **dump_kwargs,
+            dump_kwargs=dump_kwargs,
         )
 
     def dump(

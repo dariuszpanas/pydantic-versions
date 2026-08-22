@@ -1048,8 +1048,8 @@ def test_optional_annotated_nested_collections_keep_container_metadata_rules() -
     )
 
     assert rendered["listed"] == [{"value": 1}]
-    for field_name in ("tupled", "set_values", "frozen_values"):
-        assert rendered[field_name][0]["schema_version"] == "1"
+    for field_name, value in (("tupled", 2), ("set_values", 3), ("frozen_values", 4)):
+        assert rendered[field_name] == [{"value": value}]
 
 
 def test_optional_annotated_set_detects_nested_migration_collapse() -> None:

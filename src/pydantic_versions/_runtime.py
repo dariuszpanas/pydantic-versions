@@ -48,6 +48,31 @@ class _DecoratorRouteSelection:
     value_identity: int | None = None
 
 
+_CONTRACT_FIELD_OMISSION_OPTIONS = frozenset(
+    {
+        "exclude",
+        "exclude_computed_fields",
+        "exclude_defaults",
+        "exclude_none",
+        "exclude_unset",
+        "include",
+    }
+)
+_SUPPORTED_MODEL_DUMP_OPTIONS = frozenset(
+    {
+        "by_alias",
+        "context",
+        "fallback",
+        "mode",
+        "polymorphic_serialization",
+        "round_trip",
+        "serialize_as_any",
+        "warnings",
+    }
+)
+_MISSING = object()
+
+
 def _runtime_label(value: object, *, family_name: str) -> str:
     if not isinstance(value, str) or not value:
         msg = f"Schema version for {family_name!r} must be a non-empty string"
@@ -581,7 +606,17 @@ def _dump_family[T: BaseModel](
     include_version: bool,
     dump_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
+    _validate_model_dump_options(dump_kwargs)
+    if data is None:
+        return _defaults_family(
+            family,
+            version=version,
+            include_version=include_version,
+            dump_kwargs=dump_kwargs,
+        )
+
     compiled = family._compiled_family()
+    _validate_include_version_mode(compiled, include_version)
     requested = _runtime_label(version, family_name=family.name)
     target = compiled.version(requested)
     target_index = compiled.index(requested)
@@ -595,15 +630,11 @@ def _dump_family[T: BaseModel](
         parent_label=compiled.current_version,
     )
 
-    if data is None:
-        payload = {}
-        decorator_selections: tuple[_DecoratorRouteSelection, ...] = ()
-    else:
-        payload, decorator_selections = _validated_current_render_payload(
-            family=family,
-            compiled=compiled,
-            data=data,
-        )
+    payload, decorator_selections = _validated_current_render_payload(
+        family=family,
+        compiled=compiled,
+        data=data,
+    )
 
     # Authoritative current-model validation already returns canonical field
     # names for the complete declared subtree. Nested conversion must not
@@ -672,7 +703,8 @@ def _dump_family[T: BaseModel](
         wire_boundary=True,
     )
     if compiled.version_metadata is not None and (
-        requested != compiled.current_version or compiled.version_metadata.owner == "model"
+        compiled.version_metadata.owner == "model"
+        or (requested != compiled.current_version and target.wire_model_kind != "explicit")
     ):
         payload = dict(payload)
         if compiled.version_metadata.owner == "family":
@@ -689,33 +721,484 @@ def _dump_family[T: BaseModel](
         parent_label=requested,
         selections=decorator_selections,
     )
-    if "mode" in dump_kwargs:
-        dumped = target_model.model_dump(**dump_kwargs)
-    else:
-        dumped = target_model.model_dump(mode="json", **dump_kwargs)
-    if compiled.nested:
-        for nested in compiled.nested:
-            collection_kind = _nested_family_collection_kind(
-                model=compiled.model,
-                path=nested.path,
-            )
-            if collection_kind != "list":
-                continue
-            _prune_nested_family_metadata_at_path(
-                payload=dumped,
-                model=target.model,
-                path=_target_nested_path(target, nested.path),
-                family=nested.family._compiled_family(),
-                target_label=nested.child_label(requested),
-            )
-    if compiled.version_metadata is not None:
-        if compiled.version_metadata.owner == "model":
-            _remove_model_metadata_output_aliases(compiled, dumped)
-        if include_version:
-            _set_version_field(dumped, compiled.version_metadata.path, requested)
-        else:
-            _remove_version_field(dumped, compiled.version_metadata.path)
+    return _serialize_target_model(
+        compiled=compiled,
+        requested=requested,
+        target_model=target_model,
+        include_version=include_version,
+        dump_kwargs=dump_kwargs,
+    )
+
+
+def _defaults_family[T: BaseModel](
+    family: SchemaFamily[T],
+    *,
+    version: str,
+    include_version: bool,
+    dump_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    _validate_model_dump_options(dump_kwargs)
+    compiled = family._compiled_family()
+    _validate_include_version_mode(compiled, include_version)
+    requested = _runtime_label(version, family_name=family.name)
+    target_model = compiled.version(requested).model.model_validate({})
+    return _serialize_target_model(
+        compiled=compiled,
+        requested=requested,
+        target_model=target_model,
+        include_version=include_version,
+        dump_kwargs=dump_kwargs,
+    )
+
+
+def _serialize_target_model(
+    *,
+    compiled: _CompiledFamily,
+    requested: str,
+    target_model: BaseModel,
+    include_version: bool,
+    dump_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    serialization_options = dict(dump_kwargs)
+    serialization_options.pop("polymorphic_serialization", None)
+    serialization_options.setdefault("by_alias", True)
+    serialization_options.setdefault("mode", "json")
+    serialized = target_model.model_dump(**serialization_options)
+    if not isinstance(serialized, Mapping):
+        msg = (
+            f"Target wire model for family {compiled.name!r} and version "
+            f"{requested!r} must serialize to an object"
+        )
+        raise ValueError(msg)
+    dumped = dict(serialized)
+
+    target = compiled.version(requested)
+    for nested in compiled.nested:
+        _prune_nested_family_metadata_at_path(
+            payload=dumped,
+            source_payload=target_model,
+            model=target.model,
+            path=_target_nested_path(target, nested.path),
+            family=nested.family._compiled_family(),
+            target_label=nested.child_label(requested),
+            by_alias=serialization_options["by_alias"],
+        )
+
+    selections = _select_decorator_routes(
+        target_model,
+        compiled=compiled,
+        parent_label=requested,
+        source_version=target,
+    )
+    _prune_serialized_decorator_metadata(
+        dumped=dumped,
+        source_model=target_model,
+        compiled=compiled,
+        parent_label=requested,
+        selections=selections,
+        by_alias=serialization_options["by_alias"],
+    )
+    _validate_target_extra_output_collisions(
+        target_model,
+        by_alias=serialization_options["by_alias"],
+    )
+    _apply_serialized_version_metadata(
+        dumped=dumped,
+        compiled=compiled,
+        requested=requested,
+        target_model=type(target_model),
+        include_version=include_version,
+        by_alias=serialization_options["by_alias"],
+    )
     return dumped
+
+
+def _validate_target_extra_output_collisions(
+    target_model: BaseModel,
+    *,
+    by_alias: Any,
+) -> None:
+    seen: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, BaseModel):
+            model = type(value)
+            extras = value.__pydantic_extra__
+            if isinstance(extras, Mapping) and extras:
+                output_names = {
+                    _serialized_field_name(model, field_name, by_alias=by_alias)
+                    for field_name in model.model_fields
+                }
+                use_alias = (
+                    model.model_config.get("serialize_by_alias", False) is True
+                    if by_alias is None
+                    else by_alias is True
+                )
+                output_names.update(
+                    field_info.alias
+                    if use_alias and isinstance(field_info.alias, str)
+                    else field_name
+                    for field_name, field_info in model.model_computed_fields.items()
+                )
+                collisions = sorted(name for name in extras if name in output_names)
+                if collisions:
+                    formatted = ", ".join(repr(name) for name in collisions)
+                    msg = (
+                        f"Target wire model {model.__name__!r} extras overwrite "
+                        f"declared serialization location(s): {formatted}"
+                    )
+                    raise ValueError(msg)
+                for item in extras.values():
+                    visit(item)
+            for field_name in model.model_fields:
+                if field_name in value.__dict__:
+                    visit(value.__dict__[field_name])
+            return
+        if isinstance(value, Mapping):
+            for item in value.values():
+                visit(item)
+            return
+        if isinstance(value, list | tuple | set | frozenset):
+            for item in value:
+                visit(item)
+
+    visit(target_model)
+
+
+def _validate_model_dump_options(dump_kwargs: Mapping[str, Any]) -> None:
+    omission_options = sorted(_CONTRACT_FIELD_OMISSION_OPTIONS.intersection(dump_kwargs))
+    if omission_options:
+        formatted = ", ".join(repr(option) for option in omission_options)
+        msg = (
+            "Versioned rendering cannot omit target contract fields; unsupported "
+            f"model_dump option(s): {formatted}"
+        )
+        raise ValueError(msg)
+
+    unsupported = sorted(set(dump_kwargs).difference(_SUPPORTED_MODEL_DUMP_OPTIONS))
+    if unsupported:
+        formatted = ", ".join(repr(option) for option in unsupported)
+        msg = f"Versioned rendering received unsupported model_dump option(s): {formatted}"
+        raise ValueError(msg)
+
+    polymorphic = tuple(
+        option
+        for option in ("serialize_as_any", "polymorphic_serialization")
+        if dump_kwargs.get(option)
+    )
+    if polymorphic:
+        formatted = ", ".join(repr(option) for option in polymorphic)
+        msg = (
+            "Versioned rendering cannot use polymorphic serialization because it may "
+            f"expose fields outside the target wire contract: {formatted}"
+        )
+        raise ValueError(msg)
+    if dump_kwargs.get("round_trip"):
+        msg = (
+            "Versioned rendering cannot use round_trip=True because Pydantic may "
+            "omit computed target contract fields"
+        )
+        raise ValueError(msg)
+
+
+def _validate_include_version_mode(
+    compiled: _CompiledFamily,
+    include_version: bool,
+) -> None:
+    metadata = compiled.version_metadata
+    if include_version or metadata is None or metadata.owner != "model":
+        return
+    msg = (
+        f"Schema family {compiled.name!r} uses model-owned version metadata; "
+        "include_version=False is unavailable because that field is part of the body contract"
+    )
+    raise ValueError(msg)
+
+
+def _apply_serialized_version_metadata(
+    *,
+    dumped: dict[str, Any],
+    compiled: _CompiledFamily,
+    requested: str,
+    target_model: type[BaseModel],
+    include_version: bool,
+    by_alias: Any,
+) -> None:
+    metadata = compiled.version_metadata
+    if metadata is None:
+        return
+    if metadata.owner == "family":
+        if include_version:
+            _ensure_serialized_version_field(
+                dumped,
+                metadata.path,
+                requested,
+                family_name=compiled.name,
+            )
+        else:
+            _remove_version_field(dumped, metadata.path)
+        return
+
+    if not include_version:
+        _validate_include_version_mode(compiled, include_version)
+    _verify_serialized_model_metadata(
+        dumped,
+        compiled=compiled,
+        requested=requested,
+        target_model=target_model,
+        by_alias=by_alias,
+    )
+
+
+def _verify_serialized_model_metadata(
+    dumped: Mapping[str, Any],
+    *,
+    compiled: _CompiledFamily,
+    requested: str,
+    target_model: type[BaseModel],
+    by_alias: Any,
+) -> None:
+    field_name = _model_metadata_field_name(compiled)
+    output_key = _serialized_field_name(target_model, field_name, by_alias=by_alias)
+    candidate_keys = _model_metadata_serialization_keys(
+        compiled,
+        target_model=target_model,
+        field_name=field_name,
+    )
+    value = dumped.get(output_key, _MISSING)
+    if value is _MISSING:
+        msg = (
+            f"Target wire model for family {compiled.name!r} and version "
+            f"{requested!r} omitted model-owned version metadata {output_key!r}"
+        )
+        raise ValueError(msg)
+    if value != requested:
+        msg = (
+            f"Target wire model for family {compiled.name!r} serialized version "
+            f"metadata {output_key!r} as {value!r}, expected {requested!r}"
+        )
+        raise ValueError(msg)
+    duplicate_keys = tuple(key for key in candidate_keys if key != output_key and key in dumped)
+    if duplicate_keys:
+        formatted = ", ".join(repr(key) for key in duplicate_keys)
+        msg = (
+            f"Target wire model for family {compiled.name!r} serialized duplicate "
+            f"version metadata at {formatted}"
+        )
+        raise ValueError(msg)
+
+
+def _ensure_serialized_version_field(
+    data: dict[str, Any],
+    version_field: VersionPath,
+    value: str,
+    *,
+    family_name: str,
+) -> None:
+    existing = _serialized_version_field(data, version_field)
+    if existing is not _MISSING:
+        if existing != value:
+            msg = (
+                f"Target wire model for family {family_name!r} serialized version "
+                f"metadata {_version_field_display(version_field)!r} as "
+                f"{existing!r}, expected {value!r}"
+            )
+            raise ValueError(msg)
+        return
+    _set_version_field(data, version_field, value)
+
+
+def _serialized_version_field(data: Mapping[str, Any], version_field: VersionPath) -> Any:
+    if isinstance(version_field, str):
+        return data[version_field] if version_field in data else _MISSING
+    current: Any = data
+    for part in version_field:
+        if not isinstance(current, Mapping) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def _model_metadata_serialization_keys(
+    compiled: _CompiledFamily,
+    *,
+    target_model: type[BaseModel],
+    field_name: str,
+) -> tuple[str, ...]:
+    metadata = compiled.version_metadata
+    keys: list[str] = [field_name]
+    if metadata is not None and isinstance(metadata.path, str):
+        keys.append(metadata.path)
+    for model in (compiled.model, target_model):
+        field_info = model.model_fields[field_name]
+        for candidate in (
+            field_info.alias,
+            field_info.validation_alias,
+            field_info.serialization_alias,
+        ):
+            if isinstance(candidate, str):
+                keys.append(candidate)
+    return tuple(dict.fromkeys(keys))
+
+
+def _serialized_field_name(
+    model: type[BaseModel],
+    field_name: str,
+    *,
+    by_alias: Any,
+) -> str:
+    use_alias = (
+        model.model_config.get("serialize_by_alias", False) is True
+        if by_alias is None
+        else by_alias is True
+    )
+    field_info = model.model_fields[field_name]
+    if use_alias:
+        output_alias = field_info.serialization_alias
+        if output_alias is None:
+            output_alias = field_info.alias
+        if isinstance(output_alias, str):
+            return output_alias
+    return field_name
+
+
+def _prune_serialized_decorator_metadata(
+    *,
+    dumped: dict[str, Any],
+    source_model: BaseModel,
+    compiled: _CompiledFamily,
+    parent_label: str,
+    selections: tuple[_DecoratorRouteSelection, ...],
+    by_alias: Any,
+) -> None:
+    source_payload = _extract_declared_fields(source_model)
+    for selection in _decorator_selections_child_first(selections):
+        location = _serialized_decorator_selection_location(
+            compiled=compiled,
+            parent_label=parent_label,
+            selection=selection,
+            by_alias=by_alias,
+        )
+        if location is None:
+            continue
+        found, payload = _payload_at_location(dumped, location)
+        if not found:
+            continue
+        source_found, source_value = _payload_at_location(
+            source_payload,
+            selection.location,
+        )
+        if not source_found:
+            source_value = selection
+        _prune_nested_family_metadata_payload(
+            payload,
+            selection.route.family._compiled_family(),
+            selection.label,
+            by_alias=by_alias,
+            source_value=source_value,
+        )
+
+
+def _serialized_decorator_selection_location(
+    *,
+    compiled: _CompiledFamily,
+    parent_label: str,
+    selection: _DecoratorRouteSelection,
+    by_alias: Any,
+) -> tuple[str | int, ...] | None:
+    if selection.parent is None:
+        prefix: tuple[str | int, ...] = ()
+        owner_compiled = compiled
+        owner_label = parent_label
+    else:
+        parent_location = _serialized_decorator_selection_location(
+            compiled=compiled,
+            parent_label=parent_label,
+            selection=selection.parent,
+            by_alias=by_alias,
+        )
+        if parent_location is None:
+            return None
+        prefix = parent_location
+        owner_compiled = selection.parent.route.family._compiled_family()
+        owner_label = selection.parent.label
+
+    owner_target = owner_compiled.version(owner_label)
+    annotation: Any = owner_target.model
+    relative = iter(selection.relative_location)
+    serialized: list[str | int] = list(prefix)
+    for step_index, step in enumerate(selection.route.traversal):
+        normalized = _strip_annotated(annotation)
+        if step.kind == "field":
+            try:
+                location_part = next(relative)
+            except StopIteration:
+                return None
+            if location_part != step.value:
+                return None
+            if not isinstance(normalized, type) or not issubclass(normalized, BaseModel):
+                return None
+            field_name = step.value
+            if step_index == 0:
+                projected_name = owner_target.projection.field(field_name).version_name
+                if projected_name is None:
+                    return None
+                field_name = projected_name
+            field_info = normalized.model_fields.get(field_name)
+            if field_info is None:
+                return None
+            serialized.append(_serialized_field_name(normalized, field_name, by_alias=by_alias))
+            annotation = field_info.annotation
+            continue
+        if step.kind == "union_arm":
+            arguments = get_args(normalized)
+            ordinal = int(step.value)
+            if ordinal >= len(arguments):
+                return None
+            annotation = arguments[ordinal]
+            continue
+        if step.kind == "each":
+            try:
+                occurrence = next(relative)
+            except StopIteration:
+                return None
+            arguments = get_args(normalized)
+            if not arguments:
+                return None
+            serialized.append(occurrence)
+            annotation = arguments[0]
+            continue
+        if step.kind == "tuple_index":
+            try:
+                occurrence = next(relative)
+            except StopIteration:
+                return None
+            ordinal = int(step.value)
+            arguments = get_args(normalized)
+            if occurrence != ordinal or ordinal >= len(arguments):
+                return None
+            serialized.append(occurrence)
+            annotation = arguments[ordinal]
+            continue
+        if step.kind == "mapping_values":
+            try:
+                occurrence = next(relative)
+            except StopIteration:
+                return None
+            arguments = get_args(normalized)
+            if len(arguments) != 2:
+                return None
+            serialized.append(occurrence)
+            annotation = arguments[1]
+            continue
+    try:
+        next(relative)
+    except StopIteration:
+        return tuple(serialized)
+    return None
 
 
 def _validated_current_render_payload[T: BaseModel](
@@ -2462,11 +2945,29 @@ def _prune_nested_family_metadata_payload(
     payload: Any,
     family: _CompiledFamily,
     target_label: str | None = None,
+    *,
+    by_alias: Any = False,
+    source_value: Any = _MISSING,
 ) -> None:
     resolved_target = family.current_version if target_label is None else target_label
+    if not isinstance(payload, Mapping):
+        msg = (
+            f"Nested target wire model for family {family.name!r} and version "
+            f"{resolved_target!r} must serialize to an object"
+        )
+        raise ValueError(msg)
     metadata = family.version_metadata
-    if metadata is not None and metadata.owner == "family" and isinstance(payload, Mapping):
-        _remove_version_field(payload, metadata.path)
+    if metadata is not None:
+        if metadata.owner == "family":
+            _remove_version_field(payload, metadata.path)
+        else:
+            _verify_serialized_model_metadata(
+                payload,
+                compiled=family,
+                requested=resolved_target,
+                target_model=family.version(resolved_target).model,
+                by_alias=by_alias,
+            )
 
     if not family.nested:
         return
@@ -2478,46 +2979,381 @@ def _prune_nested_family_metadata_payload(
             continue
         _prune_nested_family_metadata_at_path(
             payload=payload,
+            source_payload=source_value,
             model=target.model,
             path=target_path,
             family=child.family._compiled_family(),
             target_label=child.child_label(resolved_target),
+            by_alias=by_alias,
         )
 
 
 def _prune_nested_family_metadata_at_path(
     *,
     payload: Any,
+    source_payload: Any = _MISSING,
     path: tuple[str, ...] | None,
     family: SchemaFamily[Any] | _CompiledFamily,
     model: type[BaseModel] | None = None,
     target_label: str | None = None,
+    by_alias: Any = False,
 ) -> None:
     if path is None:
         return
     compiled_family = family if isinstance(family, _CompiledFamily) else family._compiled_family()
     resolved_target = compiled_family.current_version if target_label is None else target_label
     if not path:
-        nested_payloads = (payload,)
+        _prune_serialized_nested_value(
+            payload,
+            source_payload=source_payload,
+            annotation=compiled_family.version(resolved_target).model,
+            family=compiled_family,
+            target_label=resolved_target,
+            by_alias=by_alias,
+        )
+        return
     elif model is None:
         # A path without its declaring model cannot be traversed safely: searching
         # arbitrary mapping values would let unrelated payload data impersonate a
         # declared nested field.
         return
-    else:
-        nested_payloads = _declared_payload_values_at_path(
-            payload,
-            model=model,
-            path=path,
-            include_serialization_aliases=True,
+    _prune_serialized_nested_path(
+        payload,
+        source_payload=source_payload,
+        model=model,
+        path=path,
+        family=compiled_family,
+        target_label=resolved_target,
+        by_alias=by_alias,
+    )
+
+
+def _prune_serialized_nested_path(
+    payload: Any,
+    *,
+    source_payload: Any,
+    model: type[BaseModel],
+    path: tuple[str, ...],
+    family: _CompiledFamily,
+    target_label: str,
+    by_alias: Any,
+) -> None:
+    if not isinstance(payload, Mapping):
+        msg = (
+            f"Target wire model containing nested family {family.name!r} must "
+            f"serialize declared path {path!r} through objects"
         )
-    for nested_payload in nested_payloads:
-        for item in _nested_payload_items(nested_payload):
-            _prune_nested_family_metadata_payload(
-                item,
-                compiled_family,
-                resolved_target,
+        raise ValueError(msg)
+    field_name, *remaining = path
+    field_info = model.model_fields.get(field_name)
+    if field_info is None:
+        return
+    found, field_payload = _serialized_nested_field_payload(
+        payload,
+        source_payload=source_payload,
+        model=model,
+        field_name=field_name,
+        field_info=field_info,
+        family_name=family.name,
+        by_alias=by_alias,
+    )
+    if not found:
+        msg = f"Target wire model omitted declared nested family {family.name!r} at path {path!r}"
+        raise ValueError(msg)
+    source_field_payload = _declared_source_field_payload(
+        source_payload,
+        field_name=field_name,
+    )
+    if remaining:
+        _prune_serialized_nested_path_through_annotation(
+            field_payload,
+            source_payload=source_field_payload,
+            annotation=field_info.annotation,
+            path=tuple(remaining),
+            family=family,
+            target_label=target_label,
+            by_alias=by_alias,
+        )
+        return
+    _prune_serialized_nested_value(
+        field_payload,
+        source_payload=source_field_payload,
+        annotation=field_info.annotation,
+        family=family,
+        target_label=target_label,
+        by_alias=by_alias,
+    )
+
+
+def _serialized_nested_field_payload(
+    payload: Mapping[Any, Any],
+    *,
+    source_payload: Any,
+    model: type[BaseModel],
+    field_name: str,
+    field_info: Any,
+    family_name: str,
+    by_alias: Any,
+) -> tuple[bool, Any]:
+    output_name = _serialized_field_name(model, field_name, by_alias=by_alias)
+    if isinstance(source_payload, BaseModel):
+        extras = source_payload.__pydantic_extra__
+        if isinstance(extras, Mapping) and output_name in extras:
+            msg = (
+                f"Target wire model extra {output_name!r} overwrites the declared "
+                f"location for nested family {family_name!r}"
             )
+            raise ValueError(msg)
+    candidates = [field_name]
+    for candidate in (field_info.alias, field_info.serialization_alias):
+        if isinstance(candidate, str) and candidate not in candidates:
+            candidates.append(candidate)
+    present = tuple(candidate for candidate in candidates if candidate in payload)
+    if len(present) > 1:
+        formatted = ", ".join(repr(candidate) for candidate in present)
+        msg = (
+            f"Target wire model serialized duplicate locations for nested family "
+            f"{family_name!r}: {formatted}"
+        )
+        raise ValueError(msg)
+    if output_name not in payload:
+        return False, None
+    return True, payload[output_name]
+
+
+def _prune_serialized_nested_path_through_annotation(
+    payload: Any,
+    *,
+    source_payload: Any,
+    annotation: Any,
+    path: tuple[str, ...],
+    family: _CompiledFamily,
+    target_label: str,
+    by_alias: Any,
+) -> None:
+    annotation = _strip_annotated(annotation)
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        if (
+            payload is None
+            and NoneType in get_args(annotation)
+            and (source_payload is None or source_payload is _MISSING)
+        ):
+            return
+        candidates = tuple(
+            argument
+            for argument in get_args(annotation)
+            if argument is not NoneType and _annotation_declares_path(argument, path)
+        )
+        if candidates:
+            _prune_serialized_nested_path_through_annotation(
+                payload,
+                source_payload=source_payload,
+                annotation=candidates[0],
+                path=path,
+                family=family,
+                target_label=target_label,
+                by_alias=by_alias,
+            )
+        return
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        _prune_serialized_nested_path(
+            payload,
+            source_payload=source_payload,
+            model=annotation,
+            path=path,
+            family=family,
+            target_label=target_label,
+            by_alias=by_alias,
+        )
+        return
+    kind = _collection_kind(annotation)
+    if kind is None:
+        return
+    items = _serialized_collection_items(
+        payload,
+        annotation,
+        source_payload=source_payload,
+        family_name=family.name,
+    )
+    for item, item_annotation, source_item in items:
+        _prune_serialized_nested_path_through_annotation(
+            item,
+            source_payload=source_item,
+            annotation=item_annotation,
+            path=path,
+            family=family,
+            target_label=target_label,
+            by_alias=by_alias,
+        )
+    _validate_serialized_set_cardinality(
+        payload,
+        kind=kind,
+        family_name=family.name,
+    )
+
+
+def _prune_serialized_nested_value(
+    payload: Any,
+    *,
+    source_payload: Any,
+    annotation: Any,
+    family: _CompiledFamily,
+    target_label: str,
+    by_alias: Any,
+) -> None:
+    annotation = _strip_annotated(annotation)
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        arguments = get_args(annotation)
+        if (
+            payload is None
+            and NoneType in arguments
+            and (source_payload is None or source_payload is _MISSING)
+        ):
+            return
+        concrete = tuple(argument for argument in arguments if argument is not NoneType)
+        child_model = family.version(target_label).model
+        selected = next(
+            (
+                argument
+                for argument in concrete
+                if _annotation_contains_model(argument, child_model)
+            ),
+            concrete[0] if concrete else annotation,
+        )
+        _prune_serialized_nested_value(
+            payload,
+            source_payload=source_payload,
+            annotation=selected,
+            family=family,
+            target_label=target_label,
+            by_alias=by_alias,
+        )
+        return
+    kind = _collection_kind(annotation)
+    if kind is not None:
+        items = _serialized_collection_items(
+            payload,
+            annotation,
+            source_payload=source_payload,
+            family_name=family.name,
+        )
+        for item, item_annotation, source_item in items:
+            _prune_serialized_nested_value(
+                item,
+                source_payload=source_item,
+                annotation=item_annotation,
+                family=family,
+                target_label=target_label,
+                by_alias=by_alias,
+            )
+        _validate_serialized_set_cardinality(
+            payload,
+            kind=kind,
+            family_name=family.name,
+        )
+        return
+    _prune_nested_family_metadata_payload(
+        payload,
+        family,
+        target_label,
+        by_alias=by_alias,
+        source_value=source_payload,
+    )
+
+
+def _serialized_collection_items(
+    payload: Any,
+    annotation: Any,
+    *,
+    source_payload: Any,
+    family_name: str,
+) -> tuple[tuple[Any, Any, Any], ...]:
+    if not isinstance(payload, list | tuple | set | frozenset):
+        msg = (
+            f"Nested target wire collection for family {family_name!r} changed "
+            "its declared container shape during serialization"
+        )
+        raise ValueError(msg)
+    values = tuple(payload)
+    source_values = (
+        tuple(source_payload)
+        if isinstance(source_payload, list | tuple | set | frozenset)
+        else (_MISSING,) * len(values)
+    )
+    if source_payload is not _MISSING and len(source_values) != len(values):
+        msg = (
+            f"Nested rendering for family {family_name!r} cannot preserve "
+            "collection cardinality after target serialization"
+        )
+        raise InvalidMigrationError(msg)
+    arguments = get_args(annotation)
+    if get_origin(annotation) is tuple and arguments and arguments[-1] is not Ellipsis:
+        return tuple(zip(values, arguments, source_values, strict=False))
+    item_annotation = arguments[0] if arguments else Any
+    return tuple(
+        (item, item_annotation, source_item)
+        for item, source_item in zip(values, source_values, strict=False)
+    )
+
+
+def _declared_source_field_payload(source: Any, *, field_name: str) -> Any:
+    if isinstance(source, BaseModel):
+        return source.__dict__.get(field_name, _MISSING)
+    if isinstance(source, Mapping):
+        return source.get(field_name, _MISSING)
+    return _MISSING
+
+
+def _validate_serialized_set_cardinality(
+    payload: Any,
+    *,
+    kind: Literal["list", "tuple", "set", "frozenset"],
+    family_name: str,
+) -> None:
+    if kind not in ("set", "frozenset"):
+        return
+    items = list(payload)
+    if _has_duplicate_payload(items):
+        msg = (
+            f"Nested rendering for family {family_name!r} cannot preserve set "
+            "cardinality after target serialization"
+        )
+        raise InvalidMigrationError(msg)
+
+
+def _annotation_declares_path(annotation: Any, path: tuple[str, ...]) -> bool:
+    annotation = _strip_annotated(annotation)
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        return any(
+            argument is not NoneType and _annotation_declares_path(argument, path)
+            for argument in get_args(annotation)
+        )
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        field_info = annotation.model_fields.get(path[0])
+        if field_info is None:
+            return False
+        if len(path) == 1:
+            return True
+        return _annotation_declares_path(field_info.annotation, path[1:])
+    if _collection_kind(annotation) is None:
+        return False
+    return any(
+        argument is not Ellipsis and _annotation_declares_path(argument, path)
+        for argument in get_args(annotation)
+    )
+
+
+def _annotation_contains_model(annotation: Any, model: type[BaseModel]) -> bool:
+    annotation = _strip_annotated(annotation)
+    if annotation is model:
+        return True
+    return any(
+        argument is not Ellipsis and _annotation_contains_model(argument, model)
+        for argument in get_args(annotation)
+    )
 
 
 def _convert_nested_child_family(

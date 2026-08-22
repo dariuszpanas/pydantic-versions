@@ -1002,7 +1002,7 @@ def test_typed_extra_values_in_a_mixin_after_base_model_are_rejected() -> None:
     )
 
 
-def test_nested_metadata_wrappers_preserve_the_body_extra_mode() -> None:
+def test_nested_metadata_wrappers_reserve_the_complete_envelope() -> None:
     class IgnoredExtraPayload(BaseModel):
         value: int = 1
 
@@ -1037,13 +1037,9 @@ def test_nested_metadata_wrappers_preserve_the_body_extra_mode() -> None:
     ).model_for("1")
     payload = {"meta": {"version": "1", "note": "keep"}}
 
-    assert ignored.model_validate(payload).model_dump()["meta"] == {"version": "1"}
-    assert allowed.model_validate(payload).model_dump()["meta"] == {
-        "version": "1",
-        "note": "keep",
-    }
-    with pytest.raises(ValidationError):
-        forbidden.model_validate(payload)
+    for wire in (ignored, allowed, forbidden):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            wire.model_validate(payload)
 
 
 def test_every_family_owned_direct_discriminator_is_an_exact_literal() -> None:

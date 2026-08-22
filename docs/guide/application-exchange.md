@@ -104,6 +104,14 @@ CONSUMER_SCHEMA = SchemaFamily(
 The declarations for each shared label must describe the same wire contract,
 even though the applications' current Python field names can differ.
 
+Serialization and validation aliases can also differ in Pydantic. Versioned
+output defaults to `by_alias=True`, so a producer emits each target field's
+serialization alias (or ordinary alias). The consumer must accept that exact
+location as a field name, alias, or `AliasChoices` entry. Do not assume the
+producer's validation-only alias is its output name. Use `by_alias=False` only
+when both sides deliberately share Python field names, and cover that mode with
+an exchange test.
+
 ## Advertise accepted versions
 
 The consumer can publish a small application-owned capability document:
@@ -220,6 +228,10 @@ received = CONSUMER_SCHEMA.validate(payload, version=target)
 When both transport and document metadata are present, they must agree. The
 library validates the selected wire contract rather than silently replacing a
 conflicting embedded label.
+
+Transport-owned metadata requires family-owned version metadata. A
+model-owned discriminator is a declared body field and cannot be removed with
+`include_version=False`.
 
 ## Fail when there is no safe overlap
 

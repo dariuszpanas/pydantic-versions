@@ -187,8 +187,11 @@ def test_validate_versioned_normalizes_alias_paths_in_upgrade_output() -> None:
 
 
 def test_dump_versioned_renders_defaults_for_requested_schema() -> None:
-    with pytest.raises(IrreversibleTransitionError):
-        dump_versioned(AppConfig, version="1")
+    assert dump_versioned(AppConfig, version="1") == {
+        "timeout": 5.0,
+        "attempts": 3,
+        "schema_version": "1",
+    }
 
 
 def test_dump_versioned_executes_explicit_downgrades_in_reverse_edge_order() -> None:
@@ -301,7 +304,9 @@ def test_explicit_wire_model_enables_typeful_historical_rendering_and_validation
     )
 
     assert rendered == {"timeout": "9.5", "schema_version": "1"}
-    assert model_for_version(HistoricalTypeConfig, "1") is HistoricalTimeoutConfig
+    historical_document = model_for_version(HistoricalTypeConfig, "1")
+    assert historical_document is not HistoricalTimeoutConfig
+    assert historical_document.model_validate(rendered).model_dump() == rendered
 
 
 def test_dump_versioned_accepts_current_model_data_for_historical_schema() -> None:
@@ -1168,9 +1173,9 @@ def test_nested_runtime_handles_set_tuple_and_frozenset_payloads() -> None:
     assert len(rendered["values"]) == 2
     assert len(rendered["tuple_values"]) == 2
     assert len(rendered["frozenset_values"]) == 1
-    assert all(item["schema_version"] == "1" for item in rendered["values"])
-    assert all(item["schema_version"] == "1" for item in rendered["tuple_values"])
-    assert all(item["schema_version"] == "1" for item in rendered["frozenset_values"])
+    assert all("schema_version" not in item for item in rendered["values"])
+    assert all("schema_version" not in item for item in rendered["tuple_values"])
+    assert all("schema_version" not in item for item in rendered["frozenset_values"])
 
 
 def test_nested_runtime_set_conversion_preserves_collection_membership_or_raises() -> None:

@@ -597,7 +597,12 @@ def test_future_declarations_are_rejected_instead_of_ignored() -> None:
     downgrade_family.compile()
 
     assert wire_family.describe().versions[0].wire_model == "explicit"
-    assert wire_family.model_for("1") is HistoricalConfig
+    historical_document = wire_family.model_for("1")
+    assert historical_document is not HistoricalConfig
+    assert historical_document.model_fields["value"].annotation is str
+    assert historical_document.model_validate(
+        {"value": "legacy", "schema_version": "1"}
+    ).model_dump() == {"value": "legacy", "schema_version": "1"}
 
 
 def test_current_and_mutually_exclusive_wire_declarations_are_rejected() -> None:
