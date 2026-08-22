@@ -141,11 +141,15 @@ The generated plan inventory and plans are the preferred compatibility artifacts
   use the documented `SchemaVersionError` subclasses. Exception messages are
   diagnostic text rather than structured API.
 
-### Reserved nested declarations
+### Nested declarations
 
 `NestedFamily`, `MatchingLabels`, and `matching_labels()` are exported as frozen
 declaration types so the final constructor remains stable. These allow complex
 nested schema execution and graph compilation to handle tree-structured data safely.
+An explicit mapping may select child labels independently for historical parent
+versions, but the current parent label must map to the child's current label.
+Compilation rejects a different current mapping because application models hold
+authoritative current child data.
 
 ## Compiled inventory and plans
 
@@ -256,7 +260,8 @@ class ConversionPlan:
 ```
 
 `plan_validation(source_version)` exposes source metadata and wire validation,
-field projections, each adjacent upgrade or identity edge, and current-model
+field projections, each adjacent upgrade or identity edge, nested-family
+conversions immediately before their owning parent edges, and current-model
 validation. Its overall semantics are `not_applicable`.
 
 `plan_render(target_version)` exposes current validation, reverse edges, target
@@ -265,6 +270,15 @@ structural changes produce an `exact` plan; removing a current field produces a
 `lossy` plan. A custom upgrade without a declared downgrade makes the route
 unavailable, so the method raises `IrreversibleTransitionError` instead of
 returning that candidate.
+
+Every parent edge whose child-version mapping changes has one `nested` step per
+declared path, in declaration order and immediately before the owning parent
+step. The child labels appear as that step's source and target versions, while
+the parent family continues to own the step and its schema path. Nested steps
+are conditional because a payload may omit an optional branch or contain an
+empty collection, but planning is deliberately conservative: child loss makes
+the parent render plan lossy, and an unavailable child route makes the complete
+parent route unavailable before any user downgrade callable runs.
 
 Plan construction is data-independent and does not execute transition
 callables or default factories. Step IDs use `pv1-` plus a full 64-character

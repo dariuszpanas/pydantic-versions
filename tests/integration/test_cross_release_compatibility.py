@@ -10,17 +10,17 @@ CONTRACT_PATH = Path(__file__).parents[1] / "compatibility" / "v0_3_0_contract.p
 CONTRACT = runpy.run_path(str(CONTRACT_PATH), run_name="compatibility_v0_3_0_contract")
 CONSUMER_SCHEMA = CONTRACT["CONSUMER_SCHEMA"]
 PRODUCER_SCHEMA = CONTRACT["PRODUCER_SCHEMA"]
-build_artifact = CONTRACT["build_artifact"]
 render_artifact = CONTRACT["render_artifact"]
+render_expected_current_artifact = CONTRACT["_render_expected_current_artifact"]
 
 
 def _fixture() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
-def test_current_code_reproduces_the_v0_3_0_stable_contract() -> None:
-    assert render_artifact() == FIXTURE_PATH.read_text(encoding="utf-8")
-    assert build_artifact() == _fixture()
+def test_current_code_matches_the_reviewed_v0_3_0_additive_overlay() -> None:
+    baseline = FIXTURE_PATH.read_text(encoding="utf-8")
+    assert render_artifact() == render_expected_current_artifact(baseline)
 
 
 def test_current_code_consumes_persisted_embedded_and_transport_payloads() -> None:

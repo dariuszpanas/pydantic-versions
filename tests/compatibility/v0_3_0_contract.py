@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,41 @@ BASELINE_TAG = "v0.3.0"
 BASELINE_COMMIT = "a03e67e5adc83e0087773383c3d55ed9e8da9bde"
 SCHEMA_NAME = "com.example.golden-service-config"
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "compatibility" / "v0.3.0.json"
+
+_REVIEWED_NESTED_PLAN_OVERLAY: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    (
+        "validate_v1",
+        "pv1-4e531e5e4ad4f54c2971167c7da787f2d33e96f8713ee5fb9d9f3af51514b32c",
+        {
+            "id": "pv1-0f03ddf9ebd7693766aa6232192adaeb02b20634cb1f5bf871ad92d9d93e833d",
+            "family": SCHEMA_NAME,
+            "source_version": "1",
+            "target_version": "2",
+            "operation": "validate",
+            "direction": "upgrade",
+            "kind": "nested",
+            "schema_path": "$.credentials",
+            "semantics": "not_applicable",
+            "conditional": True,
+        },
+    ),
+    (
+        "render_v1_lossy",
+        "pv1-e4054d80fff357a46244b427c480e943b37a1481c17c471d50296f94ae7f5374",
+        {
+            "id": "pv1-dd8410f673330912f3b42b32b6722102dea8ba7e9d3b04d8b121d93f44aa214a",
+            "family": SCHEMA_NAME,
+            "source_version": "2",
+            "target_version": "1",
+            "operation": "render",
+            "direction": "downgrade",
+            "kind": "nested",
+            "schema_path": "$.credentials",
+            "semantics": "exact",
+            "conditional": True,
+        },
+    ),
+)
 
 
 def _upgrade_endpoint(data: dict[str, Any]) -> dict[str, Any]:
@@ -241,32 +277,53 @@ def render_artifact() -> str:
     return f"{json.dumps(build_artifact(), indent=2)}\n"
 
 
+def _expected_current_artifact(baseline: dict[str, Any]) -> dict[str, Any]:
+    expected = deepcopy(baseline)
+    inspection = expected["inspection"]
+    for plan_name, owning_step_id, nested_step in _REVIEWED_NESTED_PLAN_OVERLAY:
+        steps = inspection[plan_name]["steps"]
+        owning_indexes = [index for index, step in enumerate(steps) if step["id"] == owning_step_id]
+        if len(owning_indexes) != 1:
+            msg = (
+                f"Frozen v0.3.0 plan {plan_name!r} must contain exactly one owning "
+                f"step {owning_step_id!r}"
+            )
+            raise RuntimeError(msg)
+        steps.insert(owning_indexes[0], deepcopy(nested_step))
+    return expected
+
+
+def _render_expected_current_artifact(baseline: str) -> str:
+    expected = _expected_current_artifact(json.loads(baseline))
+    return f"{json.dumps(expected, indent=2)}\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check", action="store_true")
     action.add_argument("--write", action="store_true")
     args = parser.parse_args()
-    rendered = render_artifact()
-
     if args.write:
         if __version__ != BASELINE_VERSION:
             parser.error(
                 f"--write requires pydantic-versions=={BASELINE_VERSION}; found {__version__}"
             )
         FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FIXTURE_PATH.write_text(rendered, encoding="utf-8")
+        FIXTURE_PATH.write_text(render_artifact(), encoding="utf-8")
         return 0
 
     committed = FIXTURE_PATH.read_text(encoding="utf-8")
-    if committed == rendered:
+    expected_rendered = _render_expected_current_artifact(committed)
+    current_rendered = render_artifact()
+    if current_rendered == expected_rendered:
         return 0
     print(
         "".join(
             difflib.unified_diff(
-                committed.splitlines(keepends=True),
-                rendered.splitlines(keepends=True),
-                fromfile=str(FIXTURE_PATH),
+                expected_rendered.splitlines(keepends=True),
+                current_rendered.splitlines(keepends=True),
+                fromfile="reviewed v0.3.0 contract plus nested-plan overlay",
                 tofile="current contract",
             )
         )

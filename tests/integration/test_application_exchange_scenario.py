@@ -3,17 +3,20 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
 from pydantic_versions import (
     IrreversibleTransitionError,
+    NestedFamily,
     SchemaFamily,
     SchemaVersion,
     field_default,
     field_removed,
     field_renamed,
+    matching_labels,
 )
 
 SCHEMA_ID = "com.example.pipeline-config"
@@ -85,7 +88,7 @@ class NoCompatibleSchemaVersionError(RuntimeError):
 
 
 def _select_target_version(
-    producer: SchemaFamily[ProducerConfig],
+    producer: SchemaFamily[Any],
     consumer: ConsumerCapabilities,
     *,
     allow_lossy: bool = False,
@@ -159,6 +162,42 @@ def test_exchange_refuses_no_overlap_and_requires_opt_in_for_lossy_output() -> N
         _select_target_version(PRODUCER_SCHEMA, version_one_only)
 
     assert _select_target_version(PRODUCER_SCHEMA, version_one_only, allow_lossy=True) == "1"
+
+
+def test_exchange_selector_accounts_for_nested_loss() -> None:
+    class ProducerCredentials(BaseModel):
+        token: str
+        current_scope: str = "write"
+
+    credentials = SchemaFamily(
+        model=ProducerCredentials,
+        name="com.example.nested-exchange.credentials",
+        versions=(
+            SchemaVersion("1", patches=(field_removed("current_scope"),)),
+            SchemaVersion("2"),
+        ),
+    )
+
+    class NestedProducerConfig(BaseModel):
+        credentials: ProducerCredentials
+
+    producer = SchemaFamily(
+        model=NestedProducerConfig,
+        name="com.example.nested-exchange",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(NestedFamily("credentials", credentials, matching_labels()),),
+    )
+    version_one_only = ConsumerCapabilities(schema=producer.name, accepts=("1",))
+
+    plan = producer.plan_render("1")
+    nested_step = next(step for step in plan.steps if step.kind == "nested")
+    assert nested_step.schema_path == "$.credentials"
+    assert nested_step.semantics == "lossy"
+    assert plan.semantics == "lossy"
+
+    with pytest.raises(NoCompatibleSchemaVersionError):
+        _select_target_version(producer, version_one_only)
+    assert _select_target_version(producer, version_one_only, allow_lossy=True) == "1"
 
 
 def test_exchange_supports_transport_owned_version_metadata() -> None:

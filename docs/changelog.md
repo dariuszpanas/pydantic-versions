@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instances, excluding extras and subclass-only fields from the canonical
   payload, detaching caller-owned containers, and enforcing metadata conflicts
   at every accepted input name.
+- Made validation and render plans include deterministic nested-family steps,
+  propagate child loss or unavailability to the parent route, and reject a
+  missing child downgrade before any user transition runs. Nested execution is
+  recursive, historical mappings may change child direction independently, and
+  each current parent label must map to its child's current label.
+- Kept explicit nested-family payloads in canonical current names through parent
+  transitions, then projected the complete subtree at the final wire boundary.
+  Child metadata is rebased to its mapped label, conflicting raw labels fail
+  preflight, and set cardinality is checked again after target wire coercion.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

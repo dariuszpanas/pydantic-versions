@@ -292,6 +292,39 @@ def test_nested_mapping_declaration_copies_the_caller_mapping() -> None:
     }
 
 
+def test_nested_mapping_must_anchor_the_current_child_version() -> None:
+    class ChildConfig(BaseModel):
+        value: int = 1
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="current_anchor_child",
+        versions=(SchemaVersion("legacy"), SchemaVersion("current")),
+    )
+
+    class ParentConfig(BaseModel):
+        child: ChildConfig
+
+    parent = SchemaFamily(
+        model=ParentConfig,
+        name="current_anchor_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(
+            NestedFamily(
+                "child",
+                child,
+                {"1": "current", "2": "legacy"},
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        SchemaCompilationError,
+        match="current parent label '2' to current child label 'current'",
+    ):
+        parent.compile()
+
+
 def test_compile_is_lazy_idempotent_and_cache_stable() -> None:
     class LazyConfig(BaseModel):
         value: int = 1

@@ -158,6 +158,13 @@ For the example above, version `2` is the newest exact common version. Version
 `1` is lossy because it omits `telemetry`. A deployment may permit that loss,
 but it must opt in rather than discovering it after data has been discarded.
 
+The same decision includes declared nested families. If a child schema loses a
+field on the selected route, the parent plan is lossy and the selector above
+requires `allow_lossy=True`. If a child route has no required downgrade,
+`plan_render()` rejects the parent route and the selector continues searching.
+This preflight is payload-independent, so an optional child or an empty child
+collection cannot make an otherwise unavailable contract safe.
+
 Version labels are opaque strings. “Newest” here means the producer's declared
 order, not lexical or numeric sorting.
 
