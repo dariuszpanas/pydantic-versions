@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collection and optional boundaries.
 - Made family validation honor each source wire model's configured alias and
   Python-name acceptance policy at the raw input boundary.
+- Completed class- and function-preserving annotations for the public decorator
+  factories and added downstream `ty` and mypy coverage against the built wheel.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

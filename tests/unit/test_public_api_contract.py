@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import fields, is_dataclass
+from pathlib import Path
 from types import FunctionType
 from typing import Any
 
@@ -190,6 +192,20 @@ EXPECTED_FUNCTION_SIGNATURES = {
     ),
 }
 
+EXPECTED_FUNCTION_RETURN_ANNOTATIONS = {
+    "dump_versioned": "dict[str, Any]",
+    "field_default": "FieldDefault",
+    "field_removed": "FieldRemoved",
+    "field_renamed": "FieldRenamed",
+    "matching_labels": "MatchingLabels",
+    "migration": "Callable[[F], F]",
+    "model_for_version": "type[BaseModel]",
+    "schema_version": "Callable[[type[T]], type[T]]",
+    "schema_versions": "Callable[[type[T]], type[T]]",
+    "validate_versioned": "VersionedValidation[T]",
+    "versioned_schema": "Callable[[type[T]], type[T]]",
+}
+
 EXPECTED_FAMILY_SIGNATURES = {
     "__init__": (
         ("self", "POSITIONAL_OR_KEYWORD", False),
@@ -258,6 +274,10 @@ def test_public_call_signatures_are_an_explicit_contract() -> None:
     }
     assert actual_functions == EXPECTED_FUNCTION_SIGNATURES
     assert {
+        name: inspect.signature(getattr(public_api, name)).return_annotation
+        for name in EXPECTED_FUNCTION_SIGNATURES
+    } == EXPECTED_FUNCTION_RETURN_ANNOTATIONS
+    assert {
         name: _signature_shape(getattr(SchemaFamily, name)) for name in EXPECTED_FAMILY_SIGNATURES
     } == EXPECTED_FAMILY_SIGNATURES
     assert {
@@ -274,6 +294,19 @@ def test_public_call_signatures_are_an_explicit_contract() -> None:
         "missing_version",
         "current_version",
     }
+
+
+def test_downstream_typing_fixture_covers_every_package_root_export() -> None:
+    fixture = Path(__file__).parents[1] / "typing" / "schema_family_contract.py"
+    tree = ast.parse(fixture.read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "pydantic_versions"
+        for alias in node.names
+    }
+
+    assert imported == set(EXPECTED_EXPORTS)
 
 
 def test_exception_hierarchy_is_an_explicit_contract() -> None:

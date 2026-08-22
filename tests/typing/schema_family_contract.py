@@ -27,20 +27,29 @@ from pydantic_versions import (
     SchemaVersionError,
     StepKind,
     StepSemantics,
+    TransitionData,
     TransitionDescription,
+    TransitionFunc,
+    UnknownSchemaVersionError,
     UnsupportedWireModelError,
     VersionDescription,
     VersionedValidation,
     VersionMetadata,
     VersionPatch,
+    VersionPath,
     VersionTransition,
+    __version__,
     dump_versioned,
     field_default,
     field_removed,
     field_renamed,
     matching_labels,
+    migration,
     model_for_version,
+    schema_version,
+    schema_versions,
     validate_versioned,
+    versioned_schema,
 )
 
 
@@ -52,12 +61,56 @@ def upgrade_v1(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+transition_data: TransitionData = {"version": "1"}
+transition_func: TransitionFunc = upgrade_v1
+version_path: VersionPath = ("metadata", "schema_version")
+assert_type(transition_data, dict[str, Any])
+assert_type(__version__, str)
+
+
+class SingleVersionDecoratorConfig(BaseModel):
+    timeout: float = 10.0
+
+
+single_version_decorated = schema_version("1")(SingleVersionDecoratorConfig)
+assert_type(single_version_decorated, type[SingleVersionDecoratorConfig])
+
+
+class MultipleVersionDecoratorConfig(BaseModel):
+    timeout: float = 10.0
+
+
+multiple_versions_decorated = schema_versions(("1", "2"))(MultipleVersionDecoratorConfig)
+assert_type(multiple_versions_decorated, type[MultipleVersionDecoratorConfig])
+
+
+class VersionedDecoratorConfig(BaseModel):
+    timeout: float = 10.0
+
+
+versioned_decorated = versioned_schema(
+    name="typed_decorator_config",
+    versions=("1",),
+    current="1",
+)(VersionedDecoratorConfig)
+assert_type(versioned_decorated, type[VersionedDecoratorConfig])
+
+
+migration_family: SchemaFamily[AppConfig] = SchemaFamily(
+    model=AppConfig,
+    name="typed_migration_family",
+    versions=(SchemaVersion("1"), SchemaVersion("2")),
+)
+preserved_transition = migration(migration_family, "1", "2")(transition_func)
+assert_type(preserved_transition(transition_data), dict[str, Any])
+
+
 patch: VersionPatch = field_default("timeout", 5.0)
 default_patch: FieldDefault = field_default("timeout", 5.0)
 removed_patch: FieldRemoved = field_removed("timeout")
 renamed_patch: FieldRenamed = field_renamed("timeout", "request_timeout")
 labels: MatchingLabels = matching_labels()
-metadata = VersionMetadata(path="schema_version", owner="family")
+metadata = VersionMetadata(path=version_path, owner="family")
 family: SchemaFamily[AppConfig] = SchemaFamily(
     model=AppConfig,
     name="app_config",
@@ -112,5 +165,6 @@ unsupported_wire_error: type[SchemaCompilationError] = UnsupportedWireModelError
 selection_error: type[Exception] = SchemaFamilySelectionError
 irreversible_error: type[Exception] = IrreversibleTransitionError
 missing_error: type[Exception] = MissingSchemaVersionError
+unknown_error: type[Exception] = UnknownSchemaVersionError
 duplicate_error: type[Exception] = DuplicateSchemaVersionError
 invalid_migration_error: type[Exception] = InvalidMigrationError

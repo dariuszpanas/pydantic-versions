@@ -19,9 +19,10 @@ format:
 lint:
 	uv run ruff check . --fix
 
-# Type check with ty
+# Type check the implementation and public consumer contract
 typecheck:
 	uv run ty check
+	uv run mypy --strict tests/typing/schema_family_contract.py
 
 # Run all tests
 test:
@@ -35,12 +36,14 @@ test-cov:
 check:
 	uv run ruff check .
 	uv run ty check
+	uv run mypy --strict tests/typing/schema_family_contract.py
 
 # CI check - all validations without modifications
 ci:
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run ty check
+	uv run mypy --strict tests/typing/schema_family_contract.py
 	uv run pytest --cov=src --cov-report=xml --cov-report=term
 	@echo "All CI checks passed!"
 
@@ -74,7 +77,7 @@ help:
 	@echo "Development:"
 	@echo "  format            - Format code with Ruff"
 	@echo "  lint              - Lint code with Ruff (auto-fix)"
-	@echo "  typecheck         - Type check with ty"
+	@echo "  typecheck         - Run ty and the external mypy consumer contract"
 	@echo "  check             - Run lint + typecheck (no formatting)"
 	@echo ""
 	@echo "Testing:"
