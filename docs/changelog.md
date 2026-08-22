@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitions, then projected the complete subtree at the final wire boundary.
   Child metadata is rebased to its mapped label, conflicting raw labels fail
   preflight, and set cardinality is checked again after target wire coercion.
+- Completed decorator-discovered child conversion across built-in containers,
+  string-key mappings, ordinary wrappers, nested decorator families, and
+  authoritative union branches. Child routes now migrate and project before
+  parent transitions, reject stale metadata and ambiguous callback mutations,
+  participate in deterministic plans, and fail closed for unsupported shapes.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

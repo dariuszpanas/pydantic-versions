@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_versions._compiler import (
+    _CompiledDecoratorNestedFamily,
     _CompiledFamily,
     _CompiledField,
     _CompiledNestedFamily,
@@ -44,6 +45,7 @@ def _build_planning_catalog(
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
     nested: tuple[_CompiledNestedFamily, ...] = (),
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...] = (),
 ) -> _PlanningCatalog:
     version_descriptions = tuple(_describe_version(version) for version in versions)
     transition_descriptions = tuple(_describe_transition(transition) for transition in transitions)
@@ -64,6 +66,7 @@ def _build_planning_catalog(
             versions,
             transitions,
             nested,
+            decorator_nested,
             source_index=source_index,
         )
         for source_index in range(len(versions))
@@ -74,6 +77,7 @@ def _build_planning_catalog(
             versions,
             transitions,
             nested,
+            decorator_nested,
             target_index=target_index,
         )
         for target_index in range(len(versions))
@@ -163,6 +167,7 @@ def _build_validation_plan(
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
     nested: tuple[_CompiledNestedFamily, ...],
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
     *,
     source_index: int,
 ) -> ConversionPlan:
@@ -223,6 +228,16 @@ def _build_validation_plan(
                 edge_ordinal=edge_index,
             )
         )
+        steps.extend(
+            _decorator_nested_steps(
+                family,
+                decorator_nested,
+                operation="validate",
+                parent_source_version=transition.source,
+                parent_target_version=transition.target,
+                edge_ordinal=edge_index,
+            )
+        )
         kind: StepKind = transition.upgrade_kind
         semantics: StepSemantics = "exact" if kind == "implicit_identity" else "not_applicable"
         steps.append(
@@ -267,6 +282,7 @@ def _build_render_plan(
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
     nested: tuple[_CompiledNestedFamily, ...],
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
     *,
     target_index: int,
 ) -> ConversionPlan:
@@ -293,6 +309,16 @@ def _build_render_plan(
             _nested_steps(
                 family,
                 nested,
+                operation="render",
+                parent_source_version=transition.target,
+                parent_target_version=transition.source,
+                edge_ordinal=edge_index,
+            )
+        )
+        steps.extend(
+            _decorator_nested_steps(
+                family,
+                decorator_nested,
                 operation="render",
                 parent_source_version=transition.target,
                 parent_target_version=transition.source,
@@ -442,6 +468,94 @@ def _nested_steps(
     return tuple(steps)
 
 
+def _decorator_nested_steps(
+    family: SchemaFamily[Any],
+    nested: tuple[_CompiledDecoratorNestedFamily, ...],
+    *,
+    operation: Literal["validate", "render"],
+    parent_source_version: str,
+    parent_target_version: str,
+    edge_ordinal: int,
+) -> tuple[PlanStep, ...]:
+    steps: list[PlanStep] = []
+    for site_ordinal, declarations in enumerate(_decorator_nested_sites(nested)):
+        first = declarations[0]
+        source_version = first.child_label(parent_source_version)
+        target_version = first.child_label(parent_target_version)
+        if source_version == target_version:
+            continue
+        semantics = _aggregate_semantics(
+            tuple(
+                _nested_route_semantics(
+                    declaration.family._compiled_family(),
+                    source_version=source_version,
+                    target_version=target_version,
+                )
+                for declaration in declarations
+            )
+        )
+        child_compiled = first.family._compiled_family()
+        direction: Literal["upgrade", "downgrade"] = (
+            "upgrade"
+            if child_compiled.index(source_version) < child_compiled.index(target_version)
+            else "downgrade"
+        )
+        identity = tuple(
+            component
+            for declaration in declarations
+            for component in (
+                "branch",
+                *declaration.identity,
+            )
+        )
+        steps.append(
+            _step(
+                family,
+                operation=operation,
+                direction=direction,
+                kind="nested",
+                source_version=source_version,
+                target_version=target_version,
+                schema_path=_schema_path(first.path),
+                semantics=semantics,
+                ordinal=edge_ordinal,
+                identity_details=(
+                    "decorator",
+                    parent_source_version,
+                    parent_target_version,
+                    str(site_ordinal),
+                    *identity,
+                    "conditional",
+                ),
+                conditional=True,
+            )
+        )
+    return tuple(steps)
+
+
+def _decorator_nested_sites(
+    nested: tuple[_CompiledDecoratorNestedFamily, ...],
+) -> tuple[tuple[_CompiledDecoratorNestedFamily, ...], ...]:
+    paths: list[tuple[str, ...]] = []
+    grouped: list[list[_CompiledDecoratorNestedFamily]] = []
+    for declaration in nested:
+        if declaration.path not in paths:
+            paths.append(declaration.path)
+            grouped.append([])
+        grouped[paths.index(declaration.path)].append(declaration)
+    return tuple(tuple(site) for site in grouped)
+
+
+def _aggregate_semantics(values: tuple[StepSemantics, ...]) -> StepSemantics:
+    if "unavailable" in values:
+        return "unavailable"
+    if "lossy" in values:
+        return "lossy"
+    if "exact" in values:
+        return "exact"
+    return "not_applicable"
+
+
 def _nested_route_semantics(
     compiled: _CompiledFamily,
     *,
@@ -460,6 +574,7 @@ def _nested_route_semantics(
             risks.extend(
                 _nested_route_risks(
                     compiled.nested,
+                    compiled.decorator_nested,
                     parent_source_version=transition.source,
                     parent_target_version=transition.target,
                 )
@@ -474,6 +589,7 @@ def _nested_route_semantics(
             risks.extend(
                 _nested_route_risks(
                     compiled.nested,
+                    compiled.decorator_nested,
                     parent_source_version=transition.target,
                     parent_target_version=transition.source,
                 )
@@ -495,6 +611,7 @@ def _nested_route_semantics(
 
 def _nested_route_risks(
     nested: tuple[_CompiledNestedFamily, ...],
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
     *,
     parent_source_version: str,
     parent_target_version: str,
@@ -509,6 +626,21 @@ def _nested_route_risks(
             declaration.family._compiled_family(),
             source_version=source_version,
             target_version=target_version,
+        )
+        if semantics in ("lossy", "unavailable"):
+            risks.append(semantics)
+    for declarations in _decorator_nested_sites(decorator_nested):
+        semantics = _aggregate_semantics(
+            tuple(
+                _nested_route_semantics(
+                    declaration.family._compiled_family(),
+                    source_version=declaration.child_label(parent_source_version),
+                    target_version=declaration.child_label(parent_target_version),
+                )
+                for declaration in declarations
+                if declaration.child_label(parent_source_version)
+                != declaration.child_label(parent_target_version)
+            )
         )
         if semantics in ("lossy", "unavailable"):
             risks.append(semantics)

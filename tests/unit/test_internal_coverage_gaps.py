@@ -1206,7 +1206,10 @@ def test_wire_decorator_child_label_mismatch() -> None:
 
     fam = _default_family_for_model(MismatchParent)
     assert fam is not None
-    with pytest.raises(UnsupportedWireModelError, match="could not be built safely"):
+    with pytest.raises(
+        SchemaCompilationError,
+        match="must use the exact labels.*declare an explicit nested mapping",
+    ):
         fam.model_for("v1")
 
 

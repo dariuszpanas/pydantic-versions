@@ -35,6 +35,20 @@ type UpgradeKind = Literal["implicit_identity", "custom_transition"]
 type DowngradeKind = Literal["implicit_identity", "custom_transition", "unavailable"]
 type WireModelKind = Literal["current", "generated", "explicit"]
 type _NestedLabelPairs = tuple[tuple[str, str], ...]
+type _NestedCollectionKind = Literal["list", "tuple", "set", "frozenset", "mapping"]
+type _DecoratorTraversalKind = Literal[
+    "field",
+    "union_arm",
+    "each",
+    "mapping_values",
+    "tuple_index",
+]
+
+
+@dataclass(frozen=True)
+class _DecoratorTraversalStep:
+    kind: _DecoratorTraversalKind
+    value: str
 
 
 @dataclass(frozen=True)
@@ -91,6 +105,35 @@ class _CompiledNestedFamily:
 
 
 @dataclass(frozen=True)
+class _CompiledDecoratorNestedFamily:
+    """A decorator-owned child route discovered from the authoritative annotation tree."""
+
+    path: tuple[str, ...]
+    family: SchemaFamily[Any]
+    traversal: tuple[_DecoratorTraversalStep, ...]
+    collection_kind: _NestedCollectionKind | None
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        return (
+            *(f"{step.kind}:{step.value}" for step in self.traversal),
+            "child",
+            self.family.model.__module__,
+            self.family.model.__qualname__,
+            self.family.name,
+        )
+
+    def child_label(self, parent_label: str) -> str:
+        if parent_label in tuple(version.label for version in self.family.versions):
+            return parent_label
+        msg = (
+            f"Decorator nested route for path {self.path!r} has no matching child label "
+            f"for {parent_label!r}"
+        )
+        raise SchemaCompilationError(msg)
+
+
+@dataclass(frozen=True)
 class _CompiledFamily:
     model: type[BaseModel]
     name: str
@@ -100,6 +143,7 @@ class _CompiledFamily:
     missing_version: str | None
     catalog: _PlanningCatalog
     nested: tuple[_CompiledNestedFamily, ...]
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...]
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -243,6 +287,16 @@ def _validate_compilation_boundary(
                 f"Nested family declaration at path {path!r} for {name!r} targets model "
                 f"{expected!r}, but declared child family {child_family.name!r} owns "
                 f"model {declared!r}"
+            )
+            raise UnsupportedWireModelError(msg)
+
+        child_compiled = child_family._compiled_family()
+        if child_compiled.decorator_nested:
+            msg = (
+                f"Nested family declaration at path {path!r} for {name!r} targets child "
+                f"family {child_family.name!r}, which still contains decorator-discovered "
+                "nested routes; declare those child routes explicitly with "
+                "versioned_schema(..., nested=...)"
             )
             raise UnsupportedWireModelError(msg)
 
