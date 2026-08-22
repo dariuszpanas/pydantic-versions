@@ -125,11 +125,11 @@ def test_compiler_private_paths_raise_expected_errors() -> None:
 
 
 def test_compiler_validation_catches_nested_family_projection_errors() -> None:
-    class Parent(BaseModel):
-        value: int = 1
-
     class Child(BaseModel):
         value: int = 1
+
+    class Parent(BaseModel):
+        child: Child
 
     child = SchemaFamily(
         model=Child,
@@ -141,8 +141,8 @@ def test_compiler_validation_catches_nested_family_projection_errors() -> None:
         name="parent",
         versions=(SchemaVersion("v1"), SchemaVersion("v2")),
         nested=(
-            NestedFamily("value", child, matching_labels()),
-            NestedFamily("value", child, matching_labels()),
+            NestedFamily("child", child, matching_labels()),
+            NestedFamily("child", child, matching_labels()),
         ),
     )
 
@@ -159,14 +159,14 @@ def test_compiler_validation_catches_nested_family_projection_errors() -> None:
             name="parent",
             model=Parent,
             labels=("v1", "v2"),
-            nested=(NestedFamily("value", lambda: cast(Any, "not_family"), matching_labels()),),
+            nested=(NestedFamily("child", lambda: cast(Any, "not_family"), matching_labels()),),
         )
 
     compiled_boundary = _validate_compilation_boundary(
         name="parent",
         model=Parent,
         labels=("v1", "v2"),
-        nested=(NestedFamily("value", lambda: child, versions={"v1": "v1", "v2": "v2"}),),
+        nested=(NestedFamily("child", lambda: child, versions={"v1": "v1", "v2": "v2"}),),
     )
     assert len(compiled_boundary) == 1
 

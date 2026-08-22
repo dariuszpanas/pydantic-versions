@@ -1168,6 +1168,122 @@ def test_unused_nested_declarations_are_rejected() -> None:
         family.model_for("1")
 
 
+def test_nested_family_mapping_boundary_is_rejected_during_compilation() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="mapping_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        children: dict[str, ChildPayload]
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="mapping_boundary_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("children", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="mapping container"):
+        family.compile()
+
+
+def test_nested_family_wrong_model_is_rejected_with_context() -> None:
+    class ExpectedChild(BaseModel):
+        value: int
+
+    class DeclaredChild(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=DeclaredChild,
+        name="wrong_model_child_family",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        child: ExpectedChild
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="wrong_model_parent_family",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError) as exc_info:
+        family.compile()
+
+    message = str(exc_info.value)
+    assert "wrong_model_parent_family" in message
+    assert "('child',)" in message
+    assert "ExpectedChild" in message
+    assert "wrong_model_child_family" in message
+    assert "DeclaredChild" in message
+
+
+def test_nested_family_heterogeneous_union_is_rejected_during_compilation() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    class OtherPayload(BaseModel):
+        other: str
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="union_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        child: ChildPayload | OtherPayload
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="union_boundary_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="heterogeneous union"):
+        family.compile()
+
+
+def test_nested_family_supported_container_boundaries_compile() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="supported_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        direct: ChildPayload
+        optional: ChildPayload | None = None
+        listed: list[ChildPayload]
+        tupled: tuple[ChildPayload, ...]
+        setted: set[ChildPayload]
+        frozen: frozenset[ChildPayload]
+
+    paths = ("direct", "optional", "listed", "tupled", "setted", "frozen")
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="supported_nested_boundaries",
+        versions=(SchemaVersion("1"),),
+        nested=tuple(NestedFamily(path, child_family, matching_labels()) for path in paths),
+    )
+
+    wire = family.model_for("1")
+
+    assert set(wire.model_fields) == set(paths) | {"schema_version"}
+
+
 def test_nested_projection_rewrites_deeply_nested_models() -> None:
     class InnerPayload(BaseModel):
         label: int
