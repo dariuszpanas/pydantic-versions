@@ -16,7 +16,7 @@ from pydantic_versions._compiler import (
     _validate_family_declarations,
     _validate_required_field_introductions,
 )
-from pydantic_versions._planning import _build_planning_catalog
+from pydantic_versions._planning import _build_planning_catalog, _schema_path
 from pydantic_versions._runtime import (
     _dump_family,
     _runtime_label,
@@ -24,6 +24,7 @@ from pydantic_versions._runtime import (
 )
 from pydantic_versions._wire import (
     _build_model_for_projection,
+    _compile_decorator_nested_families,
     _validate_automatic_wire_model,
 )
 from pydantic_versions.declarations import (
@@ -146,6 +147,7 @@ class SchemaFamily[T: BaseModel]:
                     nested=self.nested,
                 )
                 _validate_automatic_wire_model(self)
+                decorator_nested = _compile_decorator_nested_families(self, nested)
                 projections = tuple(
                     _compile_projection(self.model, declaration) for declaration in self.versions
                 )
@@ -163,6 +165,7 @@ class SchemaFamily[T: BaseModel]:
                             projection,
                             declaration.wire_model,
                             nested=nested,
+                            decorator_nested=decorator_nested,
                         ),
                         wire_model_kind=(
                             "current"
@@ -193,6 +196,7 @@ class SchemaFamily[T: BaseModel]:
                     compiled_versions,
                     compiled_transitions,
                     nested,
+                    decorator_nested,
                 )
                 self._compiled = _CompiledFamily(
                     model=self.model,
@@ -203,6 +207,7 @@ class SchemaFamily[T: BaseModel]:
                     missing_version=self.missing_version,
                     catalog=catalog,
                     nested=nested,
+                    decorator_nested=decorator_nested,
                 )
             finally:
                 self._compiling = False
@@ -237,14 +242,28 @@ class SchemaFamily[T: BaseModel]:
             blocked = next(step for step in candidate.steps if step.semantics == "unavailable")
             if blocked.kind == "nested":
                 nested = next(
-                    description
-                    for description in compiled.catalog.inventory.nested
-                    if description.schema_path == blocked.schema_path
+                    (
+                        description
+                        for description in compiled.catalog.inventory.nested
+                        if description.schema_path == blocked.schema_path
+                    ),
+                    None,
                 )
+                if nested is None:
+                    decorator_names = tuple(
+                        dict.fromkeys(
+                            route.family.name
+                            for route in compiled.decorator_nested
+                            if _schema_path(route.path) == blocked.schema_path
+                        )
+                    )
+                    nested_name = " | ".join(decorator_names)
+                else:
+                    nested_name = nested.family
                 msg = (
                     f"Schema family {self.name!r} cannot render "
                     f"{candidate.source_version!r} -> {candidate.target_version!r}: "
-                    f"nested family {nested.family!r} at path {blocked.schema_path!r} "
+                    f"nested family {nested_name!r} at path {blocked.schema_path!r} "
                     f"has no complete route {blocked.source_version!r} -> "
                     f"{blocked.target_version!r}"
                 )

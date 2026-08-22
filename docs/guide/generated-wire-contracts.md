@@ -40,6 +40,61 @@ boundaries can appear while traversing a multi-segment path. Mapping values and
 heterogeneous branches are intentionally rejected during compilation rather
 than accepted with payload-dependent behavior.
 
+The `@versioned_schema` compatibility decorator also discovers child models
+that have their own decorator-created family with the exact same labels. These
+implicit boundaries are separate from explicit `NestedFamily` declarations:
+they do not appear in `SchemaInventory.nested`, but conversion plans include
+conditional child-before-parent steps for them. Discovery traverses ordinary
+Pydantic model wrappers, `Annotated` and optional annotations, general or
+discriminated unions whose selected arm remains recoverable, built-in `list`,
+`tuple`, `set`, and `frozenset` containers, fixed tuple positions, and
+`dict[str, value]`, including nested combinations of those shapes. An explicit
+declaration suppresses discovery at
+that exact leaf only, so an ordinary wrapper can contain an explicitly mapped
+child and a decorator-discovered sibling.
+
+A decorator-discovered child may itself use explicit `NestedFamily`
+declarations. The inverse composition fails closed: an explicit
+`NestedFamily` child may not retain implicit decorator-discovered descendants.
+Declare those descendant routes explicitly on the child with
+`versioned_schema(..., nested=...)` so the complete conversion boundary is
+visible to the compiler.
+
+Union selection comes from the already validated parent model and is carried
+through conversion without validating the child a second time. A parent
+transition may reorder surviving child mappings within one dispatch site
+because their identities move with them. Moving or swapping an existing child
+identity across fields or dispatch sites is rejected. Dictionary keys are
+stable occurrence anchors when no dynamic collection occurs above or below
+that mapping boundary. An exact current
+child-model instance may deliberately replace an occurrence and establish a
+new branch. If a transition loses, duplicates, reuses, or replaces overlapping
+union occurrences with untyped copied mappings, conversion raises
+`InvalidMigrationError` before the next transition runs. Set and frozenset
+cardinality is checked again after target-wire validation.
+
+Decorator discovery fails closed when it encounters an abstract or custom
+container, a mapping whose declared or runtime key is not exactly `str`, a
+child hidden in a type alias or unresolved generic, an unsafe recursive
+wrapper, non-isomorphic union traversal shapes, or runtime-unrecoverable union
+arms.
+Examples of unrecoverable arms include `list[A] | list[B]`, an abstract
+`Mapping` competing with `dict[str, Child]`, and a `TypedDict` competing with a
+decorator child. Incompatible union metadata contracts and an explicit path
+below a decorator-owned child boundary are also rejected.
+Different parent and child labels still require an explicit
+`NestedFamily` mapping. An explicit historical parent wire model must likewise
+declare these child boundaries explicitly; the compiler does not partially
+rewrite a user-supplied wire class.
+
+An ordinary wrapper that must be projected for a decorator child must be a
+complete, resolved, object-shaped Pydantic model. Rebuild forward references
+with `model_rebuild()` before compilation. Projected wrappers may not be a
+`RootModel` or carry typed extras, model-level serializers, unsafe
+configuration, or custom schema hooks that automatic generation would
+otherwise weaken or discard. Those models remain supported as unchanged field
+annotations when no decorator route requires their projection.
+
 An excluded field is also absent from the generated wire model. This is the
 supported way to keep server-internal state on the authoritative model while
 using that model as the source for a document contract. The exclusion is not
@@ -61,9 +116,12 @@ declared mapping or envelope when they must cross the conversion boundary.
 Zero-argument factories remain safe when the field annotation is unchanged. A
 decorator-owned child annotation can replace the child class itself as a
 factory, and a direct child instance is projected without running its
-serializers. Opaque factories for a projected child are rejected because they
-could construct the authoritative child and run its behavior on historical
-input. Any factory that consumes already validated field data is also rejected:
+serializers. Projected direct-child, container, and ordinary-wrapper defaults
+are rebuilt from declared fields only; extras and subclass-only state never
+cross the wire through a default. Opaque factories for a projected route are
+rejected because they could construct authoritative models and run their
+behavior on historical input. Any factory that consumes already validated
+field data is also rejected:
 automatic wire models intentionally omit current-model validators, so copying
 its materialized result could prevent the authoritative current factory from
 seeing the final values. Typed `__pydantic_extra__` values and schema or runtime
