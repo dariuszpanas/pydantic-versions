@@ -41,6 +41,7 @@ from pydantic_versions.declarations import (
 from pydantic_versions.exceptions import (
     DuplicateSchemaVersionError,
     InvalidMigrationError,
+    IrreversibleTransitionError,
     SchemaCompilationError,
     UnknownSchemaVersionError,
     UnsupportedWireModelError,
@@ -212,7 +213,7 @@ def test_runtime_private_edges() -> None:
         path=("outer", "value"),
         family=parent,
     )
-    assert payload == {"outer": {"value": {}}}
+    assert payload == {"outer": {"value": {"schema_version": "v2"}}}
 
     assert _nested_family_collection_kind(model=Base, path=("value",)) is None
 
@@ -883,35 +884,43 @@ def test_runtime_nested_child_and_family_payload_conversions() -> None:
         ),
     )
 
+    class CollectionParent(BaseModel):
+        tuple_values: tuple[ChildModel, ...]
+        set_values: set[ChildModel]
+        frozenset_values: frozenset[ChildModel]
+
     # _convert_nested_child_family direct tests with tuple, set, frozenset
     item_v1 = HashableDict({"schema_version": "v1", "val": 1})
 
     res_tuple = _convert_nested_child_family(
-        payload=({"sub": item_v1},),
-        path=("sub",),
+        payload={"tuple_values": (item_v1,)},
+        model=CollectionParent,
+        path=("tuple_values",),
         family=child_fam,
         source_label="v1",
         target_label="v2",
     )
-    assert res_tuple[0]["sub"]["val"] == 11
+    assert res_tuple["tuple_values"][0]["val"] == 11
 
     res_set = _convert_nested_child_family(
-        payload={1, 2},
-        path=("sub",),
+        payload={"set_values": {item_v1}},
+        model=CollectionParent,
+        path=("set_values",),
         family=child_fam,
         source_label="v1",
         target_label="v2",
     )
-    assert len(res_set) == 2
+    assert len(res_set["set_values"]) == 1
 
     res_frozenset = _convert_nested_child_family(
-        payload=frozenset([1, 2]),
-        path=("sub",),
+        payload={"frozenset_values": frozenset([item_v1])},
+        model=CollectionParent,
+        path=("frozenset_values",),
         family=child_fam,
         source_label="v1",
         target_label="v2",
     )
-    assert len(res_frozenset) == 2
+    assert len(res_frozenset["frozenset_values"]) == 1
 
     # _convert_nested_family_payload direct tests with tuple, set, frozenset
     payload_tuple = (item_v1,)
@@ -1174,6 +1183,7 @@ def test_runtime_more_nested_family_migration_errors_and_conversions() -> None:
     item_v1 = {"schema_version": "v1", "val": 1}
     res_dict = _convert_nested_child_family(
         payload={"a": {"sub": item_v1}},
+        model=ChildModel,
         path=("sub", "val"),
         family=bad_upgrade_fam,
         source_label="v1",
@@ -1265,6 +1275,7 @@ def test_runtime_nested_cardinality_and_prune_coverage() -> None:
     with pytest.raises(InvalidMigrationError, match="cannot preserve set cardinality"):
         _convert_nested_child_family(
             payload={item1, item2},
+            model=fam.model,
             path=(),
             family=fam,
             source_label="v1",
@@ -1274,6 +1285,7 @@ def test_runtime_nested_cardinality_and_prune_coverage() -> None:
     with pytest.raises(InvalidMigrationError, match="cannot preserve set cardinality"):
         _convert_nested_child_family(
             payload=frozenset({item1, item2}),
+            model=fam.model,
             path=(),
             family=fam,
             source_label="v1",
@@ -1471,6 +1483,7 @@ def test_runtime_list_tuple_unchanged_conversions() -> None:
     # list unchanged
     res_list1 = _convert_nested_child_family(
         payload=[item],
+        model=fam.model,
         path=(),
         family=fam,
         source_label="v1",
@@ -1489,6 +1502,7 @@ def test_runtime_list_tuple_unchanged_conversions() -> None:
     # tuple unchanged
     res_tup1 = _convert_nested_child_family(
         payload=(item,),
+        model=fam.model,
         path=(),
         family=fam,
         source_label="v1",
@@ -1554,14 +1568,15 @@ def test_runtime_nested_migration_none_transitions_and_metadata_alias() -> None:
     assert res_up is not None
 
     item3 = {"schema_version": "v3", "val": 1}
-    # downgrade v3 -> v1 with None downgrade
-    res_down = _convert_nested_family_payload(
-        family=fam,
-        payload=item3,
-        source_label="v3",
-        target_label="v1",
-    )
-    assert res_down is not None
+    # A missing downgrade on a custom-upgrade edge is unavailable, not an
+    # implicit identity that nested conversion may silently skip.
+    with pytest.raises(IrreversibleTransitionError, match="has no declared downgrade"):
+        _convert_nested_family_payload(
+            family=fam,
+            payload=item3,
+            source_label="v3",
+            target_label="v1",
+        )
 
 
 def test_compiler_patch_validation_errors() -> None:

@@ -288,6 +288,17 @@ def _validate_compilation_boundary(
                 raise SchemaCompilationError(msg)
             nested_versions = tuple((parent, parent_map[parent]) for parent in parent_labels)
 
+        current_parent = parent_labels[-1]
+        current_child = child_labels[-1]
+        mapped_current = nested_versions[-1][1]
+        if mapped_current != current_child:
+            msg = (
+                f"Nested family declaration at path {path!r} for {name!r} must map "
+                f"current parent label {current_parent!r} to current child label "
+                f"{current_child!r}, not {mapped_current!r}"
+            )
+            raise SchemaCompilationError(msg)
+
         compiled_nested.append(
             _CompiledNestedFamily(path=path, family=child_family, versions=nested_versions),
         )

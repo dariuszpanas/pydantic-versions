@@ -16,6 +16,13 @@ Check the committed artifact with the current checkout:
 uv run python tests/compatibility/v0_3_0_contract.py --check
 ```
 
+Current code intentionally adds two steps to the frozen artifact: a conditional
+`$.credentials` nested step in `validate_v1` and another in `render_v1_lossy`.
+The checker applies that reviewed additive overlay without modifying the 0.3.0
+fixture, then compares the exact rendered artifact, including dictionary key
+order and step positions. It returns success only for those two additions; any
+other output remains an unexplained compatibility delta.
+
 The write command refuses a different package version. Review the resulting
 human-readable diff before committing it. Never regenerate solely to make a
 compatibility failure disappear: either preserve the stable contract or

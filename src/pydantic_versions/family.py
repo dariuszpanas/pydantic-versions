@@ -235,6 +235,20 @@ class SchemaFamily[T: BaseModel]:
         candidate = compiled.catalog.render_plans[compiled.index(requested)]
         if candidate.semantics == "unavailable":
             blocked = next(step for step in candidate.steps if step.semantics == "unavailable")
+            if blocked.kind == "nested":
+                nested = next(
+                    description
+                    for description in compiled.catalog.inventory.nested
+                    if description.schema_path == blocked.schema_path
+                )
+                msg = (
+                    f"Schema family {self.name!r} cannot render "
+                    f"{candidate.source_version!r} -> {candidate.target_version!r}: "
+                    f"nested family {nested.family!r} at path {blocked.schema_path!r} "
+                    f"has no complete route {blocked.source_version!r} -> "
+                    f"{blocked.target_version!r}"
+                )
+                raise IrreversibleTransitionError(msg)
             msg = (
                 f"Schema family {self.name!r} cannot render "
                 f"{candidate.source_version!r} -> {candidate.target_version!r}: "

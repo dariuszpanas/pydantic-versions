@@ -144,6 +144,32 @@ version-specific projections, every adjacent upgrade or identity edge, and the
 final current-model validation boundary. Their overall semantics are
 `not_applicable`; individual identity steps are marked `exact`.
 
+When a parent edge changes the version selected for a declared nested family,
+the plan places a `nested` step immediately before that parent edge. Its schema
+path and child source/target labels describe the complete child conversion
+without inspecting a payload. The step is conditional because an optional or
+collection-valued path may have no value to convert for one document.
+Its direction follows the child labels rather than the owning parent edge, so an
+explicit historical mapping may require a child downgrade during parent
+validation or a child upgrade during rendering. Validation preflights the whole
+route and rejects an unavailable child downgrade before source validation or any
+parent or child transition callable runs.
+
+Runtime execution keeps nested transition dictionaries in canonical current
+field names. Each child value migration runs before its owning parent
+transition, so the parent callable can read and update current child keys even
+when that edge selects a historical child label. Target child field names are
+applied recursively only after the parent route completes, immediately before
+the final wire-validation boundary. Model-owned child metadata is rebased to
+the mapped child label at each edge. If raw nested metadata declares a different
+label than the parent mapping, validation and rendering reject the complete
+document before source/current validation or any transition callable runs.
+
+For nested `set` and `frozenset` fields, cardinality is checked both after value
+migrations and after target wire coercion. Distinct current values therefore
+cannot silently collapse because an explicit historical wire model normalizes
+them to the same set element.
+
 Each step has a deterministic `pv1-` ID followed by the full 64-character
 SHA-256 digest of safe schema identity. IDs never depend on Python's
 process-randomized hash, callable `repr()`, object identity, or payload values.
@@ -168,6 +194,12 @@ The method takes no payload and raises before any user transition can run.
 Structural rename and default projections are exact. A target projection that
 removes a current field is available but marks its step and the complete render
 plan as `lossy`.
+
+Nested render semantics roll up into the parent plan. A lossy child route makes
+the parent route lossy. An unavailable child route rejects the complete parent
+plan before any parent or child downgrade callable runs, even if the particular
+payload would omit that optional path or use an empty collection. `conditional`
+describes execution, not a way to weaken compatibility preflight.
 
 Custom downgrade declarations are fully supported. When an explicit downgrade is
 declared on a `VersionTransition`, rendering a historical schema will execute the

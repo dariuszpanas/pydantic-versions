@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_versions._compiler import (
+    _CompiledFamily,
     _CompiledField,
     _CompiledNestedFamily,
     _CompiledTransition,
@@ -62,6 +63,7 @@ def _build_planning_catalog(
             family,
             versions,
             transitions,
+            nested,
             source_index=source_index,
         )
         for source_index in range(len(versions))
@@ -71,6 +73,7 @@ def _build_planning_catalog(
             family,
             versions,
             transitions,
+            nested,
             target_index=target_index,
         )
         for target_index in range(len(versions))
@@ -159,6 +162,7 @@ def _build_validation_plan(
     family: SchemaFamily[Any],
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
+    nested: tuple[_CompiledNestedFamily, ...],
     *,
     source_index: int,
 ) -> ConversionPlan:
@@ -209,6 +213,16 @@ def _build_validation_plan(
         )
     )
     for edge_index, transition in enumerate(transitions[source_index:], start=source_index):
+        steps.extend(
+            _nested_steps(
+                family,
+                nested,
+                operation="validate",
+                parent_source_version=transition.source,
+                parent_target_version=transition.target,
+                edge_ordinal=edge_index,
+            )
+        )
         kind: StepKind = transition.upgrade_kind
         semantics: StepSemantics = "exact" if kind == "implicit_identity" else "not_applicable"
         steps.append(
@@ -252,6 +266,7 @@ def _build_render_plan(
     family: SchemaFamily[Any],
     versions: tuple[_CompiledVersion, ...],
     transitions: tuple[_CompiledTransition, ...],
+    nested: tuple[_CompiledNestedFamily, ...],
     *,
     target_index: int,
 ) -> ConversionPlan:
@@ -274,6 +289,16 @@ def _build_render_plan(
 
     route = tuple(enumerate(transitions[target_index:], start=target_index))
     for edge_index, transition in reversed(route):
+        steps.extend(
+            _nested_steps(
+                family,
+                nested,
+                operation="render",
+                parent_source_version=transition.target,
+                parent_target_version=transition.source,
+                edge_ordinal=edge_index,
+            )
+        )
         kind: StepKind = (
             "custom_transition"
             if transition.downgrade_kind == "unavailable"
@@ -365,6 +390,131 @@ def _build_render_plan(
     )
 
 
+def _nested_steps(
+    family: SchemaFamily[Any],
+    nested: tuple[_CompiledNestedFamily, ...],
+    *,
+    operation: Literal["validate", "render"],
+    parent_source_version: str,
+    parent_target_version: str,
+    edge_ordinal: int,
+) -> tuple[PlanStep, ...]:
+    steps: list[PlanStep] = []
+    for nested_ordinal, declaration in enumerate(nested):
+        source_version = declaration.child_label(parent_source_version)
+        target_version = declaration.child_label(parent_target_version)
+        if source_version == target_version:
+            continue
+        child = declaration.family
+        child_compiled = child._compiled_family()
+        direction: Literal["upgrade", "downgrade"] = (
+            "upgrade"
+            if child_compiled.index(source_version) < child_compiled.index(target_version)
+            else "downgrade"
+        )
+        steps.append(
+            _step(
+                family,
+                operation=operation,
+                direction=direction,
+                kind="nested",
+                source_version=source_version,
+                target_version=target_version,
+                schema_path=_schema_path(declaration.path),
+                semantics=_nested_route_semantics(
+                    child_compiled,
+                    source_version=source_version,
+                    target_version=target_version,
+                ),
+                ordinal=edge_ordinal,
+                identity_details=(
+                    child.model.__module__,
+                    child.model.__qualname__,
+                    child.name,
+                    parent_source_version,
+                    parent_target_version,
+                    str(nested_ordinal),
+                    "conditional",
+                ),
+                conditional=True,
+            )
+        )
+    return tuple(steps)
+
+
+def _nested_route_semantics(
+    compiled: _CompiledFamily,
+    *,
+    source_version: str,
+    target_version: str,
+) -> StepSemantics:
+    source_index = compiled.index(source_version)
+    target_index = compiled.index(target_version)
+    if source_index == target_index:
+        return "exact"
+
+    risks: list[StepSemantics] = []
+    if source_index < target_index:
+        route = compiled.transitions[source_index:target_index]
+        for transition in route:
+            risks.extend(
+                _nested_route_risks(
+                    compiled.nested,
+                    parent_source_version=transition.source,
+                    parent_target_version=transition.target,
+                )
+            )
+        default: StepSemantics = "not_applicable"
+    else:
+        route = tuple(
+            compiled.transitions[edge_index]
+            for edge_index in range(source_index - 1, target_index - 1, -1)
+        )
+        for transition in route:
+            risks.extend(
+                _nested_route_risks(
+                    compiled.nested,
+                    parent_source_version=transition.target,
+                    parent_target_version=transition.source,
+                )
+            )
+            risks.append(transition.downgrade_semantics)
+        if any(
+            description.kind == "removed"
+            for description in _describe_version(compiled.versions[target_index]).projections
+        ):
+            risks.append("lossy")
+        default = "exact"
+
+    if "unavailable" in risks:
+        return "unavailable"
+    if "lossy" in risks:
+        return "lossy"
+    return default
+
+
+def _nested_route_risks(
+    nested: tuple[_CompiledNestedFamily, ...],
+    *,
+    parent_source_version: str,
+    parent_target_version: str,
+) -> tuple[StepSemantics, ...]:
+    risks: list[StepSemantics] = []
+    for declaration in nested:
+        source_version = declaration.child_label(parent_source_version)
+        target_version = declaration.child_label(parent_target_version)
+        if source_version == target_version:
+            continue
+        semantics = _nested_route_semantics(
+            declaration.family._compiled_family(),
+            source_version=source_version,
+            target_version=target_version,
+        )
+        if semantics in ("lossy", "unavailable"):
+            risks.append(semantics)
+    return tuple(risks)
+
+
 def _projection_steps(
     family: SchemaFamily[Any],
     *,
@@ -413,6 +563,7 @@ def _step(
     semantics: StepSemantics,
     ordinal: int,
     identity_details: tuple[str, ...] = (),
+    conditional: bool = False,
 ) -> PlanStep:
     components = (
         family.model.__module__,
@@ -438,7 +589,7 @@ def _step(
         kind=kind,
         schema_path=schema_path,
         semantics=semantics,
-        conditional=False,
+        conditional=conditional,
     )
 
 
