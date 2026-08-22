@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   propagate unchanged while invalid transition return values raise
   `InvalidMigrationError`.
 
+### Fixed
+- Replaced the redirecting Read the Docs badge source with a directly rendered
+  Shields endpoint so the documentation status appears on PyPI.
+
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public
   package surface before the 1.0.0 contract freeze.
