@@ -16,15 +16,36 @@ asymmetric model may require a separately aligned consumer contract.
 
 ## Render defaults
 
+The following snippets form one executable example:
+
+<!-- pv-doc-test: rendering -->
 ```python
+from pydantic import BaseModel
+from pydantic_versions import (
+    dump_versioned,
+    field_default,
+    field_renamed,
+    schema_version,
+    versioned_schema,
+)
+
+
 @versioned_schema(name="app_config", versions=["1", "2"], current="2")
-@schema_version("1", patches=[field_default("timeout", 5.0)])
+@schema_version(
+    "1",
+    patches=[
+        field_default("timeout", 5.0),
+        field_renamed("retries", "attempts"),
+    ],
+)
 class AppConfig(BaseModel):
     timeout: float = 10.0
+    retries: int = 3
 
 
 assert dump_versioned(AppConfig, version="1") == {
     "timeout": 5.0,
+    "attempts": 3,
     "schema_version": "1",
 }
 ```
@@ -44,14 +65,18 @@ required current fields still fail validation.
 
 Current model instances and mappings can be rendered into historical field names:
 
+<!-- pv-doc-test: rendering -->
 ```python
-@schema_version("1", patches=[field_renamed("retries", "attempts")])
-class AppConfig(BaseModel):
-    retries: int = 3
-
-
-dumped = dump_versioned(AppConfig, version="1", data=AppConfig(retries=5))
-assert dumped["attempts"] == 5
+dumped = dump_versioned(
+    AppConfig,
+    version="1",
+    data=AppConfig(timeout=12.0, retries=5),
+)
+assert dumped == {
+    "timeout": 12.0,
+    "attempts": 5,
+    "schema_version": "1",
+}
 ```
 
 Supplied `data` always describes the current schema. The `version` argument is
@@ -153,8 +178,10 @@ partial view outside this API when an application deliberately needs one.
 Set `include_version=False` when family-owned version metadata is stored outside
 the rendered payload:
 
+<!-- pv-doc-test: rendering -->
 ```python
 dumped = dump_versioned(AppConfig, version="1", include_version=False)
+assert dumped == {"timeout": 5.0, "attempts": 3}
 ```
 
 This is an explicit body-only mode. Its result is not a complete document for
@@ -167,6 +194,7 @@ raises `ValueError` before target construction or serialization.
 
 Nested version fields are rendered into the requested path:
 
+<!-- pv-doc-test: rendering -->
 ```python
 @versioned_schema(
     name="metadata_config",

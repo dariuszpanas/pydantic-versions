@@ -26,6 +26,7 @@ supported.
 Start with the model your current application wants to use. It does not need a
 version decorator or a `pydantic_versions` import:
 
+<!-- pv-doc-test: getting-started -->
 ```python
 # models.py
 from pydantic import BaseModel
@@ -41,9 +42,9 @@ class AppConfig(BaseModel):
 
 Put the growing history in a dedicated module:
 
+<!-- pv-doc-test: getting-started -->
 ```python
 # schema_history.py
-from models import AppConfig
 from pydantic_versions import (
     SchemaFamily,
     SchemaVersion,
@@ -75,12 +76,15 @@ This says:
 - version `1` did not have `new_feature`.
 
 Adding another historical version changes `schema_history.py`, not the
-authoritative application model.
+authoritative application model. When these definitions live in separate
+files, `schema_history.py` imports `AppConfig` from `models.py`; the snippets on
+this page are also one executable sequence.
 
 ## Validate historical input
 
 Users can keep older config files:
 
+<!-- pv-doc-test: getting-started -->
 ```python
 old_config = {
     "schema_version": "1",
@@ -103,10 +107,11 @@ after validation.
 
 ## Render a historical config
 
-Use `dump()` when you need defaults or output for a specific schema version:
+Use `defaults_for()` when you need defaults for a specific schema version:
 
+<!-- pv-doc-test: getting-started -->
 ```python
-v1_config = APP_CONFIG_SCHEMA.dump(version="1")
+v1_config = APP_CONFIG_SCHEMA.defaults_for(version="1")
 
 assert v1_config == {
     "timeout": 5.0,
@@ -120,12 +125,18 @@ assert v1_config == {
 Patches describe field-level schema differences. Declare adjacent forward
 transitions for custom value changes:
 
+<!-- pv-doc-test: getting-started -->
 ```python
 from pydantic_versions import VersionTransition
 
 
 def upgrade_v1(data: dict) -> dict:
     data.setdefault("new_feature", False)
+    return data
+
+
+def downgrade_v2(data: dict) -> dict:
+    data.pop("new_feature", None)
     return data
 
 
@@ -142,7 +153,15 @@ APP_CONFIG_SCHEMA = SchemaFamily(
         ),
         SchemaVersion("2"),
     ),
-    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
+    transitions=(
+        VersionTransition(
+            "1",
+            "2",
+            upgrade=upgrade_v1,
+            downgrade=downgrade_v2,
+            downgrade_semantics="lossy",
+        ),
+    ),
 )
 ```
 
@@ -150,12 +169,15 @@ This replaces the earlier family declaration with the same v1 projection plus
 an upgrade. Transitions run after historical validation and before final
 current-model validation. Every declared transition must connect adjacent
 labels, so accepted upgrade code cannot become an unreachable registration.
+The paired downgrade keeps historical rendering available; it is marked lossy
+because v1 cannot represent `new_feature`.
 
 ## Keep the decorator style when it stays small
 
 The 0.1 decorators remain compatibility and convenience adapters. They build a
 default family and delegate to the same compiler:
 
+<!-- pv-doc-test: getting-started -->
 ```python
 from pydantic_versions import schema_version, versioned_schema
 
