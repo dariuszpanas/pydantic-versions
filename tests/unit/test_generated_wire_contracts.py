@@ -744,6 +744,107 @@ def test_alias_handoff_uses_canonical_names_without_creating_forbidden_extras() 
     assert complex_result.current_model.path == 4
 
 
+@pytest.mark.parametrize("explicit_wire", [False, True])
+@pytest.mark.parametrize(
+    ("validate_by_alias", "validate_by_name", "accepted_key", "rejected_key"),
+    [
+        (True, False, "admin", "is_admin"),
+        (False, True, "is_admin", "admin"),
+    ],
+)
+def test_family_validation_honors_source_wire_alias_policy(
+    *,
+    explicit_wire: bool,
+    validate_by_alias: bool,
+    validate_by_name: bool,
+    accepted_key: str,
+    rejected_key: str,
+) -> None:
+    alias_policy_config = ConfigDict(
+        extra="forbid",
+        validate_by_alias=validate_by_alias,
+        validate_by_name=validate_by_name,
+    )
+
+    class AliasPolicyPayload(BaseModel):
+        model_config = alias_policy_config
+
+        is_admin: bool = Field(False, alias="admin")
+
+    class ExplicitAliasPolicyWire(BaseModel):
+        model_config = alias_policy_config
+
+        is_admin: bool = Field(False, alias="admin")
+
+    source = SchemaVersion(
+        "1",
+        wire_model=ExplicitAliasPolicyWire if explicit_wire else None,
+    )
+    family = SchemaFamily(
+        model=AliasPolicyPayload,
+        name=f"source_alias_policy_{explicit_wire}_{validate_by_alias}",
+        versions=(source, SchemaVersion("2")),
+        version_metadata=None,
+    )
+    source_model = family.model_for("1")
+
+    accepted = {accepted_key: True}
+    assert source_model.model_validate(accepted).model_dump()["is_admin"] is True
+    assert family.validate(accepted, version="1").current_model.is_admin is True
+
+    rejected = {rejected_key: True}
+    with pytest.raises(ValidationError):
+        source_model.model_validate(rejected)
+    with pytest.raises(ValidationError):
+        family.validate(rejected, version="1")
+
+    if validate_by_alias:
+        assert source_model.model_json_schema(mode="validation")["properties"].keys() == {"admin"}
+
+
+def test_family_validation_honors_nested_alias_choices_and_paths() -> None:
+    class NestedAliasPayload(BaseModel):
+        model_config = ConfigDict(
+            extra="forbid",
+            validate_by_alias=True,
+            validate_by_name=False,
+        )
+
+        choice: int = Field(validation_alias=AliasChoices("choiceIn", "legacyChoice"))
+        path: int = Field(validation_alias=AliasPath("envelope", "path"))
+
+    child_family = SchemaFamily(
+        model=NestedAliasPayload,
+        name="nested_source_alias_policy_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        version_metadata=None,
+    )
+
+    class ParentAliasPayload(BaseModel):
+        child: NestedAliasPayload
+
+    parent_family = SchemaFamily(
+        model=ParentAliasPayload,
+        name="nested_source_alias_policy_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+        version_metadata=None,
+    )
+    source_model = parent_family.model_for("1")
+
+    accepted = {"child": {"legacyChoice": 3, "envelope": {"path": 4}}}
+    assert source_model.model_validate(accepted).model_dump() == {"child": {"choice": 3, "path": 4}}
+    current = parent_family.validate(accepted, version="1").current_model
+    assert current.child.choice == 3
+    assert current.child.path == 4
+
+    rejected = {"child": {"choice": 3, "path": 4}}
+    with pytest.raises(ValidationError):
+        source_model.model_validate(rejected)
+    with pytest.raises(ValidationError):
+        parent_family.validate(rejected, version="1")
+
+
 def test_generated_config_preserves_wire_settings_but_omits_lifecycle_settings() -> None:
     class Mode(StrEnum):
         FAST = "fast"

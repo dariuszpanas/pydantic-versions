@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rejected nested-family mappings, heterogeneous branches, and child-model
   mismatches during compilation while preserving supported homogeneous
   collection and optional boundaries.
+- Made family validation honor each source wire model's configured alias and
+  Python-name acceptance policy at the raw input boundary.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

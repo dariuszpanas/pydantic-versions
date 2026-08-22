@@ -37,7 +37,7 @@ def _validate_family[T: BaseModel](
     compiled = family._compiled_family()
     source_version = _detect_version(compiled, data, explicit_version=version)
     source = compiled.version(source_version)
-    source_model = source.model.model_validate(data, by_name=True)
+    source_model = source.model.model_validate(data)
     payload = _to_current_names(
         compiled,
         source,
