@@ -360,7 +360,7 @@ def test_dump_versioned_accepts_mapping_data_for_historical_schema() -> None:
     assert dumped == {"value": 6}
 
 
-def test_dump_versioned_normalizes_alias_paths_and_choices_in_input() -> None:
+def test_dump_versioned_uses_current_model_alias_priority_in_input() -> None:
     @versioned_schema(
         name="aliased_dump_input",
         versions=["1", "2"],
@@ -377,7 +377,7 @@ def test_dump_versioned_normalizes_alias_paths_and_choices_in_input() -> None:
         include_version=False,
     )
 
-    assert dumped == {"value": 3}
+    assert dumped == {"value": 1}
 
 
 def test_dump_versioned_rejects_non_mapping_data() -> None:

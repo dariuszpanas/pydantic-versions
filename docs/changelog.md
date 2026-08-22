@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python-name acceptance policy at the raw input boundary.
 - Completed class- and function-preserving annotations for the public decorator
   factories and added downstream `ty` and mypy coverage against the built wheel.
+- Made mapping and unrelated-model rendering cross the authoritative
+  current-model validation boundary before downgrade execution while honoring
+  Pydantic's configured instance-revalidation policy for current-model
+  instances, excluding extras and subclass-only fields from the canonical
+  payload, detaching caller-owned containers, and enforcing metadata conflicts
+  at every accepted input name.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

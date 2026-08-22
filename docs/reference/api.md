@@ -343,8 +343,15 @@ forward upgrades, and validates the current model.
 `dump_versioned(subject, *, version, data=None, include_version=True, **dump_kwargs)`
 
 Renders defaults, model data, or mapping data using a requested version and
-returns a dictionary. Extra keyword arguments are passed to Pydantic
-`model_dump()`.
+returns a dictionary. Mapping and unrelated model data is validated as the
+authoritative current model before reverse transitions run; authoritative model
+instances follow their Pydantic `revalidate_instances` policy. Embedded version
+metadata at any accepted input name must match the current version. Rendering
+extracts authoritative declared fields into detached canonical data, excluding
+allowed extras, subclass-only fields, and serializers, so transition mutation
+cannot affect caller-owned containers. Invalid unrelated models raise the
+current model's `ValidationError`. Extra keyword arguments are passed to the
+final target model's Pydantic `model_dump()`.
 
 ## Result
 

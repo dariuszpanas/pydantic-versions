@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin
+from functools import partial
+from types import UnionType
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args, get_origin
 
-from pydantic import AliasChoices, AliasPath, BaseModel
-from pydantic_core import to_jsonable_python
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    create_model,
+)
+from pydantic_core import SchemaValidator, core_schema, to_jsonable_python
 
 from pydantic_versions._compiler import (
     _CompiledFamily,
@@ -16,7 +24,9 @@ from pydantic_versions.exceptions import (
     InvalidMigrationError,
     MissingSchemaVersionError,
     SchemaCompilationError,
+    SchemaVersionError,
     UnknownSchemaVersionError,
+    UnsupportedWireModelError,
 )
 
 if TYPE_CHECKING:
@@ -30,24 +40,49 @@ def _runtime_label(value: object, *, family_name: str) -> str:
     return value
 
 
-def _extract_declared_fields(value: BaseModel) -> dict[str, Any]:
+def _extract_declared_fields(
+    value: BaseModel,
+    *,
+    declared_model: type[BaseModel] | None = None,
+) -> dict[str, Any]:
     """Build a private canonical payload from validated, declared fields only."""
-    fields = type(value).model_fields
+    selected_model = type(value) if declared_model is None else declared_model
+    fields = selected_model.model_fields
     return {
-        name: _extract_declared_value(value.__dict__[name], config=value.model_config)
-        for name in fields
-        if name in value.__dict__
+        name: _extract_declared_value(
+            value.__dict__[name],
+            config=selected_model.model_config,
+            annotation=field_info.annotation,
+        )
+        for name, field_info in fields.items()
+        if name in value.__dict__ and _field_crosses_wire_boundary(field_info)
     }
 
 
-def _extract_declared_value(value: Any, *, config: Mapping[str, Any]) -> Any:
+def _extract_declared_value(
+    value: Any,
+    *,
+    config: Mapping[str, Any],
+    annotation: Any = None,
+) -> Any:
+    declared_annotation = _matching_declared_annotation(annotation, value)
     if isinstance(value, BaseModel):
-        return _extract_declared_fields(value)
+        declared_model = (
+            declared_annotation
+            if isinstance(declared_annotation, type)
+            and issubclass(declared_annotation, BaseModel)
+            and isinstance(value, declared_annotation)
+            else None
+        )
+        return _extract_declared_fields(value, declared_model=declared_model)
     if isinstance(value, Mapping):
+        arguments = get_args(declared_annotation)
+        item_annotation = arguments[1] if len(arguments) == 2 else None
         return {
             _jsonable_declared_mapping_key(key, config=config): _extract_declared_value(
                 item,
                 config=config,
+                annotation=item_annotation,
             )
             for key, item in value.items()
         }
@@ -55,8 +90,75 @@ def _extract_declared_value(value: Any, *, config: Mapping[str, Any]) -> Any:
         # Pydantic's JSON-shaped transition payload has historically represented
         # every supported sequence and set container as a list.  Keep that shape
         # while reading nested model values without invoking serializers.
-        return [_extract_declared_value(item, config=config) for item in value]
+        arguments = get_args(declared_annotation)
+        if isinstance(value, tuple) and len(arguments) > 1 and arguments[-1] is not Ellipsis:
+            item_annotations = arguments
+        else:
+            item_annotation = arguments[0] if arguments else None
+            item_annotations = (item_annotation,) * len(value)
+        return [
+            _extract_declared_value(
+                item,
+                config=config,
+                annotation=item_annotation,
+            )
+            for item, item_annotation in zip(value, item_annotations, strict=True)
+        ]
     return _jsonable_declared_scalar(value, config=config)
+
+
+def _matching_declared_annotation(annotation: Any, value: Any) -> Any:
+    if annotation is None:
+        return None
+    normalized = _strip_annotated(annotation)
+    origin = get_origin(normalized)
+    if origin not in (Union, UnionType):
+        return normalized
+    candidates = tuple(_strip_annotated(candidate) for candidate in get_args(normalized))
+    for candidate in candidates:
+        if isinstance(candidate, type) and type(value) is candidate:
+            return candidate
+    class_matches = tuple(
+        candidate for candidate in candidates if _safe_annotation_instance(value, candidate)
+    )
+    if class_matches:
+        mro = type(value).mro()
+        return min(
+            class_matches,
+            key=lambda candidate: mro.index(candidate) if candidate in mro else len(mro),
+        )
+    for candidate in candidates:
+        if candidate is type(None):
+            if value is None:
+                return candidate
+            continue
+        candidate_origin = get_origin(candidate)
+        if candidate_origin is not None and isinstance(candidate_origin, type):
+            try:
+                if isinstance(value, candidate_origin):
+                    return candidate
+            except TypeError:
+                continue
+    return normalized
+
+
+def _safe_annotation_instance(value: Any, annotation: Any) -> bool:
+    if not isinstance(annotation, type):
+        return False
+    try:
+        return isinstance(value, annotation)
+    except TypeError:
+        return False
+
+
+def _field_crosses_wire_boundary(field_info: Any) -> bool:
+    for value in (field_info.exclude, field_info.exclude_if):
+        if value is None or value is False:
+            continue
+        if isinstance(value, Mapping | tuple | list | set | frozenset) and not value:
+            continue
+        return False
+    return True
 
 
 def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
@@ -177,18 +279,12 @@ def _dump_family[T: BaseModel](
 
     if data is None:
         payload = {}
-    elif isinstance(data, BaseModel):
-        raw_payload = data.model_dump(by_alias=False, mode="json")
-        if requested == compiled.current_version:
-            payload = raw_payload
-        else:
-            payload = _to_current_names(
-                compiled,
-                compiled.version(compiled.current_version),
-                raw_payload,
-            )
     else:
-        payload = dict(data)
+        payload = _validated_current_render_payload(
+            family=family,
+            compiled=compiled,
+            data=data,
+        )
 
     if requested != compiled.current_version:
         for edge_index in range(current_index - 1, target_index - 1, -1):
@@ -210,13 +306,14 @@ def _dump_family[T: BaseModel](
                 raise InvalidMigrationError(msg)
             payload = migrated
 
-    if (
-        requested != compiled.current_version
-        and compiled.version_metadata is not None
-        and compiled.version_metadata.owner == "family"
+    if compiled.version_metadata is not None and (
+        requested != compiled.current_version or compiled.version_metadata.owner == "model"
     ):
         payload = dict(payload)
-        _set_version_field(payload, compiled.version_metadata.path, requested)
+        if compiled.version_metadata.owner == "family":
+            _set_version_field(payload, compiled.version_metadata.path, requested)
+        else:
+            payload[_model_metadata_field_name(compiled)] = requested
 
     target_model = target.model.model_validate(_to_version_names(target, payload), by_name=True)
     if "mode" in dump_kwargs:
@@ -237,11 +334,537 @@ def _dump_family[T: BaseModel](
                 family=nested.family,
             )
     if compiled.version_metadata is not None:
+        if compiled.version_metadata.owner == "model":
+            _remove_model_metadata_output_aliases(compiled, dumped)
         if include_version:
             _set_version_field(dumped, compiled.version_metadata.path, requested)
         else:
             _remove_version_field(dumped, compiled.version_metadata.path)
     return dumped
+
+
+def _validated_current_render_payload[T: BaseModel](
+    *,
+    family: SchemaFamily[T],
+    compiled: _CompiledFamily,
+    data: T | Mapping[str, Any],
+) -> dict[str, Any]:
+    current_version = compiled.version(compiled.current_version)
+    current_wire = current_version.model
+    if isinstance(data, family.model):
+        _validate_base_model_render_metadata(compiled, data)
+        current_model = family.model.model_validate(data)
+        raw_payload = _extract_declared_fields(
+            current_model,
+            declared_model=family.model,
+        )
+        _validate_current_render_metadata(compiled, raw_payload)
+    elif isinstance(data, BaseModel):
+        _validate_base_model_render_metadata(compiled, data)
+        raw_payload = _extract_declared_fields(data)
+        _validate_current_render_metadata(compiled, raw_payload)
+        validation_payload = (
+            _to_current_names(compiled, current_version, raw_payload)
+            if isinstance(data, current_wire)
+            else _without_family_render_metadata(compiled, raw_payload)
+        )
+        if isinstance(data, current_wire):
+            current_model = _current_wire_validation_adapter(
+                family.model,
+                family_name=compiled.name,
+            ).validate_python(
+                validation_payload,
+                by_name=True,
+            )
+        else:
+            current_model = family.model.model_validate(
+                validation_payload,
+                by_name=True,
+            )
+    elif isinstance(data, Mapping):
+        raw_payload = _copy_render_input(data)
+        _validate_current_render_metadata(compiled, raw_payload)
+        current_model = family.model.model_validate(
+            _without_family_render_metadata(compiled, raw_payload),
+        )
+    else:
+        msg = (
+            f"Render data for schema family {compiled.name!r} must be "
+            "a current model instance or mapping"
+        )
+        raise TypeError(msg)
+
+    _validate_base_model_render_metadata(compiled, current_model)
+    return _to_current_names(
+        compiled,
+        current_version,
+        _extract_declared_fields(
+            current_model,
+            declared_model=family.model,
+        ),
+    )
+
+
+def _validate_base_model_render_metadata(
+    compiled: _CompiledFamily,
+    data: BaseModel,
+) -> None:
+    _validate_current_render_metadata(compiled, data.__dict__)
+    extras = data.__pydantic_extra__
+    if isinstance(extras, Mapping):
+        _validate_current_render_metadata(compiled, extras)
+
+
+def _copy_render_input(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _copy_render_input(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_render_input(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_render_input(item) for item in value)
+    if isinstance(value, set):
+        return {_copy_render_input(item) for item in value}
+    if isinstance(value, frozenset):
+        return frozenset(_copy_render_input(item) for item in value)
+    return value
+
+
+def _without_family_render_metadata(
+    compiled: _CompiledFamily,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    validation_payload = dict(payload)
+    metadata = compiled.version_metadata
+    if metadata is not None and metadata.owner == "family":
+        _remove_version_field(validation_payload, metadata.path)
+    return validation_payload
+
+
+def _current_wire_validation_adapter(
+    model: type[BaseModel],
+    *,
+    family_name: str,
+) -> SchemaValidator:
+    source_schema = model.__pydantic_core_schema__
+    model_references = _render_validation_model_references(source_schema)
+    changed_references: set[str] = set()
+    carrier_cache: dict[type[BaseModel], type[BaseModel]] = {}
+    while True:
+        discovered_references: set[str] = set()
+        schema, _changed = _clone_render_validation_schema(
+            source_schema,
+            family_name=family_name,
+            model_references=model_references,
+            changed_references=changed_references,
+            discovered_references=discovered_references,
+            carrier_cache=carrier_cache,
+            hash_required=False,
+        )
+        if discovered_references <= changed_references:
+            return SchemaValidator(cast(core_schema.CoreSchema, schema))
+        changed_references.update(discovered_references)
+
+
+class _RenderValidationShell:
+    """Private allocation target for carrier-aware model-field validation."""
+
+
+def _build_hashable_render_carrier(
+    *,
+    model: type[BaseModel],
+    cache: dict[type[BaseModel], type[BaseModel]],
+) -> type[BaseModel]:
+    cached = cache.get(model)
+    if cached is not None:
+        return cached
+    carrier = create_model(
+        f"{model.__name__}__HashableSetElement",
+        __base__=model,
+        __module__=model.__module__,
+        __config__=ConfigDict(
+            frozen=True,
+            revalidate_instances="never",
+            title=model.model_config.get("title") or model.__name__,
+        ),
+    )
+    cache[model] = carrier
+    return carrier
+
+
+def _construct_hashable_render_carrier(
+    carrier: type[BaseModel],
+    value: BaseModel,
+) -> BaseModel:
+    instance = object.__new__(carrier)
+    _copy_validated_model_state(instance, value, model=carrier)
+    return instance
+
+
+def _render_validation_model_references(value: Any) -> dict[str, type[BaseModel]]:
+    references: dict[str, type[BaseModel]] = {}
+    while True:
+        previous = dict(references)
+        _collect_render_validation_model_references(value, references)
+        if references == previous:
+            return references
+
+
+def _collect_render_validation_model_references(
+    value: Any,
+    references: dict[str, type[BaseModel]],
+) -> None:
+    if isinstance(value, dict):
+        schema_ref = value.get("ref")
+        if isinstance(schema_ref, str):
+            model = _render_validation_schema_model(value, model_references=references)
+            if model is not None:
+                references[schema_ref] = model
+        for item in value.values():
+            _collect_render_validation_model_references(item, references)
+        return
+    if isinstance(value, list | tuple):
+        for item in value:
+            _collect_render_validation_model_references(item, references)
+
+
+def _render_validation_schema_model(
+    schema: Any,
+    *,
+    model_references: Mapping[str, type[BaseModel]],
+) -> type[BaseModel] | None:
+    if not isinstance(schema, dict):
+        return None
+    schema_type = schema.get("type")
+    if schema_type == "model":
+        model = schema.get("cls")
+        if isinstance(model, type) and issubclass(model, BaseModel):
+            return model
+        return None
+    if schema_type == "definition-ref":
+        schema_ref = schema.get("schema_ref")
+        return model_references.get(schema_ref) if isinstance(schema_ref, str) else None
+    if schema_type in {
+        "custom-error",
+        "default",
+        "definitions",
+        "function-after",
+        "function-before",
+        "function-wrap",
+    }:
+        return _render_validation_schema_model(
+            schema.get("schema"),
+            model_references=model_references,
+        )
+    if schema_type == "chain":
+        steps = schema.get("steps")
+        if isinstance(steps, list) and steps:
+            return _render_validation_schema_model(
+                steps[-1],
+                model_references=model_references,
+            )
+        return None
+    if schema_type in {"json-or-python", "lax-or-strict"}:
+        candidates = tuple(
+            _render_validation_schema_model(
+                schema.get(key),
+                model_references=model_references,
+            )
+            for key in (
+                ("json_schema", "python_schema")
+                if schema_type == "json-or-python"
+                else ("lax_schema", "strict_schema")
+            )
+        )
+        if candidates[0] is not None and candidates[0] is candidates[1]:
+            return candidates[0]
+    return None
+
+
+def _clone_render_validation_schema(
+    value: Any,
+    *,
+    family_name: str,
+    model_references: Mapping[str, type[BaseModel]],
+    changed_references: set[str],
+    discovered_references: set[str],
+    carrier_cache: dict[type[BaseModel], type[BaseModel]],
+    hash_required: bool,
+) -> tuple[Any, bool]:
+    """Clone an authoritative schema and bridge only hash-required model outputs."""
+    if isinstance(value, list):
+        cloned_items = [
+            _clone_render_validation_schema(
+                item,
+                family_name=family_name,
+                model_references=model_references,
+                changed_references=changed_references,
+                discovered_references=discovered_references,
+                carrier_cache=carrier_cache,
+                hash_required=hash_required,
+            )
+            for item in value
+        ]
+        return [item for item, _changed in cloned_items], any(
+            changed for _item, changed in cloned_items
+        )
+    if isinstance(value, tuple):
+        cloned_items = tuple(
+            _clone_render_validation_schema(
+                item,
+                family_name=family_name,
+                model_references=model_references,
+                changed_references=changed_references,
+                discovered_references=discovered_references,
+                carrier_cache=carrier_cache,
+                hash_required=hash_required,
+            )
+            for item in value
+        )
+        return tuple(item for item, _changed in cloned_items), any(
+            changed for _item, changed in cloned_items
+        )
+    if isinstance(value, dict):
+        schema_type = value.get("type")
+        if hash_required:
+            output_model = _render_validation_schema_model(
+                value,
+                model_references=model_references,
+            )
+            if output_model is not None:
+                cloned, changed = _clone_render_validation_schema(
+                    value,
+                    family_name=family_name,
+                    model_references=model_references,
+                    changed_references=changed_references,
+                    discovered_references=discovered_references,
+                    carrier_cache=carrier_cache,
+                    hash_required=False,
+                )
+                if output_model.__hash__ is not None:
+                    return cloned, changed
+                carrier = _build_hashable_render_carrier(
+                    model=output_model,
+                    cache=carrier_cache,
+                )
+                return (
+                    core_schema.no_info_after_validator_function(
+                        partial(_construct_hashable_render_carrier, carrier),
+                        cast(core_schema.CoreSchema, cloned),
+                    ),
+                    True,
+                )
+        if schema_type == "definitions":
+            definitions, _definitions_changed = _clone_render_validation_schema(
+                value.get("definitions", []),
+                family_name=family_name,
+                model_references=model_references,
+                changed_references=changed_references,
+                discovered_references=discovered_references,
+                carrier_cache=carrier_cache,
+                hash_required=False,
+            )
+            schema, schema_changed = _clone_render_validation_schema(
+                value.get("schema"),
+                family_name=family_name,
+                model_references=model_references,
+                changed_references=changed_references,
+                discovered_references=discovered_references,
+                carrier_cache=carrier_cache,
+                hash_required=hash_required,
+            )
+            cloned = dict(value)
+            cloned["definitions"] = definitions
+            cloned["schema"] = schema
+            return cloned, schema_changed
+        if schema_type == "definition-ref":
+            schema_ref = value.get("schema_ref")
+            return dict(value), isinstance(schema_ref, str) and schema_ref in changed_references
+
+        propagate_hash_keys: set[str] = set()
+        if schema_type is None and hash_required:
+            propagate_hash_keys.update(value)
+        elif schema_type in {"set", "frozenset"}:
+            propagate_hash_keys.add("items_schema")
+        elif hash_required and schema_type == "tuple":
+            propagate_hash_keys.add("items_schema")
+        elif hash_required and schema_type in {"union", "tagged-union"}:
+            propagate_hash_keys.add("choices")
+        elif hash_required and schema_type == "chain":
+            propagate_hash_keys.add("steps")
+        elif hash_required and schema_type == "json-or-python":
+            propagate_hash_keys.update(("json_schema", "python_schema"))
+        elif hash_required and schema_type == "lax-or-strict":
+            propagate_hash_keys.update(("lax_schema", "strict_schema"))
+        elif hash_required and schema_type in {
+            "custom-error",
+            "default",
+            "function-after",
+            "function-before",
+            "function-wrap",
+            "nullable",
+        }:
+            propagate_hash_keys.add("schema")
+
+        cloned_items = {
+            key: _clone_render_validation_schema(
+                item,
+                family_name=family_name,
+                model_references=model_references,
+                changed_references=changed_references,
+                discovered_references=discovered_references,
+                carrier_cache=carrier_cache,
+                hash_required=key in propagate_hash_keys,
+            )
+            for key, item in value.items()
+        }
+        cloned = {key: item for key, (item, _changed) in cloned_items.items()}
+        changed = any(changed for _item, changed in cloned_items.values())
+        if schema_type == "model" and changed:
+            model = value.get("cls")
+            if not isinstance(model, type) or not issubclass(model, BaseModel):
+                return cloned, changed
+            if value.get("custom_init"):
+                msg = (
+                    f"Automatic current-wire render validation for family {family_name!r} "
+                    f"cannot safely execute custom __init__ on model {model.__qualname__!r}"
+                )
+                raise UnsupportedWireModelError(msg)
+            cloned["cls"] = _RenderValidationShell
+            cloned["custom_init"] = False
+            cloned.pop("post_init", None)
+            schema_ref = cloned.pop("ref", None)
+            cloned = core_schema.no_info_after_validator_function(
+                partial(_construct_authoritative_render_model, model),
+                cast(core_schema.CoreSchema, cloned),
+                ref=schema_ref,
+            )
+        schema_ref = value.get("ref")
+        if changed and isinstance(schema_ref, str):
+            discovered_references.add(schema_ref)
+        return cloned, changed
+    return value, False
+
+
+def _construct_authoritative_render_model(
+    model: type[BaseModel],
+    value: Any,
+) -> BaseModel:
+    instance = object.__new__(model)
+    _copy_validated_model_state(instance, value, model=model)
+    if model.__pydantic_post_init__:
+        instance.model_post_init(None)
+    return instance
+
+
+def _copy_validated_model_state(
+    target: BaseModel,
+    source: Any,
+    *,
+    model: type[BaseModel],
+) -> None:
+    source_values = source.__dict__
+    values = {name: source_values[name] for name in model.model_fields if name in source_values}
+    object.__setattr__(target, "__dict__", values)
+    object.__setattr__(
+        target,
+        "__pydantic_fields_set__",
+        set(source.__pydantic_fields_set__),
+    )
+    if not model.__pydantic_root_model__:
+        extras = source.__pydantic_extra__
+        object.__setattr__(
+            target,
+            "__pydantic_extra__",
+            None if extras is None else dict(extras),
+        )
+        private = source.__pydantic_private__
+        object.__setattr__(
+            target,
+            "__pydantic_private__",
+            None if private is None else dict(private),
+        )
+
+
+def _validate_current_render_metadata(
+    compiled: _CompiledFamily,
+    payload: Mapping[str, Any],
+) -> None:
+    metadata = compiled.version_metadata
+    if metadata is None:
+        return
+
+    locations: list[tuple[Any, ...]] = [
+        (metadata.path,) if isinstance(metadata.path, str) else metadata.path,
+    ]
+    if metadata.owner == "model":
+        field_name = _model_metadata_field_name(compiled)
+        field_info = compiled.model.model_fields[field_name]
+        locations.append((field_name,))
+        if compiled.model.model_config.get("validate_by_alias", True) is not False:
+            locations.extend(_field_alias_paths(field_info))
+
+    checked_locations: list[tuple[Any, ...]] = []
+    for location in locations:
+        if location in checked_locations:
+            continue
+        checked_locations.append(location)
+        found, raw_value = _read_render_metadata_path(payload, location)
+        if not found:
+            continue
+        declared = _runtime_label(
+            raw_value,
+            family_name=compiled.name,
+        )
+        if declared == compiled.current_version:
+            continue
+        msg = (
+            f"Render data for schema family {compiled.name!r} declares version "
+            f"{declared!r}; current-model input must declare "
+            f"{compiled.current_version!r}"
+        )
+        raise SchemaVersionError(msg)
+
+
+def _read_render_metadata_path(
+    payload: Mapping[Any, Any],
+    path: tuple[Any, ...],
+) -> tuple[bool, Any]:
+    current: Any = payload
+    for part in path:
+        if isinstance(current, Mapping):
+            if part not in current:
+                return False, None
+            current = current[part]
+            continue
+        if isinstance(current, list | tuple) and isinstance(part, int):
+            try:
+                current = current[part]
+            except IndexError:
+                return False, None
+            continue
+        return False, None
+    return True, current
+
+
+def _remove_model_metadata_output_aliases(
+    compiled: _CompiledFamily,
+    payload: dict[str, Any],
+) -> None:
+    metadata = compiled.version_metadata
+    if metadata is None:
+        msg = f"Compiled family {compiled.name!r} lost its version metadata"
+        raise SchemaCompilationError(msg)
+    field_name = _model_metadata_field_name(compiled)
+    field_info = compiled.model.model_fields[field_name]
+    candidates = (
+        field_name,
+        field_info.alias,
+        field_info.validation_alias,
+        field_info.serialization_alias,
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate != metadata.path:
+            payload.pop(candidate, None)
 
 
 def _apply_nested_family_migrations(
