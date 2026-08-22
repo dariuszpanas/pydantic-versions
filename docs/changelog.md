@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Replaced the redirecting Read the Docs badge source with a directly rendered
   Shields endpoint so the documentation status appears on PyPI.
+- Rejected nested-family mappings, heterogeneous branches, and child-model
+  mismatches during compilation while preserving supported homogeneous
+  collection and optional boundaries.
 
 ### Removed
 - Removed the unused `VersionedValidationError` placeholder from the public

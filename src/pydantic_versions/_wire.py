@@ -1850,7 +1850,7 @@ def _rewrite_nested_default(
             f"field {field_name!r} uses an opaque factory for a projected nested model",
         )
     default = attributes.get("default", PydanticUndefined)
-    if default is PydanticUndefined:
+    if default is PydanticUndefined or default is None:
         return
     try:
         is_default_from_source = isinstance(default, original_annotation)

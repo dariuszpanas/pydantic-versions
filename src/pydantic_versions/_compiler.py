@@ -4,7 +4,8 @@ import hashlib
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from types import UnionType
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -22,6 +23,7 @@ from pydantic_versions.exceptions import (
     SchemaCompilationError,
     SchemaVersionError,
     UnknownSchemaVersionError,
+    UnsupportedWireModelError,
 )
 from pydantic_versions.patches import FieldDefault, FieldRemoved, FieldRenamed, VersionPatch
 
@@ -190,15 +192,19 @@ def _validate_compilation_boundary(
     if not nested:
         return ()
 
-    compiled_nested: list[_CompiledNestedFamily] = []
-    used_paths: set[tuple[str, ...]] = set()
-    for declaration in nested:
-        path = (declaration.path,) if isinstance(declaration.path, str) else tuple(declaration.path)
-        if path in used_paths:
-            msg = f"Duplicate nested family declaration path {path!r} for {name!r}"
-            raise SchemaCompilationError(msg)
-        used_paths.add(path)
+    declared_paths = tuple(
+        (declaration.path,) if isinstance(declaration.path, str) else tuple(declaration.path)
+        for declaration in nested
+    )
+    duplicate_paths = tuple(
+        path for index, path in enumerate(declared_paths) if path in declared_paths[:index]
+    )
+    if duplicate_paths:
+        msg = f"Duplicate nested family declaration path {duplicate_paths[0]!r} for {name!r}"
+        raise SchemaCompilationError(msg)
 
+    compiled_nested: list[_CompiledNestedFamily] = []
+    for declaration, path in zip(nested, declared_paths, strict=True):
         declaration_family = declaration.family
         if isinstance(declaration_family, SchemaFamily):
             child_family = declaration_family
@@ -224,6 +230,21 @@ def _validate_compilation_boundary(
                 "the same owning model"
             )
             raise SchemaCompilationError(msg)
+
+        nested_model = _nested_path_model(
+            model=model,
+            family_name=name,
+            path=path,
+        )
+        if nested_model is not None and nested_model is not child_family.model:
+            expected = _model_display(nested_model)
+            declared = _model_display(child_family.model)
+            msg = (
+                f"Nested family declaration at path {path!r} for {name!r} targets model "
+                f"{expected!r}, but declared child family {child_family.name!r} owns "
+                f"model {declared!r}"
+            )
+            raise UnsupportedWireModelError(msg)
 
         parent_labels = labels
         child_labels = tuple(version.label for version in child_family.versions)
@@ -272,6 +293,112 @@ def _validate_compilation_boundary(
         )
 
     return tuple(compiled_nested)
+
+
+def _nested_path_model(
+    *,
+    model: type[BaseModel],
+    family_name: str,
+    path: tuple[str, ...],
+) -> type[BaseModel] | None:
+    annotation: Any = model
+    for index, field_name in enumerate(path):
+        annotation = _nested_container_element(
+            annotation,
+            family_name=family_name,
+            path=path,
+        )
+        if not isinstance(annotation, type) or not issubclass(annotation, BaseModel):
+            return None
+        field_info = annotation.model_fields.get(field_name)
+        if field_info is None:
+            return None
+        annotation = field_info.annotation
+        if index < len(path) - 1:
+            annotation = _nested_container_element(
+                annotation,
+                family_name=family_name,
+                path=path,
+            )
+
+    annotation = _nested_container_element(
+        annotation,
+        family_name=family_name,
+        path=path,
+    )
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    msg = (
+        f"Nested family declaration at path {path!r} for {family_name!r} must resolve "
+        "to exactly one Pydantic model"
+    )
+    raise UnsupportedWireModelError(msg)
+
+
+def _nested_container_element(
+    annotation: Any,
+    *,
+    family_name: str,
+    path: tuple[str, ...],
+) -> Any:
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        arguments = get_args(annotation)
+        non_none = tuple(argument for argument in arguments if argument is not type(None))
+        if len(non_none) == 1 and len(non_none) != len(arguments):
+            return _nested_container_element(
+                non_none[0],
+                family_name=family_name,
+                path=path,
+            )
+        msg = (
+            f"Nested family declaration at path {path!r} for {family_name!r} uses a "
+            "heterogeneous union; only an optional single-model branch is supported"
+        )
+        raise UnsupportedWireModelError(msg)
+
+    if origin is not None and (
+        origin is dict or (isinstance(origin, type) and issubclass(origin, Mapping))
+    ):
+        msg = (
+            f"Nested family declaration at path {path!r} for {family_name!r} uses a "
+            "mapping container, which is not a supported nested-family boundary"
+        )
+        raise UnsupportedWireModelError(msg)
+
+    if origin not in (list, tuple, set, frozenset):
+        return annotation
+
+    arguments = tuple(argument for argument in get_args(annotation) if argument is not Ellipsis)
+    if not arguments:
+        msg = (
+            f"Nested family declaration at path {path!r} for {family_name!r} uses an "
+            "unparameterized collection"
+        )
+        raise UnsupportedWireModelError(msg)
+    elements = tuple(
+        _nested_container_element(
+            argument,
+            family_name=family_name,
+            path=path,
+        )
+        for argument in arguments
+    )
+    first = elements[0]
+    if any(element is not first for element in elements[1:]):
+        msg = (
+            f"Nested family declaration at path {path!r} for {family_name!r} uses a "
+            "heterogeneous collection; every element must use the same child model"
+        )
+        raise UnsupportedWireModelError(msg)
+    return first
+
+
+def _model_display(model: type[BaseModel]) -> str:
+    return f"{model.__module__}.{model.__qualname__}"
 
 
 def _validate_required_field_introductions(

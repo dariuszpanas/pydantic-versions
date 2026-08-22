@@ -192,9 +192,10 @@ class RetryPolicy(BaseModel):
     backoff_seconds: float = 2.0
 ```
 
-Then any versioned model that references `RetryPolicy` can generate a matching
-historical nested schema for `list[WorkerConfig]`, `dict[str, RetryPolicy]`,
-tuples, sets, and optional nested model fields where applicable.
+Then a versioned model can explicitly connect that family through direct or
+optional fields and homogeneous lists, tuples, sets, or frozen sets. Mapping
+values and heterogeneous unions are rejected during family compilation because
+runtime conversion cannot dispatch them unambiguously.
 
 ## When Patches Are Not Enough
 

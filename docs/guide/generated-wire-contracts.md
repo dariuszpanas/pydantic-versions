@@ -28,10 +28,17 @@ Pydantic's declarative handling of that shape:
 | Omitted | Server-internal fields marked with `Field(exclude=True)` or `Field(exclude_if=...)` | The field is absent from every generated wire projection; it remains available on the authoritative application model. |
 | Rejected | Callable discriminators and unknown behavior-changing model or field settings | The automatic compiler fails closed instead of silently changing the wire document. |
 | Rejected at registration | Pydantic v1 compatibility models | The family raises `SchemaVersionError` before automatic projection; wire models must inherit from Pydantic v2's `BaseModel`. |
+| Rejected | A `NestedFamily` path through a mapping, a heterogeneous union or collection, or a field owned by a different model than the declared child family | Runtime conversion cannot dispatch those shapes unambiguously, so compilation raises `UnsupportedWireModelError`. |
 
 Historical patches are applied to this preserved declaration state. A removed
 field is absent, a renamed field uses its historical Python name, and a default
 patch replaces the projected field's required/default/factory state.
+
+Explicit `NestedFamily` declarations support direct and optional child models,
+plus homogeneous `list`, `tuple`, `set`, and `frozenset` boundaries. The same
+boundaries can appear while traversing a multi-segment path. Mapping values and
+heterogeneous branches are intentionally rejected during compilation rather
+than accepted with payload-dependent behavior.
 
 An excluded field is also absent from the generated wire model. This is the
 supported way to keep server-internal state on the authoritative model while
