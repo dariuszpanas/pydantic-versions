@@ -109,6 +109,6 @@ Useful commands:
 
 - `make format`: format with Ruff.
 - `make lint`: lint and auto-fix with Ruff.
-- `make typecheck`: run `ty`.
+- `make typecheck`: run `ty` plus the external mypy consumer contract.
 - `make test`: run pytest.
 - `make docs-build`: build the docs site.

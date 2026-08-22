@@ -59,6 +59,7 @@ jobs:
           uv run ruff format --check .
           uv run ruff check .
           uv run ty check
+          uv run mypy --strict tests/typing/schema_family_contract.py
           uv run pytest --cov=src --cov-report=term
           uv run zensical build --strict
 

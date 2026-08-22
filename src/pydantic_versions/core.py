@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -56,12 +56,12 @@ class _VersionSpec:
     wire_model: type[BaseModel] | None = None
 
 
-def schema_version(
+def schema_version[T: BaseModel](
     version: str,
     *,
     patches: Sequence[VersionPatch] = (),
     wire_model: type[BaseModel] | None = None,
-):
+) -> Callable[[type[T]], type[T]]:
     return schema_versions(
         (version,),
         patches=patches,
@@ -69,12 +69,12 @@ def schema_version(
     )
 
 
-def schema_versions(
+def schema_versions[T: BaseModel](
     versions: Sequence[str],
     *,
     patches: Sequence[VersionPatch] = (),
     wire_model: type[BaseModel] | None = None,
-):
+) -> Callable[[type[T]], type[T]]:
     version_order = _freeze_sequence(versions, parameter="schema_versions.versions")
     patch_order = _freeze_sequence(patches, parameter="schema_versions.patches")
     labels = tuple(
@@ -82,7 +82,7 @@ def schema_versions(
     )
     _ensure_unique_versions(labels, schema_name="pending schema declaration")
 
-    def decorator[T: BaseModel](model_cls: type[T]) -> type[T]:
+    def decorator(model_cls: type[T]) -> type[T]:
         _ensure_pydantic_v2_model(model_cls)
         pending: list[_VersionSpec] = list(model_cls.__dict__.get(_PENDING_ATTR, ()))
         pending.extend(
@@ -95,7 +95,7 @@ def schema_versions(
     return decorator
 
 
-def versioned_schema(
+def versioned_schema[T: BaseModel](
     *,
     name: str,
     versions: Sequence[str],
@@ -105,7 +105,7 @@ def versioned_schema(
     metadata_owner: Literal["family", "model"] | None = None,
     transitions: Sequence[VersionTransition] = (),
     nested: Sequence[NestedFamily] = (),
-):
+) -> Callable[[type[T]], type[T]]:
     version_order = _freeze_sequence(versions, parameter="versioned_schema.versions")
     labels = tuple(
         _require_label(version, parameter="schema version label") for version in version_order
@@ -125,7 +125,7 @@ def versioned_schema(
     )
     nested_order = _freeze_sequence(nested, parameter="versioned_schema.nested")
 
-    def decorator[T: BaseModel](model_cls: type[T]) -> type[T]:
+    def decorator(model_cls: type[T]) -> type[T]:
         _ensure_pydantic_v2_model(model_cls)
         pending = tuple(model_cls.__dict__.get(_PENDING_ATTR, ()))
         patches_by_label: dict[str, tuple[VersionPatch, ...]] = dict.fromkeys(labels, ())
@@ -183,17 +183,17 @@ def versioned_schema(
     return decorator
 
 
-def migration[T: BaseModel](
+def migration[T: BaseModel, F: TransitionFunc](
     subject: type[T] | SchemaFamily[T],
     from_version: str,
     to_version: str,
-):
+) -> Callable[[F], F]:
     family = _family_for(subject)
     source = _runtime_label(from_version, family_name=family.name)
     target = _runtime_label(to_version, family_name=family.name)
     family._ensure_legacy_transition_allowed(source, target)
 
-    def decorator(func: TransitionFunc) -> TransitionFunc:
+    def decorator(func: F) -> F:
         family._register_legacy_transition(source, target, func)
         return func
 
