@@ -129,6 +129,15 @@ an explicit regeneration command. Current code must consume the persisted
 payloads and reproduce the stable inspection data. Fixture changes require
 review and an explanation under this policy; CI never updates them implicitly.
 
+The tag-driven release path repeats the locked dependency and build-backend
+audit, strict documentation build, distribution metadata validation, and
+isolated wheel and source-archive tests before publishing. Release tags are
+immutable, and a tag is rejected unless its commit is on the default branch, so
+published artifacts and attestations remain tied to reviewed source. The
+workflow can also rehearse every build and package test from an explicitly
+selected commit without publishing; TestPyPI upload is a main-branch-only,
+separate opt-in action.
+
 Once the package solves its defined problem, work is driven by concrete user
 feedback, bug and security reports, dependency/runtime updates, current
 ecosystem standards, and bounded polish. These are responses to real needs,

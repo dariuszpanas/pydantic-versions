@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -44,6 +44,7 @@ Issues = "https://github.com/dariuszpanas/pydantic-versions/issues"
 [dependency-groups]
 dev = [
     "django-ninja>=1.6.2",
+    "hatchling>=1.31.0",
     "mypy>=2.3.1",
     "pip-audit>=2.9.0",
     "packaging>=24.0",
@@ -52,6 +53,7 @@ dev = [
     "ruff>=0.14.13",
     "ty>=0.0.12",
     "zensical>=0.0.42",
+    "twine>=7.0.0",
 ]
 
 [tool.ruff]
