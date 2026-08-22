@@ -48,6 +48,16 @@ field present during wire validation. Conditional exclusions are treated the
 same way: the field is omitted unconditionally from generated projections.
 The configured model-owned version field may not be excluded.
 
+`extra="allow"` remains a source wire-validation policy. The returned
+`source_model` retains untyped extras in `__pydantic_extra__`, but family
+conversion does not flatten those values into migration input. The private
+canonical mapping is built recursively from declared, validated Python fields
+without invoking source serializers. Consequently, an excluded or historically
+removed field cannot re-enter through its Python name, an alias, `AliasChoices`,
+an `AliasPath`, or an automatically projected nested model. A user upgrade may
+still introduce that canonical field deliberately. Model opaque extensions as a
+declared mapping or envelope when they must cross the conversion boundary.
+
 Zero-argument factories remain safe when the field annotation is unchanged. A
 decorator-owned child annotation can replace the child class itself as a
 factory, and a direct child instance is projected without running its

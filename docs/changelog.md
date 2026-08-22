@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the unused `VersionedValidationError` placeholder from the public
   package surface before the 1.0.0 contract freeze.
 
+### Security
+- Prevented allowed Pydantic extras from reintroducing excluded or historically
+  removed fields into migrations and authoritative current models by extracting
+  private canonical payloads recursively from declared source fields only.
+
 ## [0.3.0] - 2026-08-20
 
 ### Added
