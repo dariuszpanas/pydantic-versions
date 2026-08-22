@@ -9,6 +9,7 @@ than one interpretation of the same current model.
 
 The model module does not need to import `pydantic_versions`:
 
+<!-- pv-doc-test: external-families -->
 ```python
 # models.py
 from pydantic import BaseModel
@@ -22,21 +23,15 @@ class AppConfig(BaseModel):
 
 Declare its history elsewhere:
 
+<!-- pv-doc-test: external-families -->
 ```python
 # schema_history.py
-from models import AppConfig
 from pydantic_versions import (
     SchemaFamily,
     SchemaVersion,
-    VersionTransition,
     field_default,
     field_removed,
 )
-
-
-def upgrade_v1(data: dict) -> dict:
-    data.setdefault("new_feature", False)
-    return data
 
 
 APP_CONFIG_SCHEMA = SchemaFamily(
@@ -52,9 +47,12 @@ APP_CONFIG_SCHEMA = SchemaFamily(
         ),
         SchemaVersion("2"),
     ),
-    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
 )
 ```
+
+When these definitions live in separate files, `schema_history.py` imports
+`AppConfig` from `models.py`; the snippets on this page are also one executable
+sequence.
 
 The final declared label is current. Historical versions are projected
 independently from the current model; patches are not accumulated from one
@@ -64,6 +62,7 @@ historical declaration into the next.
 
 Direct family calls cannot be confused with another history:
 
+<!-- pv-doc-test: external-families -->
 ```python
 result = APP_CONFIG_SCHEMA.validate(
     {"schema_version": "1", "retries": 2},
@@ -77,10 +76,18 @@ assert result.current_model == AppConfig(
 
 v1_model = APP_CONFIG_SCHEMA.model_for("1")
 v1_defaults = APP_CONFIG_SCHEMA.defaults_for(version="1")
+
+assert v1_model.model_validate(v1_defaults).model_dump() == v1_defaults
+assert v1_defaults == {
+    "timeout": 5.0,
+    "retries": 3,
+    "schema_version": "1",
+}
 ```
 
 The compatibility free functions also accept a family as their first argument:
 
+<!-- pv-doc-test: external-families -->
 ```python
 from pydantic_versions import model_for_version, validate_versioned
 
@@ -90,6 +97,9 @@ result = validate_versioned(
     APP_CONFIG_SCHEMA,
     {"schema_version": "1", "retries": 2},
 )
+
+assert model_for_version(APP_CONFIG_SCHEMA, "1") is v1_model
+assert result.current_model.retries == 2
 ```
 
 ## Reuse one model in two families
@@ -98,6 +108,7 @@ Families own their declarations, compiled projections, transitions, and
 generated-model cache. Two families can therefore reuse the same application
 model without overwriting each other:
 
+<!-- pv-doc-test: external-families -->
 ```python
 PUBLIC_CONFIG = SchemaFamily(
     model=AppConfig,
@@ -119,6 +130,7 @@ basis for choosing and raises `SchemaFamilySelectionError`.
 Applications that still need model-only helper calls can select one family
 during configuration startup:
 
+<!-- pv-doc-test: external-families -->
 ```python
 PUBLIC_CONFIG.as_default()
 ```

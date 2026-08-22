@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed redundant family-owned discriminators from embedded child output
   across built-in and decorator-discovered nested routes while retaining
   model-owned child metadata.
+- Repaired the canonical README and guide examples and added an executable
+  documentation gate that keeps their behavior and the manual API reference in
+  sync with the installed public package.
 - Replaced the redirecting Read the Docs badge source with a directly rendered
   Shields endpoint so the documentation status appears on PyPI.
 - Rejected nested-family mappings, heterogeneous branches, and child-model

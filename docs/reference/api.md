@@ -85,8 +85,12 @@ class VersionMetadata:
 ```
 
 Describes the version-discriminator path and its ownership. Full collision and
-alias semantics are defined by the 0.2 architecture decision and implemented by
-the later top-level conversion work.
+alias semantics are part of the runtime contract: family-owned metadata is
+validated on the generated document and removed before authoritative model
+validation, while a model-owned top-level field or direct alias remains part of
+the model payload. See [Rendering Configs](../guide/rendering.md) and
+[Version Discovery](../guide/version-discovery.md) for the supported paths and
+conflict behavior.
 
 ### Generated wire models
 
@@ -328,21 +332,57 @@ render plan means that no safe reverse transition is declared.
 
 ## Decorator compatibility
 
-`versioned_schema(name, versions, current, version_field="schema_version", missing_version=None, transitions=(), ...)`
+<!-- pv-api-signature: versioned_schema -->
+```python
+def versioned_schema(
+    *,
+    name: str,
+    versions: Sequence[str],
+    current: str,
+    version_field: VersionPath = "schema_version",
+    missing_version: str | None = None,
+    metadata_owner: Literal["family", "model"] | None = None,
+    transitions: Sequence[VersionTransition] = (),
+    nested: Sequence[NestedFamily] = (),
+) -> Callable[[type[T]], type[T]]: ...
+```
 
 Builds a default family for a Pydantic model and returns the original model
 class. `current` must equal the final label. The deterministic `transitions=`
 argument uses `VersionTransition` records.
 
-`schema_version(version, patches=())`
+<!-- pv-api-signature: schema_version -->
+```python
+def schema_version(
+    version: str,
+    *,
+    patches: Sequence[VersionPatch] = (),
+    wire_model: type[BaseModel] | None = None,
+) -> Callable[[type[T]], type[T]]: ...
+```
 
 Applies patches to one declared historical version.
 
-`schema_versions(versions, patches=())`
+<!-- pv-api-signature: schema_versions -->
+```python
+def schema_versions(
+    versions: Sequence[str],
+    *,
+    patches: Sequence[VersionPatch] = (),
+    wire_model: type[BaseModel] | None = None,
+) -> Callable[[type[T]], type[T]]: ...
+```
 
 Applies the same patches to multiple explicitly declared historical versions.
 
-`migration(subject, from_version, to_version)`
+<!-- pv-api-signature: migration -->
+```python
+def migration(
+    subject: type[T] | SchemaFamily[T],
+    from_version: str,
+    to_version: str,
+) -> Callable[[F], F]: ...
+```
 
 Registers a legacy forward upgrade before first compilation. `subject` may be a
 family or a model with an explicit default family. Late, reverse, skipped, and
@@ -440,7 +480,7 @@ class VersionedValidation[T: BaseModel]:
   - `MissingSchemaVersionError`
   - `UnknownSchemaVersionError`
   - `DuplicateSchemaVersionError`
-- `InvalidMigrationError`
+  - `InvalidMigrationError`
 
 `UnsupportedWireModelError` reports that automatic projection cannot safely
 produce the required object-shaped Pydantic v2 wire contract. It is raised

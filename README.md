@@ -33,12 +33,12 @@ uv add pydantic-versions
 Schema versions are independent from software versions. A config payload can declare
 the schema it uses, and the latest software can still validate and upgrade it:
 
+<!-- pv-doc-test: readme-example -->
 ```python
 from pydantic import BaseModel
 from pydantic_versions import (
     SchemaFamily,
     SchemaVersion,
-    VersionTransition,
     field_default,
     field_removed,
 )
@@ -48,11 +48,6 @@ class AppConfig(BaseModel):
     timeout: float = 10.0
     retries: int = 3
     new_feature: bool = False
-
-
-def upgrade_v1(data: dict) -> dict:
-    data.setdefault("new_feature", False)
-    return data
 
 
 APP_CONFIG_SCHEMA = SchemaFamily(
@@ -68,7 +63,6 @@ APP_CONFIG_SCHEMA = SchemaFamily(
         ),
         SchemaVersion("2"),
     ),
-    transitions=(VersionTransition("1", "2", upgrade=upgrade_v1),),
     missing_version="1",
 )
 
