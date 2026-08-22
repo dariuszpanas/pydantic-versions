@@ -1,7 +1,9 @@
 name: Commit Messages
 
 on:
-  pull_request_target:
+  # The base workflow and script inspect PR commit messages as data; PR code is
+  # fetched but never checked out or executed with the target-repository token.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] base-only execution
     types: [opened, ready_for_review, synchronize, reopened, edited, converted_to_draft]
   push:
     branches-ignore:
@@ -9,6 +11,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: commit-messages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   conventional-commits:
@@ -18,6 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event_name == 'pull_request_target' && github.event.repository.default_branch || github.sha }}
 
       - name: Validate PR title and commits
