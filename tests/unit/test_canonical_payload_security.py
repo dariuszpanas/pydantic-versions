@@ -369,6 +369,7 @@ def test_declared_extraction_preserves_the_previous_json_scalar_shape() -> None:
         secret: SecretStr
         labels: tuple[Mode, ...]
         indexes: set[int]
+        schedule: dict[datetime, Mode]
 
     class CurrentScalarPayload(BaseModel):
         occurred_at: Any
@@ -379,6 +380,7 @@ def test_declared_extraction_preserves_the_previous_json_scalar_shape() -> None:
         secret: Any
         labels: Any
         indexes: Any
+        schedule: Any
 
     def inspect_payload(payload: dict[str, Any]) -> dict[str, Any]:
         seen_payloads.append(dict(payload))
@@ -403,6 +405,7 @@ def test_declared_extraction_preserves_the_previous_json_scalar_shape() -> None:
         "secret": "private",
         "labels": ["active"],
         "indexes": [2, 1],
+        "schedule": {"2020-01-02T03:04:05Z": "active"},
     }
     expected = (
         family.model_for("1")
@@ -426,6 +429,7 @@ def test_declared_extraction_preserves_the_previous_json_scalar_shape() -> None:
             "secret": "**********",
             "labels": ["active"],
             "indexes": [1, 2],
+            "schedule": {"1577934245000": "active"},
         },
     ]
 

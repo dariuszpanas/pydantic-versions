@@ -44,7 +44,13 @@ def _extract_declared_value(value: Any, *, config: Mapping[str, Any]) -> Any:
     if isinstance(value, BaseModel):
         return _extract_declared_fields(value)
     if isinstance(value, Mapping):
-        return {key: _extract_declared_value(item, config=config) for key, item in value.items()}
+        return {
+            _jsonable_declared_mapping_key(key, config=config): _extract_declared_value(
+                item,
+                config=config,
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list | tuple | set | frozenset):
         # Pydantic's JSON-shaped transition payload has historically represented
         # every supported sequence and set container as a list.  Keep that shape
@@ -80,6 +86,25 @@ def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
             fallback=_preserve_unknown_scalar,
         )
     return to_jsonable_python(value, fallback=_preserve_unknown_scalar)
+
+
+def _jsonable_declared_mapping_key(value: Any, *, config: Mapping[str, Any]) -> Any:
+    temporal_mode = config.get("ser_json_temporal")
+    if temporal_mode is not None:
+        dumped = to_jsonable_python(
+            {value: None},
+            bytes_mode=config.get("ser_json_bytes", "utf8"),
+            temporal_mode=temporal_mode,
+            fallback=_preserve_unknown_scalar,
+        )
+    else:
+        dumped = to_jsonable_python(
+            {value: None},
+            bytes_mode=config.get("ser_json_bytes", "utf8"),
+            timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
+            fallback=_preserve_unknown_scalar,
+        )
+    return next(iter(dumped))
 
 
 def _preserve_unknown_scalar(value: Any) -> Any:
