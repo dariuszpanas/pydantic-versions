@@ -38,7 +38,38 @@ dumped = dump_versioned(AppConfig, version="1", data=AppConfig(retries=5))
 assert dumped["attempts"] == 5
 ```
 
+Supplied `data` always describes the current schema. The `version` argument is
+the output version, not the input version. Mappings cross the authoritative
+current-model boundary with their original key shape, so Pydantic's current
+validators, alias priority, defaults, and constraints apply before any
+downgrade. An already-constructed instance of the authoritative model is
+handled according to that model's Pydantic `revalidate_instances` policy, so
+the default avoids duplicate validation while an opt-in revalidation policy is
+still enforced.
+
+Rendering extracts declared fields into a private JSON-shaped payload without
+flattening allowed extras, accepting subclass-only fields, or invoking model
+and field serializers. Mutations made by a downgrade therefore cannot reach
+caller-owned nested mappings or collections.
+
+An unrelated `BaseModel` is accepted only when its declared structure validates
+as current input. Otherwise Pydantic raises a validation error for the
+authoritative current model. Package-generated current wire instances also
+remain renderable, including hashable set projections that the original model
+annotation cannot construct directly.
+
+If that set bridge is required, an enclosing model with a custom `__init__`
+fails closed with `UnsupportedWireModelError`. Pydantic validators and
+`model_post_init` retain their exact model type and once-only lifecycle; a
+custom initializer cannot be replayed without re-entering field validation.
+
 Fields removed in the target version are dropped before historical validation.
+
+If current input includes version metadata, it must name the current version.
+Rendering rebases that metadata to the requested target. This makes a mapping
+such as `{"schema_version": "1", ...}` invalid current input when the current
+version is `"2"`, even if the requested output version is `"1"`. Omit the input
+metadata when the application model does not own it.
 
 ## Omit version metadata
 
