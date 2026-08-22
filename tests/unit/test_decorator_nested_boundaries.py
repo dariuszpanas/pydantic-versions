@@ -40,7 +40,7 @@ def test_decorator_child_uses_its_historical_wire_projection() -> None:
     )
 
     assert rendered == {
-        "child": {"legacy_value": 7, "schema_version": "1"},
+        "child": {"legacy_value": 7},
         "schema_version": "1",
     }
     validated = validate_versioned(Parent, rendered)
@@ -122,8 +122,8 @@ def test_overlapping_union_preserves_authoritative_typed_branch() -> None:
     )
 
     assert rendered["items"] == [
-        {"value": "second:b2:b1", "schema_version": "1"},
-        {"value": "first:a2:a1", "schema_version": "1"},
+        {"value": "second:b2:b1"},
+        {"value": "first:a2:a1"},
     ]
     assert calls == ["a2", "b2", "a1", "b1"]
 
@@ -479,7 +479,6 @@ def test_exact_typed_replacement_on_final_parent_edge_is_fully_downgraded() -> N
 
     assert rendered["item"] == {
         "legacy_b": "replacement:b1",
-        "schema_version": "1",
     }
 
 
@@ -683,7 +682,7 @@ def test_decorator_boundaries_recurse_across_decorated_families() -> None:
         data=Parent(child=Child(grandchildren=[Grandchild(value=11)])),
     )
 
-    assert rendered["child"]["old_grandchildren"] == [{"legacy_value": 11, "schema_version": "1"}]
+    assert rendered["child"]["old_grandchildren"] == [{"legacy_value": 11}]
     assert validate_versioned(Parent, rendered).current_model.child.grandchildren[0].value == 11
 
 
@@ -719,14 +718,18 @@ def test_decorator_children_project_wrapper_defaults_without_running_opaque_fact
     class FactoryParent(BaseModel):
         wrapper: FactoryWrapper = Field(default_factory=FactoryWrapper)
 
-    expected = {
+    model_expected = {
         "wrapper": {"child": {"legacy_value": 7, "schema_version": "1"}},
         "schema_version": "1",
     }
-    assert model_for_version(InstanceParent, "1")().model_dump() == expected
-    assert dump_versioned(InstanceParent, version="1") == expected
-    assert model_for_version(FactoryParent, "1")().model_dump() == expected
-    assert dump_versioned(FactoryParent, version="1") == expected
+    dump_expected = {
+        "wrapper": {"child": {"legacy_value": 7}},
+        "schema_version": "1",
+    }
+    assert model_for_version(InstanceParent, "1")().model_dump() == model_expected
+    assert dump_versioned(InstanceParent, version="1") == dump_expected
+    assert model_for_version(FactoryParent, "1")().model_dump() == model_expected
+    assert dump_versioned(FactoryParent, version="1") == dump_expected
 
     @versioned_schema(
         name="direct_extra_default_parent",
@@ -741,7 +744,10 @@ def test_decorator_children_project_wrapper_defaults_without_running_opaque_fact
         "schema_version": "1",
     }
     assert model_for_version(DirectExtraParent, "1")().model_dump() == direct_expected
-    assert dump_versioned(DirectExtraParent, version="1") == direct_expected
+    assert dump_versioned(DirectExtraParent, version="1") == {
+        "child": {"legacy_value": 7},
+        "schema_version": "1",
+    }
 
 
 def test_decorator_children_project_defaults_through_every_builtin_shape() -> None:
@@ -770,7 +776,7 @@ def test_decorator_children_project_defaults_through_every_builtin_shape() -> No
         frozen: frozenset[Child] = frozenset({Child(value=7)})
         deep: list[dict[str, Wrapper]] = [{"x": Wrapper(child=Child(value=8))}]
 
-    expected_values = {
+    model_expected_values = {
         "listed": [{"legacy_value": 1, "schema_version": "1"}],
         "variadic": [{"legacy_value": 2, "schema_version": "1"}],
         "fixed": [{"legacy_value": 3, "schema_version": "1"}, "fixed"],
@@ -781,8 +787,19 @@ def test_decorator_children_project_defaults_through_every_builtin_shape() -> No
         "deep": [{"x": {"child": {"legacy_value": 8, "schema_version": "1"}}}],
         "schema_version": "1",
     }
-    assert model_for_version(Parent, "1")().model_dump(mode="json") == expected_values
-    assert dump_versioned(Parent, version="1") == expected_values
+    dump_expected_values = {
+        "listed": [{"legacy_value": 1}],
+        "variadic": [{"legacy_value": 2}],
+        "fixed": [{"legacy_value": 3}, "fixed"],
+        "mapped": {"x": {"legacy_value": 4}},
+        "optional": {"legacy_value": 5},
+        "setted": [{"legacy_value": 6}],
+        "frozen": [{"legacy_value": 7}],
+        "deep": [{"x": {"child": {"legacy_value": 8}}}],
+        "schema_version": "1",
+    }
+    assert model_for_version(Parent, "1")().model_dump(mode="json") == model_expected_values
+    assert dump_versioned(Parent, version="1") == dump_expected_values
 
     factory_calls: list[str] = []
 
@@ -847,9 +864,9 @@ def test_parent_callback_can_introduce_exact_typed_decorator_branches() -> None:
 
     assert rendered == {
         "items": [
-            {"legacy_value": "existing:child", "schema_version": "1"},
+            {"legacy_value": "existing:child"},
             0,
-            {"legacy_value": "introduced:child", "schema_version": "1"},
+            {"legacy_value": "introduced:child"},
         ],
         "schema_version": "1",
     }
@@ -960,8 +977,7 @@ def test_exact_typed_owner_replacement_rebinds_its_recursive_subtree() -> None:
 
     assert rendered == {
         "item": {
-            "grand": {"legacy_value": 12, "schema_version": "1"},
-            "schema_version": "1",
+            "grand": {"legacy_value": 12},
         },
         "schema_version": "1",
     }
@@ -1119,8 +1135,7 @@ def test_decorator_to_explicit_nested_family_round_trips_historical_names() -> N
 
     assert rendered == {
         "child": {
-            "grand": {"legacy_value": 1, "schema_version": "1"},
-            "schema_version": "1",
+            "grand": {"legacy_value": 1},
         },
         "schema_version": "1",
     }

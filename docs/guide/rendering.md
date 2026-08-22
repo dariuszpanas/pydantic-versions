@@ -1,13 +1,18 @@
 # Rendering Configs
 
-Use `dump_versioned()` to render a config in a requested schema version.
+Use `defaults_for()` to materialize one version's defaults and `dump()` to
+convert current data into a requested schema version. The decorator-compatible
+`dump_versioned()` function supports both operations.
 
 ```python
-dumped = dump_versioned(AppConfig, version="1")
+defaults = APP_CONFIG_SCHEMA.defaults_for(version="1")
+dumped = APP_CONFIG_SCHEMA.dump(version="1", data=current_config)
 ```
 
-The output validates against the generated historical model and includes the
-configured version field by default.
+By default, output uses the target model's JSON serialization schema, applies
+serialization aliases, and includes the configured version field. Pydantic can
+define different validation and serialization aliases, so an intentionally
+asymmetric model may require a separately aligned consumer contract.
 
 ## Render defaults
 
@@ -23,6 +28,17 @@ assert dump_versioned(AppConfig, version="1") == {
     "schema_version": "1",
 }
 ```
+
+`SchemaFamily.defaults_for(version=...)` constructs the selected target wire
+model from `{}` and serializes it directly. It does not plan or execute a
+downgrade from the current version. Historical defaults therefore remain
+available even when a custom upgrade has no reverse operation. Target default
+factories, default validation, validators on an explicit wire model, and its
+serializer retain normal Pydantic behavior and execute once.
+
+For compatibility, `dump(version=..., data=None)` delegates to
+`defaults_for()`. An empty mapping is real current input, not defaults syntax;
+required current fields still fail validation.
 
 ## Render existing data
 
@@ -71,14 +87,81 @@ such as `{"schema_version": "1", ...}` invalid current input when the current
 version is `"2"`, even if the requested output version is `"1"`. Omit the input
 metadata when the application model does not own it.
 
+The converted value is validated by the target wire model before target
+serialization. An explicit historical model keeps its own validators and
+serializer. With family-owned metadata, `model_for(version)` returns a complete
+document adapter around that explicit body model. The adapter invokes the body
+serializer once, requires object-shaped output, and rejects any attempt by the
+body serializer to emit or replace the reserved metadata path. A nested
+family-owned metadata path reserves its complete root envelope; application
+data cannot share sibling keys under that root.
+
+The document adapter is final. If an application needs a specialized historical
+body, subclass the explicit wire body before passing it to `SchemaVersion`
+rather than subclassing `model_for(version)`. The body remains the sole owner of
+its aliases, validators, serializer, and JSON Schema callbacks. Custom model
+core/JSON Schema hooks are rejected because composing them through the adapter
+would not have once-only semantics. Annotation or decorator serializers that
+can relocate a declared nested-family path are rejected for the same reason,
+as are custom model schema hooks and legacy `json_encoders` on that path.
+
+Attribute input is available only when the explicit body sets
+`ConfigDict(from_attributes=True)`. The adapter preflights family-owned metadata
+before executing body validators. Per-call `from_attributes=True` cannot enable
+attribute input for a body that did not declare it; use a mapping or an exact
+body instance instead. Allowed extras remain available, but an extra that
+overwrites an active field or computed-field serialization name fails closed.
+The facade exposes the declared Pydantic state and standard model operations;
+it does not proxy arbitrary body methods. Self-references created inside
+body-owned values retain the explicit body's identity, so applications must not
+use `value is document` as part of the wire contract.
+
+## Serialization options
+
+Rendering defaults to `mode="json"` and `by_alias=True`. The complete-output
+API accepts this bounded set of `model_dump()` options:
+
+- `mode`
+- `by_alias`
+- `context`
+- `fallback`
+- `warnings`
+- `round_trip=False`
+- `serialize_as_any=False`
+- `polymorphic_serialization=False` or `None`
+
+Truthy polymorphic options are rejected because subclass-only fields can escape
+the declared target contract. `round_trip=True` is rejected because Pydantic may
+omit computed target fields in that mode. Unknown options fail closed so a new
+Pydantic keyword cannot silently weaken the versioned contract.
+
+The following omission options are rejected whenever they are present, even if
+their value would currently be false or empty:
+
+- `include`
+- `exclude`
+- `exclude_unset`
+- `exclude_defaults`
+- `exclude_none`
+- `exclude_computed_fields`
+
+Use the returned complete dictionary as the versioned document, then derive a
+partial view outside this API when an application deliberately needs one.
+
 ## Omit version metadata
 
-Set `include_version=False` when version metadata is stored outside the rendered
-payload:
+Set `include_version=False` when family-owned version metadata is stored outside
+the rendered payload:
 
 ```python
 dumped = dump_versioned(AppConfig, version="1", include_version=False)
 ```
+
+This is an explicit body-only mode. Its result is not a complete document for
+the family-owned `model_for(version)` adapter, so the consumer must supply the
+version separately. Model-owned metadata is part of the body contract and
+cannot be omitted; requesting `include_version=False` for that ownership mode
+raises `ValueError` before target construction or serialization.
 
 ## Nested version metadata
 
@@ -100,3 +183,8 @@ assert dump_versioned(MetadataConfig, version="1") == {
     "metadata": {"schema_version": "1"},
 }
 ```
+
+For a declared nested family, the parent version mapping owns child selection.
+Its embedded family-owned discriminator is therefore omitted from the rendered
+child value. A child discriminator declared as model-owned remains a real body
+field and is retained and verified.

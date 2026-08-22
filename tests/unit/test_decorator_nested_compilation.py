@@ -341,7 +341,11 @@ def test_unavailable_decorator_child_downgrade_names_the_child_family() -> None:
         child: CompilationUnavailableChild77
 
     with pytest.raises(IrreversibleTransitionError) as error:
-        dump_versioned(CompilationUnavailableParent77, version="1")
+        dump_versioned(
+            CompilationUnavailableParent77,
+            version="1",
+            data=CompilationUnavailableParent77(child=CompilationUnavailableChild77(value=1)),
+        )
 
     message = str(error.value)
     assert "compilation_unavailable_child_77" in message
@@ -503,7 +507,7 @@ def test_specialized_generic_wrapper_discovers_decorator_child() -> None:
         version="1",
         data=Parent(box=Box[Child](item=Child(value=4))),
     ) == {
-        "box": {"item": {"legacy_value": 4, "schema_version": "1"}},
+        "box": {"item": {"legacy_value": 4}},
         "schema_version": "1",
     }
 
@@ -642,7 +646,7 @@ def test_optional_wrapper_siblings_compare_metadata_contracts_per_site() -> None
         ),
     )
     assert rendered["wrapper"] == {
-        "family_child": {"value": 1, "schema_version": "1"},
+        "family_child": {"value": 1},
         "model_child": {"schema_version": "1", "value": 2},
     }
 

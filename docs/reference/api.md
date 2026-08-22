@@ -33,8 +33,12 @@ declaration sequence and has no default-selection side effect.
 - `model_for(version)`: return the family-local, object-shaped generated wire
   contract for that declared version.
 - `validate(data, *, version=None)`: validate historical input and upgrade it to the current model.
-- `defaults_for(*, version, include_version=True, **dump_kwargs)`: render target defaults.
-- `dump(*, version, data=None, include_version=True, **dump_kwargs)`: return a target-version dictionary.
+- `defaults_for(*, version, include_version=True, **dump_kwargs)`: construct and
+  serialize the selected target wire model's defaults without planning or
+  executing a downgrade.
+- `dump(*, version, data=None, include_version=True, **dump_kwargs)`: convert
+  current data to a target-version dictionary; `data=None` delegates to
+  `defaults_for()`, while `{}` remains real current input.
 
 Compilation is idempotent and thread-safe. A family owns its generated-model
 identities and cache, so two families can reuse one current model without
@@ -111,6 +115,25 @@ default `label`. Output-only or disabled validation locations are rejected.
 That location must remain invariant; nested model-owned paths are rejected
 until the top-level conversion compiler can resolve them safely. No
 discriminator is added when `version_metadata=None`.
+
+For an explicit historical wire body, that family-owned document adapter is a
+final facade: subclass the explicit body before registering the version, not the
+class returned by `model_for()`. The explicit body owns its materialized aliases,
+validators, serializer, and JSON Schema callbacks exactly once. Custom model
+core/JSON Schema hooks and serializer behavior that can relocate a managed
+nested-family path are unsupported; this includes annotation/decorator
+serializers, custom schema hooks, and legacy `json_encoders` along that path.
+Nested family-owned metadata reserves its
+entire root envelope, and allowed extras cannot overwrite an active declared
+serialization name.
+
+Attribute validation through this facade follows the explicit body's declared
+`ConfigDict(from_attributes=True)` policy. Family metadata is checked before
+body validators execute. A per-call flag cannot enable attribute input when the
+body configuration disables it; callers must instead provide a mapping or an
+instance of the explicit body. The facade does not proxy arbitrary body methods,
+and self-references stored inside body-owned values keep body identity rather
+than being rewritten as facade identity.
 
 Automatic projection raises `UnsupportedWireModelError` for a `RootModel`,
 unresolved generic, model-level serializer, overridden model core/JSON Schema
@@ -356,16 +379,33 @@ forward upgrades, and validates the current model.
 
 `dump_versioned(subject, *, version, data=None, include_version=True, **dump_kwargs)`
 
-Renders defaults, model data, or mapping data using a requested version and
-returns a dictionary. Mapping and unrelated model data is validated as the
-authoritative current model before reverse transitions run; authoritative model
-instances follow their Pydantic `revalidate_instances` policy. Embedded version
-metadata at any accepted input name must match the current version. Rendering
-extracts authoritative declared fields into detached canonical data, excluding
-allowed extras, subclass-only fields, and serializers, so transition mutation
-cannot affect caller-owned containers. Invalid unrelated models raise the
-current model's `ValidationError`. Extra keyword arguments are passed to the
-final target model's Pydantic `model_dump()`.
+With `data=None`, delegates to target-direct `defaults_for()` and does not
+require a render route. With model or mapping data, converts current data using
+the requested render plan and returns the target serialization dictionary. An
+empty mapping is data, not defaults syntax.
+
+Mapping and unrelated model data is validated as the authoritative current
+model before reverse transitions run; authoritative model instances follow
+their Pydantic `revalidate_instances` policy. Embedded version metadata at any
+accepted input name must match the current version. Rendering extracts
+authoritative declared fields into detached canonical data, excluding allowed
+extras, subclass-only fields, and serializers, so transition mutation cannot
+affect caller-owned containers. Invalid unrelated models raise the current
+model's `ValidationError`.
+
+Target serialization defaults to `mode="json"` and `by_alias=True`. Supported
+keyword arguments are `mode`, `by_alias`, `context`, `fallback`, `warnings`,
+false `round_trip`, false `serialize_as_any`, and false or `None`
+`polymorphic_serialization`. Truthy polymorphic modes, `round_trip=True`, unknown
+options, and the omission options `include`, `exclude`, `exclude_unset`,
+`exclude_defaults`, `exclude_none`, and `exclude_computed_fields` raise
+`ValueError`. Omission options are rejected by presence.
+
+Family-owned `include_version=False` returns a body-only dictionary for a
+transport that carries the label separately. Model-owned metadata is part of
+the body contract, so that option is unavailable. Family-owned metadata on
+embedded child families is omitted because the parent mapping owns child
+selection; model-owned child metadata remains.
 
 ## Result
 

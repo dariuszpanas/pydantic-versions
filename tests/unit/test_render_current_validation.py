@@ -207,12 +207,13 @@ def test_model_owned_render_metadata_is_rebased_without_alias_leaks() -> None:
     assert family.dump(
         version="1",
         data={"wire_version": "2", "value": "7"},
-    ) == {"wire_version": "1", "value": 7}
-    assert family.dump(
-        version="1",
-        data={"schema_version": "2", "value": 7},
-        include_version=False,
-    ) == {"value": 7}
+    ) == {"schema_version": "1", "value": 7}
+    with pytest.raises(ValueError, match="model-owned.*include_version=False is unavailable"):
+        family.dump(
+            version="1",
+            data={"schema_version": "2", "value": 7},
+            include_version=False,
+        )
 
     with pytest.raises(SchemaVersionError, match="current-model input"):
         family.dump(
@@ -361,7 +362,7 @@ def test_generated_set_projection_runs_mutating_after_validators_once() -> None:
     )
 
     assert rendered == {
-        "children": [{"value": 2, "schema_version": "1"}],
+        "children": [{"value": 2}],
         "parent_runs": 1,
         "schema_version": "1",
     }
@@ -419,7 +420,7 @@ def test_nested_frozenset_projection_runs_model_post_init_once() -> None:
     assert rendered == {
         "groups": {
             "primary": [
-                [{"value": 11, "schema_version": "1"}],
+                [{"value": 11}],
             ],
         },
         "parent_runs": 1,
@@ -489,7 +490,7 @@ def test_generated_set_projection_runs_parent_hooks_on_authoritative_type_once()
             return self
 
     expected = {
-        "children": [{"value": 1, "schema_version": "1"}],
+        "children": [{"value": 1}],
         "schema_version": "1",
     }
     assert (
@@ -575,7 +576,7 @@ def test_generated_set_carrier_preserves_exact_init_and_private_lifecycle() -> N
         version="1",
         data=cast(Any, generated_current),
     ) == {
-        "children": [{"value": 1, "schema_version": "1"}],
+        "children": [{"value": 1}],
         "schema_version": "1",
     }
     assert events == [
@@ -661,9 +662,8 @@ def test_nested_carrier_hooks_use_authoritative_wrapper_types_once() -> None:
         data=cast(Any, generated_current),
     ) == {
         "wrapper": {
-            "leaves": [{"value": 2, "schema_version": "1"}],
+            "leaves": [{"value": 2}],
             "wrapper_runs": 1,
-            "schema_version": "1",
         },
         "parent_runs": 1,
         "schema_version": "1",
@@ -1060,7 +1060,8 @@ def test_mapping_render_honors_disabled_name_validation() -> None:
 
     with pytest.raises(ValidationError, match="wire"):
         family.dump(version="1", data={"value": 1})
-    assert family.dump(version="1", data={"wire": 1}) == {"value": 1}
+    assert family.dump(version="1", data={"wire": 1}) == {"wire": 1}
+    assert family.dump(version="1", data={"wire": 1}, by_alias=False) == {"value": 1}
 
 
 def test_render_metadata_checks_list_alias_paths() -> None:
@@ -1154,7 +1155,7 @@ def test_decorator_discovered_current_wire_set_projection_is_renderable() -> Non
     assert rendered["schema_version"] == "1"
     assert len(rendered["children"]) == 1
     assert {item["value"] for item in rendered["children"]} == {1}
-    assert {item["schema_version"] for item in rendered["children"]} == {"1"}
+    assert all("schema_version" not in item for item in rendered["children"])
 
 
 def test_decorator_set_projection_beneath_mapping_is_renderable() -> None:
@@ -1200,5 +1201,4 @@ def test_decorator_set_projection_beneath_mapping_is_renderable() -> None:
 
     assert rendered["schema_version"] == "1"
     primary = rendered["groups"]["primary"]
-    assert primary["schema_version"] == "1"
-    assert primary["leaves"] == [{"value": 1, "schema_version": "1"}]
+    assert primary == {"leaves": [{"value": 1}]}

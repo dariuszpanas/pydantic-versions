@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from pydantic_versions import (
     IrreversibleTransitionError,
@@ -216,3 +216,63 @@ def test_exchange_supports_transport_owned_version_metadata() -> None:
     received = CONSUMER_SCHEMA.validate(payload, version="2")
     assert received.current_model.retries == 6
     assert received.current_model.timeout == 12
+
+
+def test_exchange_uses_serialization_aliases_and_requires_a_matching_consumer_location() -> None:
+    class AliasedProducer(BaseModel):
+        model_config = ConfigDict(validate_by_alias=True, validate_by_name=False)
+
+        worker_name: str = Field(
+            validation_alias="producerInput",
+            serialization_alias="worker",
+        )
+
+    producer = SchemaFamily(
+        model=AliasedProducer,
+        name="com.example.aliased-exchange",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    class StrictConsumer(BaseModel):
+        model_config = ConfigDict(validate_by_alias=True, validate_by_name=False)
+
+        name: str = Field(validation_alias="worker")
+
+    strict_consumer = SchemaFamily(
+        model=StrictConsumer,
+        name=producer.name,
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    current = AliasedProducer.model_validate({"producerInput": "alpha"})
+
+    outgoing = producer.dump(version="1", data=current)
+    transported = json.loads(json.dumps(outgoing))
+
+    assert transported == {"worker": "alpha"}
+    assert strict_consumer.validate(transported, version="1").current_model.name == "alpha"
+
+    name_output = producer.dump(version="1", data=current, by_alias=False)
+    assert name_output == {"worker_name": "alpha"}
+    with pytest.raises(ValidationError):
+        strict_consumer.validate(name_output, version="1")
+
+    class CompatibleConsumer(BaseModel):
+        model_config = ConfigDict(validate_by_alias=True, validate_by_name=False)
+
+        name: str = Field(validation_alias=AliasChoices("worker", "worker_name"))
+
+    compatible_consumer = SchemaFamily(
+        model=CompatibleConsumer,
+        name=producer.name,
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    assert (
+        compatible_consumer.validate(
+            name_output,
+            version="1",
+        ).current_model.name
+        == "alpha"
+    )

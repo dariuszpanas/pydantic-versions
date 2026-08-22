@@ -80,9 +80,9 @@ def test_nested_projection_and_pruning_ignore_an_opaque_sibling() -> None:
     rendered = parent_family.dump(
         version="2",
         data={"opaque": opaque},
-        exclude_none=True,
     )
 
+    assert rendered["children"] is None
     assert rendered["opaque"] == opaque
 
 
@@ -452,7 +452,7 @@ def test_nested_render_validates_parent_and_child_only_once(model_input: bool) -
     rendered = parent_family.dump(version="1", data=data)
 
     assert rendered == {
-        "child": {"legacy_value": 5, "schema_version": "1"},
+        "child": {"legacy_value": 5},
         "schema_version": "1",
     }
     assert validation_counts == {"parent": 1, "child": 1}

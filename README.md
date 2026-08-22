@@ -76,9 +76,13 @@ APP_CONFIG_SCHEMA = SchemaFamily(
 result = APP_CONFIG_SCHEMA.validate({"schema_version": "1", "retries": 2})
 assert result.current_model == AppConfig(timeout=5.0, retries=2, new_feature=False)
 
-v1_config = APP_CONFIG_SCHEMA.dump(version="1")
+v1_config = APP_CONFIG_SCHEMA.defaults_for(version="1")
 assert v1_config == {"timeout": 5.0, "retries": 3, "schema_version": "1"}
 ```
+
+`defaults_for()` constructs the requested wire version directly, so historical
+defaults do not depend on a downgrade route from the current version. Use
+`dump(version=..., data=current_config)` when converting actual current data.
 
 `missing_version` is only for legacy config files that do not contain a schema
 version field. For example, `missing_version="1"` means "if a payload has no

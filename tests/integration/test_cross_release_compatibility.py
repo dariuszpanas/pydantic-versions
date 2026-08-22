@@ -21,6 +21,15 @@ def _fixture() -> dict[str, Any]:
 def test_current_code_matches_the_reviewed_v0_3_0_additive_overlay() -> None:
     baseline = FIXTURE_PATH.read_text(encoding="utf-8")
     assert render_artifact() == render_expected_current_artifact(baseline)
+    frozen = json.loads(baseline)
+    current = json.loads(render_artifact())
+    for payload_name in (
+        "exact_embedded_v2",
+        "exact_transport_v2",
+        "lossy_embedded_v1",
+    ):
+        assert "schema_version" in frozen["payloads"][payload_name]["credentials"]
+        assert "schema_version" not in current["payloads"][payload_name]["credentials"]
 
 
 def test_current_code_consumes_persisted_embedded_and_transport_payloads() -> None:

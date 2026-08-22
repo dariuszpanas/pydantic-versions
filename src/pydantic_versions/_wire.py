@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterable, Mapping, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import is_dataclass
 from functools import reduce
 from operator import or_
-from types import GenericAlias, UnionType
+from types import GenericAlias, MemberDescriptorType, UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
+    ClassVar,
     ForwardRef,
     Literal,
     TypeVar,
@@ -33,18 +34,20 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    GetCoreSchemaHandler,
+    GetJsonSchemaHandler,
     GetPydanticSchema,
     WithJsonSchema,
     create_model,
 )
-from pydantic.functional_serializers import PlainSerializer, WrapSerializer
+from pydantic.functional_serializers import PlainSerializer, SerializeAsAny, WrapSerializer
 from pydantic.functional_validators import (
     AfterValidator,
     BeforeValidator,
     PlainValidator,
     WrapValidator,
 )
-from pydantic_core import PydanticUndefined
+from pydantic_core import CoreSchema, PydanticUndefined, core_schema
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
 
 from pydantic_versions._compiler import (
@@ -71,6 +74,8 @@ _SCHEMA_HOOK_NAMES = (
     "__modify_schema__",
 )
 _MISSING = object()
+_DOCUMENT_BODY_SLOT = "_FamilyDocumentAdapterBase__document_body"
+_SERIALIZE_AS_ANY_METADATA_TYPE = type(cast(Any, SerializeAsAny)())
 
 _MODEL_SCHEMA_STRUCTURE_KEYS = frozenset(
     {
@@ -206,6 +211,7 @@ _FUNCTIONAL_FIELD_BEHAVIOR = (
     BeforeValidator,
     PlainSerializer,
     PlainValidator,
+    _SERIALIZE_AS_ANY_METADATA_TYPE,
     WrapSerializer,
     WrapValidator,
 )
@@ -261,7 +267,32 @@ def _build_model_for_projection(
                 "explicit wire models cannot contain decorator-discovered child families; "
                 "declare explicit NestedFamily boundaries instead",
             )
-        return _validate_explicit_wire_model(family, projection, wire_model)
+        _validate_explicit_nested_serializer_boundaries(
+            family,
+            projection,
+            wire_model,
+            nested=nested,
+        )
+        metadata = family.version_metadata
+        if metadata is not None and metadata.owner == "family":
+            _validate_family_document_adapter_schema_hooks(
+                family,
+                projection,
+                wire_model,
+            )
+            _validate_family_document_adapter_member_collisions(
+                family,
+                projection,
+                wire_model,
+            )
+        validated = _validate_explicit_wire_model(family, projection, wire_model)
+        if metadata is not None and metadata.owner == "family":
+            return _build_family_document_adapter(
+                family,
+                projection,
+                validated,
+            )
+        return validated
     try:
         return _build_model_for_projection_unchecked(
             family,
@@ -286,6 +317,15 @@ def _validate_explicit_wire_model(
     wire_model: type[BaseModel],
 ) -> type[BaseModel]:
     _validate_explicit_wire_model_metadata(family, projection, wire_model)
+    _validate_explicit_family_metadata_collision(family, projection, wire_model)
+    if family.version_metadata is not None and family.version_metadata.owner == "model":
+        _validate_generated_metadata_aliases(
+            family,
+            projection,
+            wire_model,
+            model_metadata_field=_model_metadata_field(family),
+        )
+    _validate_unique_serialization_names(family, projection, wire_model)
     _validate_object_schema(
         family,
         projection,
@@ -299,6 +339,780 @@ def _validate_explicit_wire_model(
         mode="serialization",
     )
     return wire_model
+
+
+def _build_family_document_adapter(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    body_model: type[BaseModel],
+) -> type[BaseModel]:
+    metadata = family.version_metadata
+    if metadata is None or metadata.owner != "family":
+        msg = f"Schema family {family.name!r} lost family-owned version metadata"
+        raise SchemaCompilationError(msg)
+    label = projection.label
+    metadata_path = metadata.path
+    _validate_family_document_adapter_schema_hooks(family, projection, body_model)
+    adapter_config = dict(body_model.model_config)
+    # The exact body schema remains the sole owner of materialized aliases and
+    # JSON Schema callbacks. Replaying these while create_model builds the
+    # document facade can change stateful aliases or execute callbacks twice.
+    for key in (
+        "alias_generator",
+        "field_title_generator",
+        "json_schema_extra",
+        "model_title_generator",
+        "schema_generator",
+    ):
+        adapter_config.pop(key, None)
+    body_config = ConfigDict(**adapter_config)
+    body_fields = tuple(body_model.model_fields)
+
+    def synchronize_adapter(instance: BaseModel) -> BaseModel:
+        body = object.__getattribute__(
+            instance,
+            "_FamilyDocumentAdapterBase__document_body",
+        )
+        if not isinstance(body, body_model):
+            msg = (
+                f"Family-owned document adapter for {family.name!r} lost its "
+                "validated explicit wire body"
+            )
+            raise ValueError(msg)
+        adapter_instance = cast(Any, instance)
+        synchronized = type(adapter_instance)._from_document_body(body)
+        _FamilyDocumentAdapterBase._replace_document_adapter_state(
+            adapter_instance,
+            synchronized,
+        )
+        return body
+
+    class _FamilyDocumentAdapterBase(BaseModel):
+        __slots__ = ("__document_body",)
+
+        model_config = body_config
+        _document_body_model: ClassVar[type[BaseModel]] = body_model
+
+        @classmethod
+        def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+            super().__pydantic_init_subclass__(**kwargs)
+            if _FamilyDocumentAdapterBase in cls.__bases__:
+                return
+            msg = (
+                f"Generated family-owned document model for {family.name!r} is final; "
+                "subclass the explicit wire body before declaring the schema version"
+            )
+            raise TypeError(msg)
+
+        def __init__(self, /, **data: Any) -> None:
+            validated = type(self).model_validate(data)
+            _FamilyDocumentAdapterBase._replace_document_adapter_state(self, validated)
+
+        def __getattribute__(self, name: str) -> Any:
+            if name in body_fields:
+                try:
+                    body = object.__getattribute__(
+                        self,
+                        "_FamilyDocumentAdapterBase__document_body",
+                    )
+                except AttributeError:
+                    body = None
+                if isinstance(body, body_model):
+                    value = getattr(body, name)
+                    return self if value is body else value
+            # Explicit bodies with extra="allow" may legitimately receive names
+            # used only by the generated facade. Keep those values observable in
+            # exactly the same way as on the body while internal calls use the
+            # unbound helper methods and the slot descriptor directly.
+            if name in {
+                _DOCUMENT_BODY_SLOT,
+                "_document_body_model",
+                "_from_document_body",
+                "_replace_document_adapter_state",
+            }:
+                extras = object.__getattribute__(self, "__pydantic_extra__")
+                if isinstance(extras, Mapping) and name in extras:
+                    return extras[name]
+            return super().__getattribute__(name)
+
+        def _replace_document_adapter_state(self, adapter: BaseModel) -> None:
+            metadata_root = metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+            existing_metadata = self.__dict__.get(metadata_root, _MISSING)
+            if existing_metadata is not _MISSING:
+                adapter.__dict__[metadata_root] = existing_metadata
+            object.__setattr__(self, "__dict__", adapter.__dict__)
+            object.__setattr__(
+                self,
+                "__pydantic_fields_set__",
+                adapter.__pydantic_fields_set__,
+            )
+            object.__setattr__(self, "__pydantic_extra__", adapter.__pydantic_extra__)
+            object.__setattr__(self, "__pydantic_private__", adapter.__pydantic_private__)
+            body = object.__getattribute__(
+                adapter,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            object.__setattr__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+                body,
+            )
+
+        @classmethod
+        def _from_document_body(cls, body: BaseModel) -> BaseModel:
+            values = {name: body.__dict__.get(name, PydanticUndefined) for name in body_fields}
+            extras = body.__pydantic_extra__
+            if isinstance(extras, Mapping):
+                values.update(
+                    (name, value)
+                    for name, value in extras.items()
+                    if name not in body_model.model_fields
+                )
+            adapter = super().model_construct(
+                _fields_set=set(body.model_fields_set),
+                **values,
+            )
+            # model_construct fills facade defaults. Preserve the exact body
+            # state after supported deletion rather than resurrecting fields.
+            for name in body_fields:
+                if name not in body.__dict__:
+                    adapter.__dict__.pop(name, None)
+            object.__setattr__(adapter, "__pydantic_fields_set__", body.__pydantic_fields_set__)
+            object.__setattr__(adapter, "__pydantic_extra__", body.__pydantic_extra__)
+            object.__setattr__(adapter, "__pydantic_private__", body.__pydantic_private__)
+            object.__setattr__(
+                adapter,
+                "_FamilyDocumentAdapterBase__document_body",
+                body,
+            )
+            return adapter
+
+        @classmethod
+        def model_construct(
+            cls,
+            _fields_set: set[str] | None = None,
+            **values: Any,
+        ) -> BaseModel:
+            body_values = _copy_without_document_metadata(
+                values,
+                metadata_path=metadata_path,
+                expected=label,
+                family_name=family.name,
+            )
+            body_fields_set = None if _fields_set is None else set(_fields_set)
+            if body_fields_set is not None:
+                metadata_root = (
+                    metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+                )
+                body_fields_set.discard(metadata_root)
+            body = body_model.model_construct(
+                _fields_set=body_fields_set,
+                **body_values,
+            )
+            return cls._from_document_body(body)
+
+        @classmethod
+        def __get_pydantic_core_schema__(
+            cls,
+            _source_type: Any,
+            handler: GetCoreSchemaHandler,
+        ) -> CoreSchema:
+            body_schema = handler.generate_schema(body_model)
+
+            def strip_metadata(value: Any) -> Any:
+                if isinstance(value, cls):
+                    body = object.__getattribute__(
+                        value,
+                        "_FamilyDocumentAdapterBase__document_body",
+                    )
+                    if isinstance(body, body_model):
+                        return body
+                if isinstance(value, body_model):
+                    _reject_explicit_body_document_metadata(
+                        value,
+                        metadata_path=metadata_path,
+                        family_name=family.name,
+                    )
+                    return value
+                if not isinstance(value, Mapping):
+                    return value
+                copied = _copy_without_document_metadata(
+                    value,
+                    metadata_path=metadata_path,
+                    expected=label,
+                    family_name=family.name,
+                )
+                return copied
+
+            def validate_document(value: Any, inner_handler: Any) -> BaseModel:
+                revalidation = body_model.model_config.get("revalidate_instances", "never")
+                foreign_body = isinstance(value, body_model) and not isinstance(value, cls)
+                attribute_source = not isinstance(value, (cls, body_model, Mapping))
+                if attribute_source:
+                    if body_model.model_config.get("from_attributes") is not True:
+                        msg = (
+                            f"Explicit wire body for family {family.name!r} does not "
+                            "enable attribute validation; use a mapping or body instance"
+                        )
+                        raise ValueError(msg)
+                    _validate_document_metadata_attributes(
+                        value,
+                        metadata_path=metadata_path,
+                        expected=label,
+                        family_name=family.name,
+                    )
+                if isinstance(value, cls):
+                    if revalidation != "always":
+                        synchronize_adapter(value)
+                        return value
+                    body = strip_metadata(value)
+                    body = inner_handler(body)
+                else:
+                    body = inner_handler(strip_metadata(value))
+                if foreign_body and body is value:
+                    body = _model_revalidation_proxy(body, type(body))
+                return cls._from_document_body(body)
+
+            def serialize_document(instance: BaseModel, handler: Any, info: Any) -> Any:
+                body = synchronize_adapter(instance)
+                try:
+                    serialized = handler(body)
+                finally:
+                    synchronize_adapter(instance)
+                if not isinstance(serialized, Mapping):
+                    msg = (
+                        f"Explicit wire body for family {family.name!r} and version "
+                        f"{label!r} must serialize to an object"
+                    )
+                    raise ValueError(msg)
+                return _copy_with_document_metadata(
+                    serialized,
+                    metadata_path=metadata_path,
+                    metadata_value=label,
+                    family_name=family.name,
+                )
+
+            return core_schema.no_info_wrap_validator_function(
+                validate_document,
+                body_schema,
+                serialization=core_schema.wrap_serializer_function_ser_schema(
+                    serialize_document,
+                    info_arg=True,
+                    schema=body_schema,
+                    return_schema=core_schema.dict_schema(),
+                ),
+            )
+
+        @classmethod
+        def __get_pydantic_json_schema__(
+            cls,
+            _core_schema: CoreSchema,
+            handler: GetJsonSchemaHandler,
+        ) -> dict[str, Any]:
+            body_core_schema: Any = _core_schema.get("schema")
+            if handler.mode == "serialization":
+                serialization = _core_schema.get("serialization")
+                if isinstance(serialization, Mapping):
+                    body_core_schema = serialization.get("schema", body_core_schema)
+            schema = deepcopy(handler(body_core_schema))
+            schema = deepcopy(handler.resolve_ref_schema(schema))
+            _add_document_metadata_json_schema(
+                schema,
+                metadata_path=metadata_path,
+                label=label,
+            )
+            return schema
+
+        def __getattr__(self, name: str) -> Any:
+            body = object.__getattribute__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            if isinstance(body, body_model) and (
+                name in body_model.__private_attributes__
+                or name in body_model.model_computed_fields
+            ):
+                try:
+                    value = getattr(body, name)
+                    return self if value is body else value
+                finally:
+                    synchronize_adapter(self)
+            try:
+                base_getattr = vars(BaseModel)["__getattr__"]
+                value = base_getattr(self, name)
+                return self if value is body else value
+            except AttributeError:
+                raise
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == _DOCUMENT_BODY_SLOT:
+                msg = f"Internal document state for family {family.name!r} is reserved"
+                raise AttributeError(msg)
+            body = object.__getattribute__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            body_private = name in body_model.__private_attributes__
+            if isinstance(body, body_model) and (not name.startswith("_") or body_private):
+                metadata_root = (
+                    metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+                )
+                if name == metadata_root:
+                    _copy_without_document_metadata(
+                        {name: value},
+                        metadata_path=metadata_path,
+                        expected=label,
+                        family_name=family.name,
+                    )
+                    return
+                try:
+                    setattr(body, name, value)
+                finally:
+                    synchronize_adapter(self)
+                return
+            super().__setattr__(name, value)
+
+        def __delattr__(self, name: str) -> None:
+            if name == _DOCUMENT_BODY_SLOT:
+                msg = f"Internal document state for family {family.name!r} is reserved"
+                raise AttributeError(msg)
+            body = object.__getattribute__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            if isinstance(body, body_model):
+                metadata_root = (
+                    metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+                )
+                if name == metadata_root:
+                    msg = f"Family-owned version metadata for {family.name!r} cannot be deleted"
+                    raise AttributeError(msg)
+                extras = body.__pydantic_extra__
+                body_extra = isinstance(extras, Mapping) and name in extras
+                if (
+                    name in body_model.model_fields
+                    or name in body_model.__private_attributes__
+                    or name in body_model.model_computed_fields
+                    or body_extra
+                ):
+                    try:
+                        delattr(body, name)
+                    finally:
+                        synchronize_adapter(self)
+                    return
+            super().__delattr__(name)
+
+        def model_copy(
+            self,
+            *,
+            update: Mapping[str, Any] | None = None,
+            deep: bool = False,
+        ) -> BaseModel:
+            body = object.__getattribute__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            if not isinstance(body, body_model):
+                msg = (
+                    f"Family-owned document adapter for {family.name!r} lost its "
+                    "validated explicit wire body"
+                )
+                raise ValueError(msg)
+            body_update = None
+            if update is not None:
+                body_update = _copy_without_document_metadata(
+                    update,
+                    metadata_path=metadata_path,
+                    expected=label,
+                    family_name=family.name,
+                )
+            copied = body.model_copy(update=body_update, deep=deep)
+            adapter = type(self)._from_document_body(copied)
+            if not deep:
+                metadata_root = (
+                    metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+                )
+                if metadata_root in self.__dict__:
+                    adapter.__dict__[metadata_root] = self.__dict__[metadata_root]
+            return adapter
+
+        def __copy__(self) -> BaseModel:
+            return self.model_copy()
+
+        def __iter__(self) -> Any:
+            synchronize_adapter(self)
+            return super().__iter__()
+
+        def __repr_args__(self) -> Any:
+            synchronize_adapter(self)
+            return super().__repr_args__()
+
+        def __eq__(self, other: Any) -> bool:
+            for value in (self, other):
+                if isinstance(value, _FamilyDocumentAdapterBase):
+                    synchronize_adapter(value)
+            return super().__eq__(other)
+
+        def __deepcopy__(self, memo: dict[int, Any] | None = None) -> BaseModel:
+            if memo is None:
+                memo = {}
+            existing = memo.get(id(self))
+            if isinstance(existing, type(self)):
+                return existing
+            placeholder = object.__new__(type(self))
+            memo[id(self)] = placeholder
+            body = object.__getattribute__(
+                self,
+                "_FamilyDocumentAdapterBase__document_body",
+            )
+            if not isinstance(body, body_model):
+                msg = (
+                    f"Family-owned document adapter for {family.name!r} lost its "
+                    "validated explicit wire body"
+                )
+                raise ValueError(msg)
+            copied = type(self)._from_document_body(deepcopy(body, memo))
+            metadata_root = metadata_path if isinstance(metadata_path, str) else metadata_path[0]
+            if metadata_root in self.__dict__:
+                copied.__dict__[metadata_root] = deepcopy(
+                    self.__dict__[metadata_root],
+                    memo,
+                )
+            _FamilyDocumentAdapterBase._replace_document_adapter_state(
+                placeholder,
+                copied,
+            )
+            return placeholder
+
+    fields: dict[str, Any] = {
+        name: (field_info.annotation, _copy_document_field_info(field_info))
+        for name, field_info in body_model.model_fields.items()
+    }
+    _add_family_metadata_field(family, label, fields)
+    adapter = create_model(
+        _generated_model_name(family.model, family.name, label),
+        __base__=_FamilyDocumentAdapterBase,
+        __module__=family.model.__module__,
+        **fields,
+    )
+    adapter.__pydantic_computed_fields__ = dict(body_model.model_computed_fields)
+    _validate_object_schema(family, projection, adapter, mode="validation")
+    _validate_object_schema(family, projection, adapter, mode="serialization")
+    return adapter
+
+
+def _model_revalidation_proxy(
+    instance: BaseModel,
+    target_type: type[BaseModel],
+) -> BaseModel:
+    proxy = object.__new__(target_type)
+    object.__setattr__(proxy, "__dict__", dict(instance.__dict__))
+    extras = instance.__pydantic_extra__
+    object.__setattr__(
+        proxy,
+        "__pydantic_extra__",
+        None if extras is None else dict(extras),
+    )
+    object.__setattr__(
+        proxy,
+        "__pydantic_fields_set__",
+        set(instance.__pydantic_fields_set__),
+    )
+    private = instance.__pydantic_private__
+    object.__setattr__(
+        proxy,
+        "__pydantic_private__",
+        None if private is None else dict(private),
+    )
+    standard_slots = {
+        "__dict__",
+        "__pydantic_extra__",
+        "__pydantic_fields_set__",
+        "__pydantic_private__",
+    }
+    for owner in type(instance).__mro__:
+        for name, descriptor in vars(owner).items():
+            if name in standard_slots or not isinstance(descriptor, MemberDescriptorType):
+                continue
+            try:
+                slot_value = descriptor.__get__(instance, type(instance))
+            except AttributeError:
+                continue
+            descriptor.__set__(proxy, slot_value)
+    return proxy
+
+
+def _copy_document_field_info(field_info: Any) -> Any:
+    copied = copy(field_info)
+    if any(
+        alias is not None
+        for alias in (
+            field_info.alias,
+            field_info.validation_alias,
+            field_info.serialization_alias,
+        )
+    ):
+        copied.alias_priority = 2
+    return copied
+
+
+def _validate_family_document_adapter_schema_hooks(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    body_model: type[BaseModel],
+) -> None:
+    for hook in _CUSTOM_MODEL_HOOKS:
+        owner = _first_defining_class(body_model, hook)
+        if owner is not None and owner is not BaseModel:
+            _raise_projection_unsupported(
+                family,
+                projection,
+                f"family-owned metadata cannot safely compose custom model hook {hook} "
+                "from an explicit wire body",
+            )
+
+
+def _validate_family_document_adapter_member_collisions(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    body_model: type[BaseModel],
+) -> None:
+    reserved = set(vars(BaseModel)) | {
+        _DOCUMENT_BODY_SLOT,
+        "_document_body_model",
+        "_from_document_body",
+        "_replace_document_adapter_state",
+    }
+    for kind, names in (
+        ("private attribute", body_model.__private_attributes__),
+        ("computed field", body_model.model_computed_fields),
+    ):
+        collision = next((name for name in names if name in reserved), None)
+        if collision is None:
+            continue
+        _raise_projection_unsupported(
+            family,
+            projection,
+            f"explicit wire body {kind} {collision!r} conflicts with the "
+            "family-owned document adapter API",
+        )
+
+
+def _reject_explicit_body_document_metadata(
+    body: BaseModel,
+    *,
+    metadata_path: str | tuple[str, ...],
+    family_name: str,
+) -> None:
+    extras = body.__pydantic_extra__
+    if not isinstance(extras, Mapping):
+        return
+    path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
+    if path[0] not in extras:
+        return
+    msg = (
+        f"Explicit wire body for family {family_name!r} contains the reserved "
+        f"family-owned metadata root {path[0]!r}"
+    )
+    raise ValueError(msg)
+
+
+def _validate_document_metadata_attributes(
+    value: Any,
+    *,
+    metadata_path: str | tuple[str, ...],
+    expected: str,
+    family_name: str,
+) -> None:
+    path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
+    current = value
+    for index, part in enumerate(path):
+        if index > 0:
+            current_mapping = _document_metadata_mapping(current)
+            if current_mapping is None:
+                try:
+                    namespace = object.__getattribute__(current, "__dict__")
+                except (AttributeError, TypeError):
+                    namespace = None
+                if isinstance(namespace, Mapping):
+                    current_mapping = namespace
+            if current_mapping is None or set(current_mapping) != {part}:
+                msg = (
+                    f"Version metadata for family {family_name!r} reserves the entire "
+                    f"root {path[0]!r}; the complete metadata path is required "
+                    "without siblings"
+                )
+                raise ValueError(msg)
+            current = current_mapping[part]
+            continue
+        if isinstance(current, Mapping):
+            if part not in current:
+                if index == 0:
+                    return
+                msg = (
+                    f"Version metadata for family {family_name!r} is incomplete at "
+                    f"reserved path component {part!r}"
+                )
+                raise ValueError(msg)
+            current = current[part]
+            continue
+        try:
+            current = getattr(current, part)
+        except AttributeError:
+            if index == 0:
+                return
+            msg = (
+                f"Version metadata for family {family_name!r} is incomplete at "
+                f"reserved path component {part!r}"
+            )
+            raise ValueError(msg) from None
+        except Exception as exc:
+            msg = (
+                f"Version metadata for family {family_name!r} could not be read "
+                f"from attribute path component {part!r}"
+            )
+            raise ValueError(msg) from exc
+    if current != expected:
+        msg = f"Version metadata for family {family_name!r} is {current!r}; expected {expected!r}"
+        raise ValueError(msg)
+
+
+def _copy_without_document_metadata(
+    value: Mapping[Any, Any],
+    *,
+    metadata_path: str | tuple[str, ...],
+    expected: str,
+    family_name: str,
+) -> dict[Any, Any]:
+    path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
+    copied: dict[Any, Any] = dict(value)
+    root = path[0]
+    if root not in copied:
+        return copied
+    if len(path) == 1:
+        declared = copied.pop(root)
+        if declared != expected:
+            msg = (
+                f"Version metadata for family {family_name!r} is {declared!r}; "
+                f"expected {expected!r}"
+            )
+            raise ValueError(msg)
+        return copied
+
+    current: Any = copied[root]
+    for part in path[1:-1]:
+        current_mapping = _document_metadata_mapping(current)
+        if current_mapping is None:
+            msg = (
+                f"Version metadata for family {family_name!r} has a non-object "
+                f"component at {part!r}"
+            )
+            raise ValueError(msg)
+        if set(current_mapping) != {part}:
+            msg = (
+                f"Version metadata for family {family_name!r} reserves the entire "
+                f"root {root!r}; sibling data cannot share that envelope"
+            )
+            raise ValueError(msg)
+        current = current_mapping[part]
+    final = path[-1]
+    current_mapping = _document_metadata_mapping(current)
+    if current_mapping is None:
+        msg = f"Version metadata for family {family_name!r} has a non-object component at {final!r}"
+        raise ValueError(msg)
+    if set(current_mapping) != {final}:
+        msg = (
+            f"Version metadata for family {family_name!r} reserves the entire "
+            f"root {root!r}; the complete metadata path is required without siblings"
+        )
+        raise ValueError(msg)
+    declared = current_mapping[final]
+    if declared != expected:
+        msg = f"Version metadata for family {family_name!r} is {declared!r}; expected {expected!r}"
+        raise ValueError(msg)
+    copied.pop(root)
+    return copied
+
+
+def _copy_with_document_metadata(
+    payload: Mapping[Any, Any],
+    *,
+    metadata_path: str | tuple[str, ...],
+    metadata_value: str,
+    family_name: str,
+) -> dict[Any, Any]:
+    path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
+    copied: dict[Any, Any] = dict(payload)
+    current = copied
+    for part in path[:-1]:
+        existing = current.get(part, _MISSING)
+        if existing is _MISSING:
+            child: dict[Any, Any] = {}
+        else:
+            msg = (
+                f"Explicit wire serializer for family {family_name!r} conflicts with "
+                f"version metadata at reserved path component {part!r}"
+            )
+            raise ValueError(msg)
+        current[part] = child
+        current = child
+    final = path[-1]
+    existing = current.get(final, _MISSING)
+    if existing is not _MISSING:
+        msg = (
+            f"Explicit wire serializer for family {family_name!r} emitted conflicting "
+            f"version metadata {existing!r}; the family-owned path is reserved"
+        )
+        raise ValueError(msg)
+    current[final] = metadata_value
+    return copied
+
+
+def _document_metadata_mapping(value: Any) -> Mapping[Any, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, BaseModel):
+        return None
+    mapped = {
+        name: value.__dict__[name] for name in type(value).model_fields if name in value.__dict__
+    }
+    extras = value.__pydantic_extra__
+    if isinstance(extras, Mapping):
+        mapped.update(extras)
+    return mapped
+
+
+def _add_document_metadata_json_schema(
+    schema: dict[str, Any],
+    *,
+    metadata_path: str | tuple[str, ...],
+    label: str,
+) -> None:
+    path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
+    current = schema
+    for index, part in enumerate(path):
+        current.setdefault("type", "object")
+        properties = current.setdefault("properties", {})
+        if not isinstance(properties, dict):
+            return
+        if index == len(path) - 1:
+            properties[part] = {
+                "const": label,
+                "default": label,
+                "title": part.replace("_", " ").title(),
+                "type": "string",
+            }
+            return
+        existing_child = properties.get(part)
+        child: dict[str, Any]
+        if isinstance(existing_child, dict):
+            child = cast(dict[str, Any], existing_child)
+        else:
+            child = {"type": "object", "properties": {}}
+            properties[part] = child
+        child["additionalProperties"] = False
+        child["required"] = [path[index + 1]]
+        current = child
 
 
 def _validate_explicit_wire_model_metadata(
@@ -493,6 +1307,7 @@ def _build_model_for_projection_unchecked(
         generated,
         model_metadata_field=model_metadata_field,
     )
+    _validate_unique_serialization_names(family, projection, generated)
     _validate_object_schema(family, projection, generated, mode="validation")
     _validate_object_schema(family, projection, generated, mode="serialization")
     return generated
@@ -1114,15 +1929,48 @@ def _validate_family_metadata_collision(family: SchemaFamily[Any]) -> None:
         return
     root_name = metadata.path if isinstance(metadata.path, str) else metadata.path[0]
     for field_name, field_info in family.model.model_fields.items():
-        if (
-            root_name == field_name
-            or root_name == field_info.alias
-            or root_name == field_info.validation_alias
-            or root_name == field_info.serialization_alias
+        attributes = field_info.asdict()["attributes"]
+        if any(
+            key in attributes and _has_effect(attributes[key]) for key in _OMITTED_FIELD_ATTRIBUTES
+        ):
+            continue
+        if any(
+            path and path[0] == root_name for path in _field_contract_paths(field_name, field_info)
         ):
             _raise_unsupported(
                 family,
                 f"family-owned version metadata collides with body field {field_name!r}",
+            )
+
+
+def _validate_explicit_family_metadata_collision(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    model: type[BaseModel],
+) -> None:
+    metadata = family.version_metadata
+    if metadata is None or metadata.owner != "family":
+        return
+    root_name = metadata.path if isinstance(metadata.path, str) else metadata.path[0]
+    for field_name, field_info in model.model_fields.items():
+        if any(
+            path and path[0] == root_name for path in _field_contract_paths(field_name, field_info)
+        ):
+            _raise_projection_unsupported(
+                family,
+                projection,
+                f"family-owned version metadata collides with explicit wire field {field_name!r}",
+            )
+    for field_name, field_info in model.model_computed_fields.items():
+        if any(
+            path and path[0] == root_name
+            for path in _computed_field_output_paths(field_name, field_info)
+        ):
+            _raise_projection_unsupported(
+                family,
+                projection,
+                "family-owned version metadata collides with explicit wire computed "
+                f"field {field_name!r}",
             )
 
 
@@ -1181,6 +2029,438 @@ def _validate_generated_metadata_aliases(
                 projection,
                 f"version metadata overlaps projected field or alias {field_name!r}",
             )
+    for field_name, field_info in model.model_computed_fields.items():
+        if any(
+            path and path[0] in reserved_roots
+            for path in _computed_field_output_paths(field_name, field_info)
+        ):
+            _raise_projection_unsupported(
+                family,
+                projection,
+                f"version metadata overlaps computed field or alias {field_name!r}",
+            )
+
+
+def _field_contract_paths(field_name: str, field_info: Any) -> tuple[tuple[str | int, ...], ...]:
+    return (
+        (field_name,),
+        *_alias_paths(field_info.alias),
+        *_alias_paths(field_info.validation_alias),
+        *_alias_paths(field_info.serialization_alias),
+    )
+
+
+def _computed_field_output_paths(
+    field_name: str,
+    field_info: Any,
+) -> tuple[tuple[str | int, ...], ...]:
+    return ((field_name,), *_alias_paths(field_info.alias))
+
+
+def _validate_unique_serialization_names(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    model: type[BaseModel],
+) -> None:
+    schema = model.__pydantic_core_schema__
+    definitions = _core_schema_definitions(schema)
+    root = schema.get("schema") if schema.get("type") == "definitions" else schema
+    _validate_core_schema_serialization_names(
+        family,
+        projection,
+        root,
+        definitions=definitions,
+        seen=set(),
+    )
+
+
+def _raise_duplicate_serialization_name(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    *,
+    model: type[Any],
+    output_name: str,
+    first: str,
+    second: str,
+) -> None:
+    _raise_projection_unsupported(
+        family,
+        projection,
+        f"wire model {_model_display(model)!r} serializes {first} and {second} "
+        f"to duplicate output name {output_name!r}",
+    )
+
+
+def _core_schema_definitions(schema: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    definitions = schema.get("definitions")
+    if not isinstance(definitions, list):
+        return {}
+    return {
+        reference: definition
+        for definition in definitions
+        if isinstance(definition, Mapping) and isinstance(reference := definition.get("ref"), str)
+    }
+
+
+def _validate_core_schema_serialization_names(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    schema: Any,
+    *,
+    definitions: Mapping[str, Mapping[str, Any]],
+    seen: set[int],
+    owner: type[Any] | None = None,
+) -> None:
+    if id(schema) in seen:
+        return
+    seen.add(id(schema))
+    if isinstance(schema, list | tuple):
+        for item in schema:
+            _validate_core_schema_serialization_names(
+                family,
+                projection,
+                item,
+                definitions=definitions,
+                seen=seen,
+                owner=owner,
+            )
+        return
+    if not isinstance(schema, Mapping):
+        return
+    serialization = schema.get("serialization")
+    if isinstance(serialization, Mapping) and serialization.get(
+        "when_used",
+        "always",
+    ) in ("always", "unless-none"):
+        return
+
+    schema_type = schema.get("type")
+    if schema_type == "definition-ref":
+        reference = schema.get("schema_ref")
+        resolved = definitions.get(reference) if isinstance(reference, str) else None
+        if resolved is not None:
+            _validate_core_schema_serialization_names(
+                family,
+                projection,
+                resolved,
+                definitions=definitions,
+                seen=seen,
+                owner=owner,
+            )
+        return
+
+    candidate_owner = schema.get("cls")
+    if isinstance(candidate_owner, type):
+        owner = candidate_owner
+    if schema_type in ("model", "dataclass"):
+        _validate_core_schema_serialization_names(
+            family,
+            projection,
+            schema.get("schema"),
+            definitions=definitions,
+            seen=seen,
+            owner=owner,
+        )
+        return
+
+    if schema_type in ("model-fields", "typed-dict"):
+        fields = schema.get("fields")
+        if isinstance(fields, Mapping):
+            entries = tuple(
+                (name, field)
+                for name, field in fields.items()
+                if isinstance(name, str) and isinstance(field, Mapping)
+            )
+            _validate_core_schema_object_fields(
+                family,
+                projection,
+                entries,
+                computed=schema.get("computed_fields"),
+                definitions=definitions,
+                seen=seen,
+                owner=owner,
+            )
+        return
+
+    if schema_type == "dataclass-args":
+        fields = schema.get("fields")
+        if isinstance(fields, list):
+            entries = tuple(
+                (name, field)
+                for field in fields
+                if isinstance(field, Mapping) and isinstance(name := field.get("name"), str)
+            )
+            _validate_core_schema_object_fields(
+                family,
+                projection,
+                entries,
+                computed=schema.get("computed_fields"),
+                definitions=definitions,
+                seen=seen,
+                owner=owner,
+            )
+        return
+
+    for value in schema.values():
+        _validate_core_schema_serialization_names(
+            family,
+            projection,
+            value,
+            definitions=definitions,
+            seen=seen,
+            owner=owner,
+        )
+
+
+def _validate_core_schema_object_fields(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    fields: tuple[tuple[str, Mapping[str, Any]], ...],
+    *,
+    computed: Any,
+    definitions: Mapping[str, Mapping[str, Any]],
+    seen: set[int],
+    owner: type[Any] | None,
+) -> None:
+    selected: dict[str, str] = {}
+    for field_name, field_schema in fields:
+        if field_schema.get("serialization_exclude") is True:
+            continue
+        serialization_alias = field_schema.get("serialization_alias")
+        output_name = field_name if serialization_alias is None else serialization_alias
+        description = f"field {field_name!r}"
+        _record_core_schema_output_name(
+            family,
+            projection,
+            owner=owner,
+            selected=selected,
+            output_name=output_name,
+            description=description,
+        )
+        _validate_core_schema_serialization_names(
+            family,
+            projection,
+            field_schema.get("schema"),
+            definitions=definitions,
+            seen=seen,
+        )
+
+    if not isinstance(computed, list):
+        return
+
+    for computed_schema in computed:
+        if not isinstance(computed_schema, Mapping):
+            continue
+        field_name = computed_schema.get("property_name")
+        if not isinstance(field_name, str):
+            continue
+        computed_alias = computed_schema.get("alias")
+        output_name = field_name if computed_alias is None else computed_alias
+        description = f"computed field {field_name!r}"
+        _record_core_schema_output_name(
+            family,
+            projection,
+            owner=owner,
+            selected=selected,
+            output_name=output_name,
+            description=description,
+        )
+        _validate_core_schema_serialization_names(
+            family,
+            projection,
+            computed_schema.get("return_schema"),
+            definitions=definitions,
+            seen=seen,
+        )
+
+
+def _record_core_schema_output_name(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    *,
+    owner: type[Any] | None,
+    selected: dict[str, str],
+    output_name: Any,
+    description: str,
+) -> None:
+    if not isinstance(output_name, str):
+        return
+    previous = selected.get(output_name)
+    if previous is not None and previous != description:
+        _raise_duplicate_serialization_name(
+            family,
+            projection,
+            model=family.model if owner is None else owner,
+            output_name=output_name,
+            first=previous,
+            second=description,
+        )
+    selected[output_name] = description
+
+
+def _model_has_model_serializer(model: type[BaseModel]) -> bool:
+    decorators = getattr(model, "__pydantic_decorators__", None)
+    return bool(decorators is not None and getattr(decorators, "model_serializers", None))
+
+
+def _validate_explicit_nested_serializer_boundaries(
+    family: SchemaFamily[Any],
+    projection: _VersionProjection,
+    wire_model: type[BaseModel],
+    *,
+    nested: tuple[_CompiledNestedFamily, ...],
+) -> None:
+    for route in nested:
+        first = projection.field(route.path[0]).version_name
+        if first is None:
+            continue
+        target_path = (first, *route.path[1:])
+        owners = [wire_model]
+        for index, field_name in enumerate(target_path):
+            next_owners: list[type[BaseModel]] = []
+            for owner in owners:
+                if owner.model_config.get("json_encoders"):
+                    _raise_projection_unsupported(
+                        family,
+                        projection,
+                        f"explicit wire model {_model_display(owner)!r} configures "
+                        f"json_encoders along declared nested path {route.path!r}; "
+                        "custom encoders can replace child document values",
+                    )
+                for hook in _CUSTOM_MODEL_HOOKS:
+                    hook_owner = _first_defining_class(owner, hook)
+                    if hook_owner is not None and hook_owner is not BaseModel:
+                        _raise_projection_unsupported(
+                            family,
+                            projection,
+                            f"explicit wire model {_model_display(owner)!r} uses "
+                            f"custom model hook {hook} along declared nested path "
+                            f"{route.path!r}; custom schemas can relocate child "
+                            "document paths",
+                        )
+                if _model_has_model_serializer(owner):
+                    _raise_projection_unsupported(
+                        family,
+                        projection,
+                        f"explicit wire model {_model_display(owner)!r} uses a "
+                        "model-level serializer along declared nested path "
+                        f"{route.path!r}; serializers can relocate child document paths",
+                    )
+                field_info = owner.model_fields.get(field_name)
+                if field_info is None:
+                    continue
+                if _model_has_field_serializer(owner, field_name):
+                    _raise_projection_unsupported(
+                        family,
+                        projection,
+                        f"explicit wire model {_model_display(owner)!r} serializes field "
+                        f"{field_name!r} along declared nested path {route.path!r}; "
+                        "serializers can relocate child document paths",
+                    )
+                if _field_has_functional_serializer(field_info):
+                    _raise_projection_unsupported(
+                        family,
+                        projection,
+                        f"explicit wire model {_model_display(owner)!r} uses an "
+                        f"annotation-level serializer on field {field_name!r} along "
+                        f"declared nested path {route.path!r}; serializers can relocate "
+                        "child document paths",
+                    )
+                if index == len(target_path) - 1:
+                    continue
+                _collect_immediate_base_models(
+                    field_info.annotation,
+                    models=next_owners,
+                    seen=set(),
+                )
+            owners = next_owners
+
+
+def _annotation_has_functional_serializer(annotation: Any, *, seen: set[int]) -> bool:
+    if isinstance(
+        annotation,
+        (PlainSerializer, _SERIALIZE_AS_ANY_METADATA_TYPE, WrapSerializer),
+    ):
+        return True
+    if id(annotation) in seen:
+        return False
+    seen.add(id(annotation))
+    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+        return _annotation_has_functional_serializer(annotation.__value__, seen=seen)
+    arguments = get_args(annotation)
+    if get_origin(annotation) is Annotated:
+        base, *metadata = arguments
+        if any(_metadata_has_unsafe_nested_serialization(item) for item in metadata):
+            return True
+        return _annotation_has_functional_serializer(base, seen=seen)
+    return any(
+        argument is not Ellipsis and _annotation_has_functional_serializer(argument, seen=seen)
+        for argument in arguments
+    )
+
+
+def _field_has_functional_serializer(field_info: Any) -> bool:
+    return _annotation_has_functional_serializer(
+        field_info.annotation,
+        seen=set(),
+    ) or any(_metadata_has_unsafe_nested_serialization(item) for item in field_info.metadata)
+
+
+def _metadata_has_unsafe_nested_serialization(item: Any) -> bool:
+    return (
+        isinstance(
+            item,
+            (PlainSerializer, _SERIALIZE_AS_ANY_METADATA_TYPE, WrapSerializer),
+        )
+        or isinstance(item, GetPydanticSchema)
+        or _has_schema_hook(item)
+    )
+
+
+def _model_has_field_serializer(model: type[BaseModel], field_name: str) -> bool:
+    decorators = getattr(model, "__pydantic_decorators__", None)
+    serializers = None if decorators is None else getattr(decorators, "field_serializers", None)
+    if not serializers:
+        return False
+    return any(
+        field_name in decorator.info.fields or "*" in decorator.info.fields
+        for decorator in serializers.values()
+    )
+
+
+def _collect_immediate_base_models(
+    annotation: Any,
+    *,
+    models: list[type[BaseModel]],
+    seen: set[int],
+) -> None:
+    if id(annotation) in seen:
+        return
+    seen.add(id(annotation))
+    if isinstance(annotation, _TYPE_ALIAS_TYPES):
+        _collect_immediate_base_models(annotation.__value__, models=models, seen=seen)
+        return
+    if isinstance(annotation, TypeVar):
+        for value in _type_parameter_values(annotation):
+            _collect_immediate_base_models(value, models=models, seen=seen)
+        return
+    supertype = _instance_dict(annotation).get("__supertype__")
+    if supertype is not None and supertype is not annotation:
+        _collect_immediate_base_models(supertype, models=models, seen=seen)
+        return
+    try:
+        is_model = isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    except TypeError:
+        is_model = False
+    if is_model:
+        models.append(annotation)
+        return
+    if get_origin(annotation) is Literal:
+        return
+    for argument in get_args(annotation):
+        if argument is Ellipsis:
+            continue
+        _collect_immediate_base_models(argument, models=models, seen=seen)
 
 
 def _alias_paths(alias: Any) -> tuple[tuple[str | int, ...], ...]:
@@ -1283,10 +2563,8 @@ def _add_nested_family_metadata_field(
 
 
 def _metadata_wrapper_config(family: SchemaFamily[Any]) -> ConfigDict:
-    extra = family.model.model_config.get("extra")
-    if extra is None:
-        return ConfigDict()
-    return ConfigDict(extra=extra)
+    del family
+    return ConfigDict(extra="forbid", frozen=True)
 
 
 def _metadata_model_name(
