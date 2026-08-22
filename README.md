@@ -6,7 +6,7 @@ Bring version control and history to your Pydantic schemas.
   <a href="https://github.com/dariuszpanas/pydantic-versions/actions/workflows/ci.yml"><img src="https://github.com/dariuszpanas/pydantic-versions/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
   <a href="https://pypi.org/project/pydantic-versions/"><img src="https://img.shields.io/pypi/v/pydantic-versions.svg" alt="PyPI version"></a>
   <a href="https://pypi.org/project/pydantic-versions/"><img src="https://img.shields.io/pypi/pyversions/pydantic-versions.svg" alt="Supported Python versions"></a>
-  <a href="https://pydantic-versions.readthedocs.io/en/latest/"><img src="https://readthedocs.org/projects/pydantic-versions/badge/?version=latest" alt="Documentation status"></a>
+  <a href="https://pydantic-versions.readthedocs.io/en/latest/"><img src="https://img.shields.io/readthedocs/pydantic-versions/latest.svg" alt="Documentation status"></a>
   <a href="https://github.com/dariuszpanas/pydantic-versions/blob/main/LICENSE"><img src="https://img.shields.io/github/license/dariuszpanas/pydantic-versions" alt="License"></a>
 </p>
 
