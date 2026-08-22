@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args, get_origin
 
 from pydantic import AliasChoices, AliasPath, BaseModel
+from pydantic_core import to_jsonable_python
 
 from pydantic_versions._compiler import (
     _CompiledFamily,
@@ -28,6 +30,62 @@ def _runtime_label(value: object, *, family_name: str) -> str:
     return value
 
 
+def _extract_declared_fields(value: BaseModel) -> dict[str, Any]:
+    """Build a private canonical payload from validated, declared fields only."""
+    fields = type(value).model_fields
+    return {
+        name: _extract_declared_value(value.__dict__[name], config=value.model_config)
+        for name in fields
+        if name in value.__dict__
+    }
+
+
+def _extract_declared_value(value: Any, *, config: Mapping[str, Any]) -> Any:
+    if isinstance(value, BaseModel):
+        return _extract_declared_fields(value)
+    if isinstance(value, Mapping):
+        return {key: _extract_declared_value(item, config=config) for key, item in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        # Pydantic's JSON-shaped transition payload has historically represented
+        # every supported sequence and set container as a list.  Keep that shape
+        # while reading nested model values without invoking serializers.
+        return [_extract_declared_value(item, config=config) for item in value]
+    return _jsonable_declared_scalar(value, config=config)
+
+
+def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
+    if isinstance(value, bytes):
+        return to_jsonable_python(
+            value,
+            bytes_mode=config.get("ser_json_bytes", "utf8"),
+            fallback=_preserve_unknown_scalar,
+        )
+    if isinstance(value, dt.timedelta):
+        temporal_mode = config.get("ser_json_temporal")
+        if temporal_mode is not None:
+            return to_jsonable_python(
+                value,
+                temporal_mode=temporal_mode,
+                fallback=_preserve_unknown_scalar,
+            )
+        return to_jsonable_python(
+            value,
+            timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
+            fallback=_preserve_unknown_scalar,
+        )
+    if isinstance(value, dt.datetime | dt.date | dt.time):
+        return to_jsonable_python(
+            value,
+            temporal_mode=config.get("ser_json_temporal", "iso8601"),
+            fallback=_preserve_unknown_scalar,
+        )
+    return to_jsonable_python(value, fallback=_preserve_unknown_scalar)
+
+
+def _preserve_unknown_scalar(value: Any) -> Any:
+    return value
+
+
 def _validate_family[T: BaseModel](
     family: SchemaFamily[T],
     data: Any,
@@ -41,7 +99,7 @@ def _validate_family[T: BaseModel](
     payload = _to_current_names(
         compiled,
         source,
-        source_model.model_dump(by_alias=False, mode="json"),
+        _extract_declared_fields(source_model),
     )
 
     migrations_applied: list[tuple[str, str]] = []
@@ -583,7 +641,7 @@ def _convert_nested_family_payload(
         _to_current_names(
             compiled,
             source_version,
-            source_data.model_dump(by_alias=False, mode="json"),
+            _extract_declared_fields(source_data),
         )
     )
     if source_index < target_index:

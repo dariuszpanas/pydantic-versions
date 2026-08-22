@@ -35,6 +35,14 @@ copy of the application model. Omitted lifecycle settings therefore do not
 mean that the setting is unsupported on the authoritative model; they mean it
 does not belong in the generated wire contract.
 
+Preserved `extra="allow"` applies to source wire validation and inspection.
+Untyped extras remain on the returned source model, but the private transition
+mapping recursively contains declared fields only. Extras therefore do not
+populate excluded or historically removed application fields through Python
+names or validation aliases, and unrelated extras are not an implicit opaque
+relay across family conversion. Declare an extension field or envelope when
+that data must participate in migrations or current-model validation.
+
 ## Cross-cutting boundaries
 
 - Unresolved generic bases, behavioral dataclasses, typed extras, and custom

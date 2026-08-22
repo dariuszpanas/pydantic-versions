@@ -241,6 +241,13 @@ Choose an explicit ownership model:
 Do not claim transparent relay behavior without a round-trip test for the exact
 models and Pydantic configuration in use.
 
+`extra="allow"` on a wire model retains unknown values on the returned
+`source_model` for inspection, but those extras are not migration input and are
+not promoted into the authoritative current model. Family conversion extracts
+declared fields recursively so omitted application state cannot be restored by
+an alias-shaped extra. Use a declared namespaced extension mapping or a separate
+envelope when opaque values must cross that boundary.
+
 ## Useful operating modes
 
 The same primitives support several deployments:
