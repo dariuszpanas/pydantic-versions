@@ -50,7 +50,8 @@ from pydantic_versions.exceptions import (
 )
 from pydantic_versions.inspection import ConversionPlan, SchemaInventory
 
-_DEFAULT_FAMILIES: dict[type[BaseModel], SchemaFamily[Any]] = {}
+_DEFAULT_FAMILY_ATTRIBUTE = "__pydantic_versions_default_family__"
+_DEFAULT_FAMILY_MISSING = object()
 _FAMILY_LOCK = RLock()
 
 
@@ -229,15 +230,17 @@ class SchemaFamily[T: BaseModel]:
 
     def as_default(self) -> Self:
         with _FAMILY_LOCK:
-            existing = _DEFAULT_FAMILIES.get(self.model)
+            existing = _model_owned_default_family(self.model)
             if existing is None:
-                _DEFAULT_FAMILIES[self.model] = self
-            elif existing is not self:
+                setattr(self.model, _DEFAULT_FAMILY_ATTRIBUTE, self)
+            elif existing is not self and not existing._family_graph_was_rebuilt():
                 msg = (
                     f"{self.model.__name__!r} already has explicit default family "
                     f"{existing.name!r}; cannot attach {self.name!r}"
                 )
                 raise SchemaFamilySelectionError(msg)
+            elif existing is not self:
+                setattr(self.model, _DEFAULT_FAMILY_ATTRIBUTE, self)
         return self
 
     def describe(self) -> SchemaInventory:  # noqa: V105 - public consumer API
@@ -349,8 +352,9 @@ class SchemaFamily[T: BaseModel]:
         if self.model.__pydantic_core_schema__ is not compiled._model_core_schema:
             msg = (
                 f"Authoritative model {self.model.__name__!r} for schema family {self.name!r} "
-                "was rebuilt after compilation; discard this family and recreate the "
-                "schema-family declaration from the rebuilt model"
+                "was rebuilt after compilation; discard and recreate every affected "
+                "schema-family declaration, then call as_default() on the replacement "
+                "when model-only helpers use this graph"
             )
             raise SchemaCompilationError(msg)
         for nested in (*compiled.nested, *compiled.decorator_nested):
@@ -362,6 +366,24 @@ class SchemaFamily[T: BaseModel]:
                 child_compiled,
                 visited=checked,
             )
+
+    def _family_graph_was_rebuilt(self, *, visited: set[int] | None = None) -> bool:
+        checked = set() if visited is None else visited
+        if id(self) in checked:
+            return False
+        checked.add(id(self))
+        compiled = self._compiled
+        if compiled is None:
+            return any(
+                child._family_graph_was_rebuilt(visited=checked)
+                for declaration in self.nested
+                if isinstance((child := declaration.family), SchemaFamily)
+            )
+        try:
+            self._ensure_compiled_graph_unchanged(compiled)
+        except SchemaCompilationError:
+            return True
+        return False
 
     def _validate_declarations(self) -> None:
         _validate_family_declarations(
@@ -410,15 +432,30 @@ class SchemaFamily[T: BaseModel]:
                 raise DuplicateSchemaVersionError(msg)
 
 
+def _model_owned_default_family(model: type[BaseModel]) -> SchemaFamily[Any] | None:
+    selected = model.__dict__.get(_DEFAULT_FAMILY_ATTRIBUTE, _DEFAULT_FAMILY_MISSING)
+    if selected is _DEFAULT_FAMILY_MISSING:
+        return None
+    if not isinstance(selected, SchemaFamily) or selected.model is not model:
+        msg = (
+            f"{model.__name__!r} defines reserved default-family attribute "
+            f"{_DEFAULT_FAMILY_ATTRIBUTE!r} with a value that is not a SchemaFamily "
+            "owned by that exact model; rename or remove the conflicting attribute"
+        )
+        raise SchemaFamilySelectionError(msg)
+    return selected
+
+
 def _default_family_for_model(model: type[BaseModel]) -> SchemaFamily[Any] | None:
-    return _DEFAULT_FAMILIES.get(model)
+    with _FAMILY_LOCK:
+        return _model_owned_default_family(model)
 
 
 def _family_for[T: BaseModel](subject: type[T] | SchemaFamily[T]) -> SchemaFamily[T]:
     if isinstance(subject, SchemaFamily):
         return subject
     _ensure_pydantic_v2_model(subject)
-    family = _DEFAULT_FAMILIES.get(subject)
+    family = _default_family_for_model(subject)
     if family is None:
         msg = (
             f"{subject.__name__!r} has no explicit default schema family; pass a "
