@@ -24,8 +24,6 @@ from typing import (
 
 from annotated_types import GroupedMetadata, Not, Predicate
 from pydantic import (
-    AliasChoices,
-    AliasPath,
     BaseModel,
     ConfigDict,
     Discriminator,
@@ -49,9 +47,11 @@ from typing_extensions import is_typeddict as extensions_is_typeddict
 from pydantic_versions._compiler import (
     _generated_model_name,
     _identifier_component,
+    _model_display,
     _stable_digest,
     _VersionProjection,
 )
+from pydantic_versions._runtime_versioning import _alias_paths
 from pydantic_versions.exceptions import UnsupportedWireModelError
 
 if TYPE_CHECKING:
@@ -1345,16 +1345,6 @@ def _bound_annotation_parameters(
     return bindings
 
 
-def _alias_paths(alias: Any) -> tuple[tuple[str | int, ...], ...]:
-    if isinstance(alias, str):
-        return ((alias,),)
-    if isinstance(alias, AliasPath):
-        return (tuple(alias.path),)
-    if isinstance(alias, AliasChoices):
-        return tuple(path for choice in alias.choices for path in _alias_paths(choice))
-    return ()
-
-
 def _add_family_metadata_field(
     family: SchemaFamily[Any],
     version: str,
@@ -1424,13 +1414,15 @@ def _add_nested_family_metadata_field(
         field_definitions: dict[str, Any] = {field_name: Annotated[annotation, field]}
         child_model = create_model(
             _metadata_model_name(family, version, path, index),
-            __config__=_metadata_wrapper_config(family),
+            __config__=_metadata_wrapper_config(),
             __module__=family.model.__module__,
             **field_definitions,
         )
 
-    if child_model is None:  # pragma: no cover - paths are non-empty and handled above
-        _raise_unsupported(family, "family-owned metadata path cannot be empty")
+    # VersionMetadata rejects empty paths and the single-component case returns
+    # above, so the wrapper loop always produces this model. Keep that invariant
+    # visible to static analysis without a second runtime error path.
+    assert child_model is not None
     root_name = path[0]
     fields[root_name] = Annotated[
         child_model,
@@ -1444,8 +1436,7 @@ def _add_nested_family_metadata_field(
     ]
 
 
-def _metadata_wrapper_config(family: SchemaFamily[Any]) -> ConfigDict:
-    del family
+def _metadata_wrapper_config() -> ConfigDict:
     return ConfigDict(extra="forbid", frozen=True)
 
 
@@ -1575,10 +1566,6 @@ def _raise_projection_unsupported(
         f"is unsupported: {detail}"
     )
     raise UnsupportedWireModelError(msg)
-
-
-def _model_display(model: type[Any]) -> str:
-    return f"{model.__module__}.{model.__qualname__}"
 
 
 def _validate_type_alias(

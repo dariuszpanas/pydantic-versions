@@ -202,9 +202,7 @@ def _build_model_for_projection_unchecked(
 ) -> type[BaseModel]:
     model_metadata_field = _model_metadata_field(family)
     used_nested: set[tuple[str, ...]] = set()
-    nested_projection_cache: dict[
-        tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None
-    ] = {}
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel]] = {}
     fields: dict[str, Any] = {}
     for compiled_field in projection.fields:
         if compiled_field.version_name is None:

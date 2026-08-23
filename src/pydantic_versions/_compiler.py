@@ -461,7 +461,7 @@ def _nested_container_element(
     return first
 
 
-def _model_display(model: type[BaseModel]) -> str:
+def _model_display(model: type[Any]) -> str:
     return f"{model.__module__}.{model.__qualname__}"
 
 

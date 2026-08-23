@@ -41,7 +41,6 @@ def _build_family_document_adapter(
     metadata = cast(Any, family.version_metadata)
     label = projection.label
     metadata_path = metadata.path
-    _validate_family_document_adapter_schema_hooks(family, projection, body_model)
     adapter_config = dict(body_model.model_config)
     # The exact body schema remains the sole owner of materialized aliases and
     # JSON Schema callbacks. Replaying these while create_model builds the

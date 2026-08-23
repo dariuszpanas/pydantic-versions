@@ -1510,6 +1510,10 @@ def test_projected_wrapper_default_omits_non_wire_fields() -> None:
     class Wrapper(BaseModel):
         child: Child
         cache: str = Field("application-only", exclude=True)
+        conditional_cache: str = Field(
+            "application-only",
+            exclude_if=lambda _value: False,
+        )
 
     class Parent(BaseModel):
         wrapper: Wrapper = Wrapper(child=Child(value=5))
@@ -1523,6 +1527,8 @@ def test_projected_wrapper_default_omits_non_wire_fields() -> None:
     )
     historical = family.model_for("1")
 
+    wrapper_wire = historical.model_fields["wrapper"].annotation
+    assert set(wrapper_wire.model_fields) == {"child"}
     assert historical().model_dump() == {"wrapper": {"child": {"legacy_value": 5}}}
 
 
