@@ -20,7 +20,8 @@
 
 - `<command>`: <result>
 
-; Or use: Validation: not run because <specific reason>.
+; Keep multiple results as top-level `- ` list items under this heading. For
+; one result, you may use: Validation: not run because <specific reason>.
 ; Delete optional sections that do not apply and remove every template token.
 ; PR metadata supplements this body. Wrap commit prose at about 72 columns;
 ; use natural Markdown without artificial hard wrapping in PR descriptions.
