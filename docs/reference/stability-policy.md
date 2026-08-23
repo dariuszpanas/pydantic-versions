@@ -124,6 +124,11 @@ cross-release golden, unit, integration, supported-version, documentation,
 security, and isolated-package tests. A green narrow test is not evidence for a
 broad compatibility claim; the complete relevant gate must pass.
 
+CI enforces at least 95.00% statement coverage and reports the measured value to
+two decimal places. Coverage is supporting evidence rather than a target to
+game: the floor advances through reachable public-contract tests and justified
+source simplification, not new exclusions or fabricated internal states.
+
 Cross-release fixtures record their exact released-package provenance and have
 an explicit regeneration command. Current code must consume the persisted
 payloads and reproduce the stable inspection data. Fixture changes require
