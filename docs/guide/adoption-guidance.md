@@ -40,13 +40,10 @@ Patches are best when the historical payload can still be expressed as a
 generated Pydantic model.
 
 ```python
-@schema_version(
-    "1",
-    patches=[
-        field_default("timeout", 5.0),
-        field_removed("new_feature"),
-        field_renamed("retries", "attempts"),
-    ],
+V1_PATCHES = (
+    field_default("timeout", 5.0),
+    field_removed("new_feature"),
+    field_renamed("retries", "attempts"),
 )
 ```
 
@@ -166,17 +163,32 @@ timeout: 10
 
 Use `apiVersion` for CRD-like resources:
 
+<!-- pv-doc-test: adoption-version-fields -->
 ```python
+from pydantic import BaseModel
+from pydantic_versions import validate_versioned, versioned_schema
+
+
 @versioned_schema(
     name="resource",
     versions=["example.com/v1", "example.com/v2"],
     current="example.com/v2",
     version_field="apiVersion",
 )
+class Resource(BaseModel):
+    name: str
+
+
+resource = validate_versioned(
+    Resource,
+    {"apiVersion": "example.com/v1", "name": "worker"},
+)
+assert resource.current_model == Resource(name="worker")
 ```
 
 Use a tuple path when the version belongs under metadata:
 
+<!-- pv-doc-test: adoption-version-fields -->
 ```python
 @versioned_schema(
     name="document",
@@ -184,6 +196,15 @@ Use a tuple path when the version belongs under metadata:
     current="2",
     version_field=("metadata", "schema_version"),
 )
+class Document(BaseModel):
+    title: str
+
+
+document = validate_versioned(
+    Document,
+    {"metadata": {"schema_version": "1"}, "title": "Runbook"},
+)
+assert document.current_model == Document(title="Runbook")
 ```
 
 Do not rely on implicit fallback searches across several fields unless the API

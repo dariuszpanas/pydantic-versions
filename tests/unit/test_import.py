@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 
 import pydantic_versions
 
 
 def test_package_exports_version() -> None:
-    assert isinstance(pydantic_versions.__version__, str)
+    assert pydantic_versions.__version__ == distribution_version("pydantic-versions")
 
 
 def test_package_version_falls_back_when_distribution_is_missing(monkeypatch) -> None:

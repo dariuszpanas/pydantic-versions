@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dynamic Pydantic hooks and externally consumed public methods.
 
 ### Changed
+- Improved decorator-heavy nested migration scaling with call-local route
+  selection and reconciliation indexes while preserving callback order and
+  wire behavior; added a reproducible, correctness-checked benchmark without a
+  CI timing threshold.
 - Raised the enforced statement-coverage floor from 90% to 95% and report the
   measured result to two decimal places.
 - Replaced the broad private-helper coverage scaffold with cohesive public
