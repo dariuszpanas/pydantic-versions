@@ -130,13 +130,14 @@ payloads and reproduce the stable inspection data. Fixture changes require
 review and an explanation under this policy; CI never updates them implicitly.
 
 The tag-driven release path repeats the locked dependency and build-backend
-audit, strict documentation build, distribution metadata validation, and
-isolated wheel and source-archive tests before publishing. Release tags are
-immutable, and a tag is rejected unless its commit is on the default branch, so
-published artifacts and attestations remain tied to reviewed source. The
-workflow can also rehearse every build and package test from an explicitly
-selected commit without publishing; TestPyPI upload is a main-branch-only,
-separate opt-in action.
+audit, installs the project non-editably with the audited backend, and disables
+subsequent environment synchronization. It then runs a strict documentation
+build and distribution metadata validation and tests the wheel and source
+archive in isolation before publishing. Release tags are immutable, and a tag
+is rejected unless its commit is on the default branch, so published artifacts
+and attestations remain tied to reviewed source. The workflow can also rehearse
+every build and package test from an explicitly selected commit without
+publishing; TestPyPI upload is a main-branch-only, separate opt-in action.
 
 Once the package solves its defined problem, work is driven by concrete user
 feedback, bug and security reports, dependency/runtime updates, current

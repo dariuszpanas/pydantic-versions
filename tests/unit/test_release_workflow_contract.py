@@ -29,11 +29,14 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
     dependency_audit = build.index("uv run --no-sync pip-audit --strict")
     audit_input = build.index('--requirement "$RUNNER_TEMP/audit-requirements.txt"')
     project_sync = build.index(
-        "uv sync --frozen --python 3.12 --no-build-isolation",
+        "uv sync --frozen --python 3.12 --no-editable --no-build-isolation",
     )
-    quality_gates = build.index("uv run ruff format --check .")
+    quality_gates = build.index("uv run --no-sync ruff format --check .")
+    installed_package_tests = build.index(
+        "uv run --no-sync pytest --cov=pydantic_versions --cov-report=term",
+    )
     package_build = build.index("uv build --no-build-isolation")
-    metadata_check = build.index("uv run twine check --strict dist/*")
+    metadata_check = build.index("uv run --no-sync twine check --strict dist/*")
     artifact_upload = build.index("actions/upload-artifact@")
 
     assert (
@@ -44,11 +47,14 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
         < audit_input
         < project_sync
         < quality_gates
+        < installed_package_tests
         < package_build
         < metadata_check
         < artifact_upload
     )
+    assert "pytest --cov=src" not in build
     assert "continue-on-error" not in build
+    assert build.count("uv run ") == build.count("uv run --no-sync ")
 
 
 def test_release_uses_the_locked_build_backend_after_the_audit() -> None:
