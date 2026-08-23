@@ -27,6 +27,7 @@ from pydantic_versions._wire import (
     _build_model_for_projection,
     _compile_decorator_nested_families,
     _validate_automatic_wire_model,
+    _WireCompilationContext,
 )
 from pydantic_versions.declarations import (
     _DEFAULT_VERSION_METADATA,
@@ -134,12 +135,14 @@ class SchemaFamily[T: BaseModel]:
     def compile(self) -> Self:
         with _FAMILY_LOCK:
             if self._compiled is not None:
+                self._ensure_compiled_graph_unchanged(self._compiled)
                 return self
             if self._compiling:
                 msg = f"Recursive schema-family compilation is not yet supported for {self.name!r}"
                 raise SchemaCompilationError(msg)
             self._compiling = True
             try:
+                model_core_schema = self.model.__pydantic_core_schema__
                 self._validate_declarations()
                 nested = _validate_compilation_boundary(
                     name=self.name,
@@ -158,6 +161,7 @@ class SchemaFamily[T: BaseModel]:
                     projections=projections,
                     transitions=self.transitions,
                 )
+                wire_compilation = _WireCompilationContext()
                 compiled_versions = tuple(
                     _CompiledVersion(
                         projection=projection,
@@ -165,6 +169,7 @@ class SchemaFamily[T: BaseModel]:
                             self,
                             projection,
                             declaration.wire_model,
+                            compilation=wire_compilation,
                             nested=nested,
                             decorator_nested=decorator_nested,
                         ),
@@ -199,6 +204,13 @@ class SchemaFamily[T: BaseModel]:
                     nested,
                     decorator_nested,
                 )
+                if self.model.__pydantic_core_schema__ is not model_core_schema:
+                    msg = (
+                        f"Authoritative model {self.model.__name__!r} for schema family "
+                        f"{self.name!r} was rebuilt during compilation; finish rebuilding "
+                        "the model before calling compile() again"
+                    )
+                    raise SchemaCompilationError(msg)
                 self._compiled = _CompiledFamily(
                     model=self.model,
                     name=self.name,
@@ -209,6 +221,7 @@ class SchemaFamily[T: BaseModel]:
                     catalog=catalog,
                     nested=nested,
                     decorator_nested=decorator_nested,
+                    _model_core_schema=model_core_schema,
                 )
             finally:
                 self._compiling = False
@@ -322,6 +335,33 @@ class SchemaFamily[T: BaseModel]:
             msg = f"Schema family {self.name!r} did not publish compiled state"
             raise SchemaCompilationError(msg)
         return self._compiled
+
+    def _ensure_compiled_graph_unchanged(
+        self,
+        compiled: _CompiledFamily,
+        *,
+        visited: set[int] | None = None,
+    ) -> None:
+        checked = set() if visited is None else visited
+        if id(self) in checked:
+            return
+        checked.add(id(self))
+        if self.model.__pydantic_core_schema__ is not compiled._model_core_schema:
+            msg = (
+                f"Authoritative model {self.model.__name__!r} for schema family {self.name!r} "
+                "was rebuilt after compilation; discard this family and recreate the "
+                "schema-family declaration from the rebuilt model"
+            )
+            raise SchemaCompilationError(msg)
+        for nested in (*compiled.nested, *compiled.decorator_nested):
+            child_family = nested.family
+            child_compiled = child_family._compiled
+            # A parent cannot publish until every nested projection has compiled.
+            assert child_compiled is not None
+            child_family._ensure_compiled_graph_unchanged(
+                child_compiled,
+                visited=checked,
+            )
 
     def _validate_declarations(self) -> None:
         _validate_family_declarations(

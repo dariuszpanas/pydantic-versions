@@ -4,7 +4,8 @@ import json
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from copy import copy, deepcopy
-from dataclasses import is_dataclass
+from dataclasses import dataclass, is_dataclass
+from dataclasses import field as dataclass_field
 from functools import reduce
 from operator import or_
 from types import GenericAlias, MemberDescriptorType, UnionType
@@ -220,7 +221,11 @@ _CUSTOM_MODEL_HOOKS = (
     "__get_pydantic_json_schema__",
     "model_json_schema",
 )
-_HASHABLE_MODEL_CACHE: dict[type[BaseModel], type[BaseModel]] = {}
+
+
+@dataclass
+class _WireCompilationContext:
+    hashable_models: dict[type[BaseModel], type[BaseModel]] = dataclass_field(default_factory=dict)
 
 
 def _validate_automatic_wire_model(family: SchemaFamily[Any]) -> None:
@@ -256,6 +261,8 @@ def _build_model_for_projection(
     family: SchemaFamily[Any],
     projection: _VersionProjection,
     wire_model: type[BaseModel] | None,
+    *,
+    compilation: _WireCompilationContext,
     nested: tuple[_CompiledNestedFamily, ...] = (),
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...] = (),
 ) -> type[BaseModel]:
@@ -297,6 +304,7 @@ def _build_model_for_projection(
         return _build_model_for_projection_unchecked(
             family,
             projection,
+            compilation=compilation,
             nested=nested,
             decorator_nested=decorator_nested,
         )
@@ -1141,6 +1149,8 @@ def _validate_explicit_wire_model_metadata(
 def _build_model_for_projection_unchecked(
     family: SchemaFamily[Any],
     projection: _VersionProjection,
+    *,
+    compilation: _WireCompilationContext,
     nested: tuple[_CompiledNestedFamily, ...] = (),
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...] = (),
 ) -> type[BaseModel]:
@@ -1204,6 +1214,7 @@ def _build_model_for_projection_unchecked(
             field_dict["annotation"],
             projection.label,
             family,
+            compilation=compilation,
             nested=nested,
             decorator_nested=decorator_nested,
             field_path=(compiled_field.current_name,),
@@ -3258,10 +3269,14 @@ def _compat_child_family(
     return child
 
 
-def _set_element_wire_model(model: type[BaseModel]) -> type[BaseModel]:
+def _set_element_wire_model(
+    model: type[BaseModel],
+    *,
+    compilation: _WireCompilationContext,
+) -> type[BaseModel]:
     if model.model_config.get("frozen"):
         return model
-    cached = _HASHABLE_MODEL_CACHE.get(model)
+    cached = compilation.hashable_models.get(model)
     if cached is not None:
         return cached
     frozen_model = create_model(
@@ -3271,7 +3286,7 @@ def _set_element_wire_model(model: type[BaseModel]) -> type[BaseModel]:
         __config__=ConfigDict(frozen=True),
     )
     frozen_model.model_rebuild(force=True)
-    _HASHABLE_MODEL_CACHE[model] = frozen_model
+    compilation.hashable_models[model] = frozen_model
     return frozen_model
 
 
@@ -3280,6 +3295,7 @@ def _rewrite_annotation(
     version: str,
     family: SchemaFamily[Any],
     *,
+    compilation: _WireCompilationContext,
     nested: tuple[_CompiledNestedFamily, ...],
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
     field_path: tuple[str, ...],
@@ -3301,7 +3317,11 @@ def _rewrite_annotation(
     ):
         used_nested.add(child.path)
         family_model = child.family.model_for(child.child_label(version))
-        return _set_element_wire_model(family_model) if in_set_element else family_model
+        return (
+            _set_element_wire_model(family_model, compilation=compilation)
+            if in_set_element
+            else family_model
+        )
     decorator_child = (
         _find_decorator_family_for_model(decorator_nested, field_path, annotation)
         if allow_child_projection
@@ -3309,7 +3329,11 @@ def _rewrite_annotation(
     )
     if decorator_child is not None:
         family_model = decorator_child.family.model_for(version)
-        return _set_element_wire_model(family_model) if in_set_element else family_model
+        return (
+            _set_element_wire_model(family_model, compilation=compilation)
+            if in_set_element
+            else family_model
+        )
 
     if isinstance(annotation, _TYPE_ALIAS_TYPES):
         _validate_type_alias(family, field_name, annotation)
@@ -3330,6 +3354,7 @@ def _rewrite_annotation(
                 annotation,
                 version,
                 family,
+                compilation=compilation,
                 field_name=field_name,
                 field_path=field_path,
                 nested=nested_families,
@@ -3351,6 +3376,7 @@ def _rewrite_annotation(
             base,
             version,
             family,
+            compilation=compilation,
             nested=nested,
             decorator_nested=decorator_nested,
             field_path=field_path,
@@ -3389,6 +3415,7 @@ def _rewrite_annotation(
             arg,
             version,
             family,
+            compilation=compilation,
             field_name=field_name,
             field_path=field_path,
             allow_child_projection=allow_child_projection and legacy_container,
@@ -3428,6 +3455,7 @@ def _rewrite_nested_model(
     version: str,
     owner: SchemaFamily[Any],
     *,
+    compilation: _WireCompilationContext,
     field_name: str,
     field_path: tuple[str, ...],
     nested: tuple[_CompiledNestedFamily, ...],
@@ -3474,6 +3502,7 @@ def _rewrite_nested_model(
                 source["annotation"],
                 version,
                 owner,
+                compilation=compilation,
                 nested=nested,
                 decorator_nested=decorator_nested,
                 field_path=field_path + (source_name,),
@@ -3510,7 +3539,10 @@ def _rewrite_nested_model(
         )
         nested_projection.model_rebuild(force=True)
         if in_set_element:
-            nested_projection = _set_element_wire_model(nested_projection)
+            nested_projection = _set_element_wire_model(
+                nested_projection,
+                compilation=compilation,
+            )
     except UnsupportedWireModelError:
         raise
     except Exception as exc:

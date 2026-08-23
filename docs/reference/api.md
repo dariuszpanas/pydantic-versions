@@ -42,7 +42,14 @@ declaration sequence and has no default-selection side effect.
 
 Compilation is idempotent and thread-safe. A family owns its generated-model
 identities and cache, so two families can reuse one current model without
-sharing state.
+sharing state. Rebuild incomplete authoritative models before compilation. A
+forced `model_rebuild()` after compilation invalidates the compiled family;
+dependent parent families are invalidated transitively. Discard the affected
+family graph and recreate its declarations from fully rebuilt models rather
+than mixing stale projections with replacement Pydantic core schemas.
+Forced rebuilds must not race family operations. A decorator-managed default
+cannot be rebound on the same model class; redeclare and reinitialize those
+models, or use a new explicit family graph.
 
 ### `SchemaVersion`
 

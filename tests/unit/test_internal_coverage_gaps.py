@@ -1672,10 +1672,12 @@ def test_wire_grouped_metadata_and_schema_hook_type_alias() -> None:
 
 
 def test_wire_decorator_child_mismatch_and_set_element() -> None:
-    from pydantic_versions._wire import _set_element_wire_model
+    from pydantic_versions._wire import _set_element_wire_model, _WireCompilationContext
 
     class FrozenModel(BaseModel):
         model_config = ConfigDict(frozen=True)
         val: int
 
-    assert _set_element_wire_model(FrozenModel) is FrozenModel
+    assert (
+        _set_element_wire_model(FrozenModel, compilation=_WireCompilationContext()) is FrozenModel
+    )
