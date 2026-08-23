@@ -1,10 +1,8 @@
 # Stability and Compatibility Policy
 
 `pydantic-versions` uses Semantic Versioning for the deliberate public
-contract described here. This policy becomes the compatibility promise at
-1.0.0. During the remaining 0.x releases, the project may still remove an
-accidental placeholder or correct a mismatched guarantee before freezing that
-surface; those changes are documented in the changelog.
+contract described here. This policy is the compatibility promise for the 1.x
+release series beginning with 1.0.0.
 
 Stable does not mean feature-complete. It means that the behavior the package
 claims to support is deliberate, tested, and changed under explicit versioning
@@ -78,7 +76,7 @@ not accepted by regenerating the fixture silently.
 
 ## Semantic Versioning rules
 
-Within 1.x, a major release is required to:
+A new major release is required to:
 
 - remove or rename a public export;
 - make a supported call signature incompatible;
@@ -120,12 +118,13 @@ The current supported range is authoritative in package metadata and the
 the lowest supported Pydantic version, the locked environment, the latest
 allowed Pydantic version, and every supported Python minor.
 
-Adding support can occur in a minor or patch release. Dropping an end-of-life
-Python minor or raising the Pydantic lower bound is a maintenance compatibility
-change: it occurs in a minor release, is called out prominently in the
-changelog, and must be justified by upstream support, correctness, security, or
-standards alignment. The `<3.0` upper bound remains until Pydantic 3 support is
-deliberately designed and tested.
+Adding support for a new Python or Pydantic version can occur in a minor or
+patch release. Dropping an end-of-life Python minor or raising the Pydantic
+lower bound is a maintenance compatibility change: it occurs in a minor
+release, is called out prominently in the changelog, and must be justified by
+upstream support, correctness, security, or standards alignment. The `<3.0`
+upper bound remains until Pydantic 3 support is deliberately designed and
+tested.
 
 Dependency updates that remain inside the declared support ranges are normal
 maintenance and do not by themselves require a feature release.

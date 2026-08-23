@@ -24,7 +24,7 @@ concurrency:
 
 env:
   EXPECTED_RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-  UV_VERSION: "0.11.31"
+  UV_VERSION: "0.12.5"
 
 jobs:
   build:

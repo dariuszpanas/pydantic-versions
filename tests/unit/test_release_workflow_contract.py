@@ -27,6 +27,7 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
     dependency_audit = build.index("uv run --no-sync pip-audit --strict")
     audit_input = build.index('--requirement "$RUNNER_TEMP/audit-requirements.txt"')
     project_sync = build.index("uv sync --frozen --no-editable --no-build-isolation")
+    release_metadata = build.index("uv run --no-sync python scripts/validate_release.py")
     quality_gates = build.index("uv run --no-sync ruff format --check .")
     dead_code_gate = build.index("uv run --no-sync vulture")
     installed_package_tests = build.index(
@@ -44,6 +45,7 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
         < dependency_audit
         < audit_input
         < project_sync
+        < release_metadata
         < quality_gates
         < dead_code_gate
         < installed_package_tests

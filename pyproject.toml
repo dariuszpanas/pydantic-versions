@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydantic-versions"
-version = "0.3.0"
+version = "1.0.0"
 description = "Bring version control and history to your Pydantic schemas"
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ keywords = [
     "migrations",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
@@ -32,7 +32,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "annotated-types>=0.6.0",
+    # pydantic-core remains version-coupled through Pydantic's exact requirement.
     "pydantic>=2.12.3,<3.0",
+    "typing-extensions>=4.14.1",
 ]
 
 [project.urls]
