@@ -1,5 +1,14 @@
 # API Reference
 
+## Package metadata
+
+### `__version__`
+
+`__version__: str` reports the version of the installed
+`pydantic-versions` distribution. It is diagnostic library metadata, not an
+application schema label. Use a family's declared version labels and configured
+version metadata for application payloads.
+
 ## External declarations
 
 ### `SchemaFamily`
