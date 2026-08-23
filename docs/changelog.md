@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added public-behavior regression coverage for canonical containers, opaque
   values, decorator-discovered nested families, generated schemas, aliases,
   default factories, and invalid declared contracts.
+- Added a production-only Vulture gate with rule-specific local exceptions for
+  dynamic Pydantic hooks and externally consumed public methods.
 
 ### Changed
 - Raised the enforced statement-coverage floor from 90% to 95% and report the
@@ -89,6 +91,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   participate in deterministic plans, and fail closed for unsupported shapes.
 
 ### Removed
+- Removed a coverage-masked runtime wrapper with no production caller and two
+  undocumented legacy type aliases that were never part of the package-root
+  public contract.
 - Removed the unused `VersionedValidationError` placeholder from the public
   package surface before the 1.0.0 contract freeze.
 

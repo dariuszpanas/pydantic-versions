@@ -19,6 +19,7 @@ make ci
 - `make format`: format with Ruff.
 - `make lint`: lint and auto-fix with Ruff.
 - `make typecheck`: run `ty` plus the external mypy consumer contract.
+- `make dead-code`: scan production code with Vulture and reviewed local exceptions.
 - `make test`: run the test suite.
 - `make docs-build`: build the documentation site.
 

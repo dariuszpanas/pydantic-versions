@@ -39,6 +39,9 @@ jobs:
       - name: Check linting
         run: uv run ruff check .
 
+      - name: Check for dead production code
+        run: uv run vulture
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest

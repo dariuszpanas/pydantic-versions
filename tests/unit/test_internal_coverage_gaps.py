@@ -1356,7 +1356,6 @@ def test_runtime_more_pruning_and_nested_collection_kinds() -> None:
     from pydantic_versions._runtime import (
         _apply_nested_family_migrations,
         _nested_family_collection_kind,
-        _prune_nested_family_metadata,
         _prune_nested_family_metadata_at_path,
         _prune_nested_family_metadata_payload,
     )
@@ -1402,12 +1401,10 @@ def test_runtime_more_pruning_and_nested_collection_kinds() -> None:
     )
     assert kind is None
 
-    # _prune_nested_family_metadata with nested
-    payload = {"items": [{"schema_version": "v1", "val": 1}]}
-    _prune_nested_family_metadata(payload=payload, compiled=parent_compiled)
-
     # _prune_nested_family_metadata_payload with nested
+    payload = {"items": [{"schema_version": "v1", "val": 1}]}
     _prune_nested_family_metadata_payload(payload, parent_compiled)
+    assert payload == {"items": [{"val": 1}]}
 
     # _prune_nested_family_metadata_at_path set & frozenset multi-level path
     item = HashableDict({"val": 1})
