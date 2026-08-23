@@ -88,11 +88,11 @@ def test_dead_code_gate_scans_production_with_local_exceptions() -> None:
         if "# noqa: V" in line
     }
     assert vulture_exceptions == {
-        "src/pydantic_versions/_wire.py:adapter.__pydantic_computed_fields__ = dict(  "
+        "src/pydantic_versions/_wire_document.py:adapter.__pydantic_computed_fields__ = dict(  "
         "# noqa: V101 - Pydantic reads this",
-        "src/pydantic_versions/_wire.py:copied.alias_priority = 2  "
+        "src/pydantic_versions/_wire_document.py:copied.alias_priority = 2  "
         "# noqa: V101 - Pydantic reads copied metadata",
-        "src/pydantic_versions/_wire.py:def __init__(self, /, **data: Any) -> None:  "
+        "src/pydantic_versions/_wire_document.py:def __init__(self, /, **data: Any) -> None:  "
         "# noqa: V103 - Pydantic entry point",
         "src/pydantic_versions/family.py:def defaults_for(  # noqa: V105 - public consumer API",
         "src/pydantic_versions/family.py:def describe(self) -> SchemaInventory:  "
