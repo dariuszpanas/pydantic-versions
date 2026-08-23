@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from pydantic_versions import SchemaFamily, SchemaVersion, UnsupportedWireModelError
-from pydantic_versions._wire import (
+from pydantic_versions._wire_contract import (
     _is_exact_module_member,
     _is_typing_reflection_owner,
     _validate_type_alias,
