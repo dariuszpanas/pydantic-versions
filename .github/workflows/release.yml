@@ -69,29 +69,29 @@ jobs:
             --requirement "$RUNNER_TEMP/audit-requirements.txt"
 
       - name: Install project with the audited build backend
-        run: uv sync --frozen --python 3.12 --no-build-isolation
+        run: uv sync --frozen --python 3.12 --no-editable --no-build-isolation
 
       - name: Validate release metadata
         id: release-metadata
         run: >-
-          uv run python scripts/validate_release.py
+          uv run --no-sync python scripts/validate_release.py
           "$EXPECTED_RELEASE_VERSION"
           --github-output "$GITHUB_OUTPUT"
 
       - name: Run release quality gates
         run: |
-          uv run ruff format --check .
-          uv run ruff check .
-          uv run ty check
-          uv run mypy --strict tests/typing/schema_family_contract.py
-          uv run pytest --cov=src --cov-report=term
-          uv run zensical build --strict
+          uv run --no-sync ruff format --check .
+          uv run --no-sync ruff check .
+          uv run --no-sync ty check
+          uv run --no-sync mypy --strict tests/typing/schema_family_contract.py
+          uv run --no-sync pytest --cov=pydantic_versions --cov-report=term
+          uv run --no-sync zensical build --strict
 
       - name: Build package
         run: uv build --no-build-isolation
 
       - name: Check distribution metadata
-        run: uv run twine check --strict dist/*
+        run: uv run --no-sync twine check --strict dist/*
 
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
