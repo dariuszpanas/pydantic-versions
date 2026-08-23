@@ -227,10 +227,10 @@ class SchemaFamily[T: BaseModel]:
                 raise SchemaFamilySelectionError(msg)
         return self
 
-    def describe(self) -> SchemaInventory:
+    def describe(self) -> SchemaInventory:  # noqa: V105 - public consumer API
         return self._compiled_family().catalog.inventory
 
-    def plan_validation(self, source_version: str) -> ConversionPlan:
+    def plan_validation(self, source_version: str) -> ConversionPlan:  # noqa: V105 - public API
         requested = _runtime_label(source_version, family_name=self.name)
         compiled = self._compiled_family()
         return compiled.catalog.validation_plans[compiled.index(requested)]
@@ -286,7 +286,7 @@ class SchemaFamily[T: BaseModel]:
     def validate(self, data: Any, *, version: str | None = None) -> VersionedValidation[T]:
         return _validate_family(self, data, version=version)
 
-    def defaults_for(
+    def defaults_for(  # noqa: V105 - public consumer API
         self,
         *,
         version: str,

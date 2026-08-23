@@ -82,6 +82,7 @@ jobs:
         run: |
           uv run --no-sync ruff format --check .
           uv run --no-sync ruff check .
+          uv run --no-sync vulture
           uv run --no-sync ty check
           uv run --no-sync mypy --strict tests/typing/schema_family_contract.py
           uv run --no-sync pytest --cov=pydantic_versions --cov-report=term

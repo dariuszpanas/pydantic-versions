@@ -2915,27 +2915,6 @@ def _has_duplicate_payload(payload: list[Any]) -> bool:
     return False
 
 
-def _prune_nested_family_metadata(
-    *,
-    payload: dict[str, Any],
-    compiled: _CompiledFamily,
-    parent_label: str | None = None,
-) -> None:
-    target_label = compiled.current_version if parent_label is None else parent_label
-    target = compiled.version(target_label)
-    for nested in compiled.nested:
-        target_path = _target_nested_path(target, nested.path)
-        if target_path is None:
-            continue
-        _prune_nested_family_metadata_at_path(
-            payload=payload,
-            model=target.model,
-            path=target_path,
-            family=nested.family._compiled_family(),
-            target_label=nested.child_label(target_label),
-        )
-
-
 def _prune_nested_family_metadata_payload(
     payload: Any,
     family: _CompiledFamily,

@@ -1,11 +1,11 @@
 # pydantic-versions Makefile
 # Core development commands for local work and CI parity.
 
-.PHONY: all install format lint typecheck test test-cov check ci build clean help
+.PHONY: all install format lint typecheck dead-code test test-cov check ci build clean help
 .PHONY: docs-build docs-build-strict docs-serve
 
 # Default target - run all checks
-all: format lint typecheck test
+all: format lint typecheck dead-code test
 
 # Install dependencies
 install:
@@ -24,6 +24,10 @@ typecheck:
 	uv run ty check
 	uv run mypy --strict tests/typing/schema_family_contract.py
 
+# Scan production code for unreachable or unreferenced definitions
+dead-code:
+	uv run vulture
+
 # Run all tests
 test:
 	uv run pytest
@@ -32,11 +36,12 @@ test:
 test-cov:
 	uv run pytest --cov=src --cov-report=html --cov-report=term
 
-# Run lint and typecheck (no formatting)
+# Run lint, typecheck, and dead-code analysis (no formatting)
 check:
 	uv run ruff check .
 	uv run ty check
 	uv run mypy --strict tests/typing/schema_family_contract.py
+	uv run vulture
 
 # CI check - all validations without modifications
 ci:
@@ -44,6 +49,7 @@ ci:
 	uv run ruff check .
 	uv run ty check
 	uv run mypy --strict tests/typing/schema_family_contract.py
+	uv run vulture
 	uv run pytest --cov=src --cov-report=xml --cov-report=term
 	@echo "All CI checks passed!"
 
@@ -78,7 +84,8 @@ help:
 	@echo "  format            - Format code with Ruff"
 	@echo "  lint              - Lint code with Ruff (auto-fix)"
 	@echo "  typecheck         - Run ty and the external mypy consumer contract"
-	@echo "  check             - Run lint + typecheck (no formatting)"
+	@echo "  dead-code         - Scan production code with Vulture"
+	@echo "  check             - Run lint, typecheck, and dead-code analysis"
 	@echo ""
 	@echo "Testing:"
 	@echo "  test              - Run all tests"
@@ -88,7 +95,7 @@ help:
 	@echo "  docs-serve        - Serve docs locally at http://127.0.0.1:8000"
 	@echo ""
 	@echo "CI/CD:"
-	@echo "  all               - Run format, lint, typecheck, test"
+	@echo "  all               - Run format, lint, typecheck, dead-code, test"
 	@echo "  ci                - Run all checks (no modifications)"
 	@echo "  build             - Build the package"
 	@echo "  clean             - Clean cache and build files"

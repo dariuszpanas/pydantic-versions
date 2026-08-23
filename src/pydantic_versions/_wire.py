@@ -404,7 +404,7 @@ def _build_family_document_adapter(
             )
             raise TypeError(msg)
 
-        def __init__(self, /, **data: Any) -> None:
+        def __init__(self, /, **data: Any) -> None:  # noqa: V103 - Pydantic entry point
             validated = type(self).model_validate(data)
             _FamilyDocumentAdapterBase._replace_document_adapter_state(self, validated)
 
@@ -795,7 +795,9 @@ def _build_family_document_adapter(
         __module__=family.model.__module__,
         **fields,
     )
-    adapter.__pydantic_computed_fields__ = dict(body_model.model_computed_fields)
+    adapter.__pydantic_computed_fields__ = dict(  # noqa: V101 - Pydantic reads this
+        body_model.model_computed_fields,
+    )
     _validate_object_schema(family, projection, adapter, mode="validation")
     _validate_object_schema(family, projection, adapter, mode="serialization")
     return adapter
@@ -852,7 +854,7 @@ def _copy_document_field_info(field_info: Any) -> Any:
             field_info.serialization_alias,
         )
     ):
-        copied.alias_priority = 2
+        copied.alias_priority = 2  # noqa: V101 - Pydantic reads copied metadata
     return copied
 
 

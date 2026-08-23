@@ -28,6 +28,7 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
     audit_input = build.index('--requirement "$RUNNER_TEMP/audit-requirements.txt"')
     project_sync = build.index("uv sync --frozen --no-editable --no-build-isolation")
     quality_gates = build.index("uv run --no-sync ruff format --check .")
+    dead_code_gate = build.index("uv run --no-sync vulture")
     installed_package_tests = build.index(
         "uv run --no-sync pytest --cov=pydantic_versions --cov-report=term",
     )
@@ -44,6 +45,7 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
         < audit_input
         < project_sync
         < quality_gates
+        < dead_code_gate
         < installed_package_tests
         < package_build
         < metadata_check
@@ -64,6 +66,49 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
     ]
     assert build.count("uv run ") == build.count("uv run --no-sync ")
     assert build.count("uv build ") == build.count(build_command)
+
+
+def test_dead_code_gate_scans_production_with_local_exceptions() -> None:
+    pyproject = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+    )
+    vulture = pyproject["tool"]["vulture"]
+
+    assert "vulture>=2.16" in pyproject["dependency-groups"]["dev"]
+    assert vulture == {
+        "min_confidence": 60,
+        "paths": ["src"],
+        "sort_by_size": True,
+    }
+
+    vulture_exceptions = {
+        f"{path.relative_to(PROJECT_ROOT).as_posix()}:{line.strip()}"
+        for path in (PROJECT_ROOT / "src").rglob("*.py")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "# noqa: V" in line
+    }
+    assert vulture_exceptions == {
+        "src/pydantic_versions/_wire.py:adapter.__pydantic_computed_fields__ = dict(  "
+        "# noqa: V101 - Pydantic reads this",
+        "src/pydantic_versions/_wire.py:copied.alias_priority = 2  "
+        "# noqa: V101 - Pydantic reads copied metadata",
+        "src/pydantic_versions/_wire.py:def __init__(self, /, **data: Any) -> None:  "
+        "# noqa: V103 - Pydantic entry point",
+        "src/pydantic_versions/family.py:def defaults_for(  # noqa: V105 - public consumer API",
+        "src/pydantic_versions/family.py:def describe(self) -> SchemaInventory:  "
+        "# noqa: V105 - public consumer API",
+        "src/pydantic_versions/family.py:def plan_validation(self, source_version: str) -> "
+        "ConversionPlan:  # noqa: V105 - public API",
+    }
+
+    makefile = (PROJECT_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert makefile.count("\tuv run vulture\n") == 3
+
+    ci_workflow = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8",
+    )
+    assert ci_workflow.count("run: uv run vulture") == 1
+    assert _release_workflow().count("uv run --no-sync vulture") == 1
 
 
 def test_release_uses_the_locked_build_backend_after_the_audit() -> None:

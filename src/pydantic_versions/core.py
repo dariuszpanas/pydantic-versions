@@ -43,9 +43,6 @@ from pydantic_versions.exceptions import (
 from pydantic_versions.family import SchemaFamily, _family_for
 from pydantic_versions.patches import VersionPatch
 
-MigrationFunc = TransitionFunc
-VersionField = VersionPath
-
 _PENDING_ATTR = "__pydantic_versions_pending__"
 
 
