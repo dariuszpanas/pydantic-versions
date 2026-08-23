@@ -610,7 +610,7 @@ def test_nested_model_owned_metadata_is_verified_after_parent_serialization() ->
 
         @model_serializer
         def serialize_model(self) -> dict[str, Any]:
-            return {"schema_version": "wrong", "value": self.value}
+            return {"schema_version": "model-owned-secret", "value": self.value}
 
     child_family = SchemaFamily(
         model=Child,
@@ -641,11 +641,16 @@ def test_nested_model_owned_metadata_is_verified_after_parent_serialization() ->
         nested=(NestedFamily("child", child_family, matching_labels()),),
     )
 
-    with pytest.raises(ValueError, match="serialized version metadata.*wrong.*expected '1'"):
+    with pytest.raises(
+        ValueError,
+        match="serialized version metadata.*as a different label.*expected '1'",
+    ) as caught:
         parent_family.dump(
             version="1",
             data=Parent(child=Child(schema_version="2", value=7)),
         )
+
+    assert "model-owned-secret" not in str(caught.value)
 
 
 def test_nested_target_serializer_must_remain_object_shaped() -> None:

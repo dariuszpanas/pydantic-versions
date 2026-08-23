@@ -892,6 +892,8 @@ def test_explicit_wire_model_prunes_a_structural_dataclass_body() -> None:
 
 
 def test_explicit_wire_model_rejects_a_relocated_dataclass_body() -> None:
+    serializer_calls = 0
+
     class Child(BaseModel):
         value: int
 
@@ -911,6 +913,8 @@ def test_explicit_wire_model_rejects_a_relocated_dataclass_body() -> None:
 
         @model_serializer
         def serialize(self) -> str:
+            nonlocal serializer_calls
+            serializer_calls += 1
             return "relocated"
 
     class HistoricalParent(BaseModel):
@@ -926,8 +930,13 @@ def test_explicit_wire_model_rejects_a_relocated_dataclass_body() -> None:
         nested=(NestedFamily("child", child_family, matching_labels()),),
     )
 
-    with pytest.raises(ValueError, match="Nested target wire model.*must serialize to an object"):
-        family.dump(version="1", data=Parent(child=Child(value=8)))
+    with pytest.raises(
+        UnsupportedWireModelError,
+        match="model-level serializer on a managed dataclass leaf",
+    ):
+        family.compile()
+
+    assert serializer_calls == 0
 
 
 def test_explicit_wire_model_prunes_a_typed_dict_union_arm() -> None:

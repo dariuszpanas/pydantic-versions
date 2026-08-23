@@ -130,11 +130,56 @@ would not have once-only semantics. Annotation or decorator serializers that
 can relocate a declared nested-family path are rejected for the same reason,
 as are custom model schema hooks and legacy `json_encoders` on that path.
 
+Explicit historical bodies may reshape a managed nested-family value only
+within the [declared historical annotation
+grammar](generated-wire-contracts.md#explicit-historical-nested-shapes). Use a
+`TypedDict`, Pydantic model, or structural dataclass when that historical leaf is
+mapping-shaped; a broad `dict`, `Mapping`, `Any`, abstract container, or custom
+carrier cannot establish static ownership and is rejected during compilation.
+Only exact built-in `list`, `tuple`, `set`, and `frozenset` containers with
+supported element annotations compose managed values.
+
+A concrete scalar replacement owns whatever JSON shape its normal Pydantic
+serialization produces. In particular, an object-shaped enum value is not
+reinterpreted as a child document merely because it contains a key named like
+the child version field. Conversely, omitting a managed route reserves that
+output location; aliases, computed fields, model serializers, and extras cannot
+reintroduce it through another channel.
+
+A mapping-valued enum cannot share an overlapping union position with a
+structural model, dataclass, or `TypedDict` arm. Pydantic's collection coercion
+and smart-union selection make that branch identity unrecoverable, so the
+declaration fails compilation.
+
+Current-model `Field(exclude=True)` and `exclude_if` declarations remain
+application-only state and are omitted from generated wire projections. An
+explicit historical body must instead leave an intentionally absent managed
+route undeclared. Declaring the route and attaching a serialization exclusion
+is rejected because validation would retain a value that serialization removes
+unconditionally or conditionally.
+
+Before explicit source-body validators execute, family-owned metadata is
+preflighted through every structurally viable declared arm and its effective
+validation aliases. After validation, the selected managed value must still
+conform to a declared branch.
+
+After an explicit target model validates data or constructs defaults, the
+family verifies that every managed value still conforms to its declared
+annotation before pruning child-owned metadata and serializing the target. The
+same check descends through generated parent adapters into instantiated
+explicit child targets and independently declared model, dataclass, and
+TypedDict representations of those children. Any family-owned metadata inside
+those structural representations is verified before removal.
+Explicit-source validation applies the same check before migration. Validators
+may normalize a value while preserving a declared branch, but a field or model
+validator that returns an out-of-contract shape fails with a contextual,
+payload-free `ValueError`. Pydantic accepting such an after-validator result is
+therefore not permission to change the managed wire shape silently.
+
 Attribute input is available only when the explicit body sets
-`ConfigDict(from_attributes=True)`. The adapter preflights family-owned metadata
-before executing body validators. Per-call `from_attributes=True` cannot enable
-attribute input for a body that did not declare it; use a mapping or an exact
-body instance instead. Allowed extras remain available, but an extra that
+`ConfigDict(from_attributes=True)`. Per-call `from_attributes=True` cannot
+enable attribute input for a body that did not declare it; use a mapping or an
+exact body instance instead. Allowed extras remain available, but an extra that
 overwrites an active field or computed-field serialization name fails closed.
 The facade exposes the declared Pydantic state and standard model operations;
 it does not proxy arbitrary body methods. Self-references created inside

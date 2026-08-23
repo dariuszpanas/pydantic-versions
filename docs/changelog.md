@@ -67,10 +67,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nested metadata envelopes, preflight declared attribute input, and reject
   output-name collisions from allowed extras.
 - Preserved structurally divergent explicit nested representations by selecting
-  the validated runtime arm of heterogeneous and same-origin generic unions.
-  Scalar arms remain scalar, while BaseModel, dataclass, TypedDict, and mapping
-  output has child-owned metadata pruned; object serializers that relocate a
-  managed child still fail closed.
+  recoverable validated union arms, including bound generic TypedDict shapes.
+  Scalar arms remain scalar, while statically owned BaseModel, structural
+  dataclass, TypedDict, and exact built-in-container outputs have child metadata
+  pruned. Alias-wrapped containers follow the same pruning contract, while
+  unambiguous object-shaped scalar output, including mapping-valued enums,
+  retains scalar-owned data. Empty tuples and both supported TypedDict providers
+  follow the same explicit contract.
+- Rejected broad or abstract carriers, serializers affecting managed routes,
+  alternate output at an omitted managed route, and runtime-unrecoverable union
+  arms. Mapping-enum/structural arms and distinct specializations of one
+  runtime-erased generic dataclass origin now fail at compilation when they
+  occupy overlapping reachable positions. Serialization exclusions on a
+  declared explicit managed route use the effective historical field contract
+  and also fail at compilation. This does not change automatic omission of
+  current-model `Field(exclude=True)` or `exclude_if` fields.
+- Preflighted raw family metadata through every structurally viable arm before
+  source-body validators execute. Source validator shape violations now fail
+  before migration; target and nested-target violations fail before metadata
+  pruning or serialization, with payload-safe diagnostics.
 - Rejected foreign model instances returned by explicit wire model validators
   before document-adapter construction, preventing validated user data from
   being replaced by facade defaults during validation or rendering.
