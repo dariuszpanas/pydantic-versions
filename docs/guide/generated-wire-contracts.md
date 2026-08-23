@@ -95,6 +95,19 @@ configuration, or custom schema hooks that automatic generation would
 otherwise weaken or discard. Those models remain supported as unchanged field
 annotations when no decorator route requires their projection.
 
+Compilation snapshots the authoritative model's Pydantic core schema. A
+subsequent forced `model_rebuild()` invalidates that family, even when the
+rebuilt schema is semantically equivalent, because its generated projections
+and conversion plans still describe the original schema object. Runtime family
+operations then raise `SchemaCompilationError`. Dependent parent families are
+invalidated transitively because their wire models embed the child projection.
+Discard the affected family graph and recreate its declarations from fully
+rebuilt models. An ordinary no-op `model_rebuild()` remains safe.
+Do not race a forced rebuild with compilation or runtime family operations.
+For decorator-managed default families, redeclare the affected model classes
+and reinitialize the application, or switch callers to a newly constructed
+explicit `SchemaFamily` graph.
+
 An excluded field is also absent from the generated wire model. This is the
 supported way to keep server-internal state on the authoritative model while
 using that model as the source for a document contract. The exclusion is not
@@ -231,4 +244,6 @@ family name, and exact label.
 Consequently, labels whose readable forms sanitize to the same text, such as
 `1.0` and `1-0`, still receive distinct Python class names and JSON Schema
 components. Repeated compilation of one family reuses its cached generated
-model objects, while separate family identities do not share them.
+model objects, while separate family identities do not share them. Temporary
+families do not enter a process-global generated-model cache, so their private
+set-element wrappers can be collected with the family that owns them.

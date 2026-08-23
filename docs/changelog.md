@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidMigrationError`.
 
 ### Fixed
+- Scoped generated set-element models and cached render validators to their
+  owning compiled family, preventing temporary families from accumulating in
+  process-global caches while preserving stable identities and thread-safe
+  reuse. Families now fail closed if their authoritative Pydantic model is
+  forcibly rebuilt after compilation.
 - Kept the repository-root and rendered contributor guides synchronized and
   aligned their type-check instructions with the enforced `ty` and mypy gate.
 - Preserved opaque `Any` values and mapping keys through canonical rendering

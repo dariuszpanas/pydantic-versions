@@ -4,6 +4,8 @@ import hashlib
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from threading import Lock
 from types import UnionType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_origin
 
@@ -133,6 +135,14 @@ class _CompiledDecoratorNestedFamily:
         raise SchemaCompilationError(msg)
 
 
+class _CompiledFamilyRuntimeCache:
+    __slots__ = ("adapter", "lock")
+
+    def __init__(self) -> None:
+        self.adapter: object | None = None
+        self.lock = Lock()
+
+
 @dataclass(frozen=True)
 class _CompiledFamily:
     model: type[BaseModel]
@@ -144,6 +154,12 @@ class _CompiledFamily:
     catalog: _PlanningCatalog
     nested: tuple[_CompiledNestedFamily, ...]
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...]
+    _model_core_schema: object = dataclass_field(repr=False, compare=False)
+    _runtime_cache: _CompiledFamilyRuntimeCache = dataclass_field(
+        default_factory=_CompiledFamilyRuntimeCache,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def labels(self) -> tuple[str, ...]:

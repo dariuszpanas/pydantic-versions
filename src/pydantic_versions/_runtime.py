@@ -1244,8 +1244,7 @@ def _validated_current_render_payload[T: BaseModel](
         )
         if isinstance(data, current_wire):
             current_model = _current_wire_validation_adapter(
-                family.model,
-                family_name=compiled.name,
+                compiled,
             ).validate_python(
                 validation_payload,
                 by_name=True,
@@ -1329,6 +1328,21 @@ def _without_family_render_metadata(
 
 
 def _current_wire_validation_adapter(
+    compiled: _CompiledFamily,
+) -> SchemaValidator:
+    cache = compiled._runtime_cache
+    with cache.lock:
+        adapter = cache.adapter
+        if adapter is None:
+            adapter = _build_current_wire_validation_adapter(
+                compiled.model,
+                family_name=compiled.name,
+            )
+            cache.adapter = adapter
+        return cast(SchemaValidator, adapter)
+
+
+def _build_current_wire_validation_adapter(
     model: type[BaseModel],
     *,
     family_name: str,
