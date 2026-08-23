@@ -370,7 +370,6 @@ def _dump_family[T: BaseModel](
         validated_model=target_model,
         compiled=compiled,
         parent_label=requested,
-        selections=decorator_selections,
     )
     return _serialize_target_model(
         compiled=compiled,
@@ -829,9 +828,7 @@ def _validate_nested_collection_cardinality(
     validated_model: BaseModel,
     compiled: _CompiledFamily,
     parent_label: str,
-    selections: tuple[_DecoratorRouteSelection, ...],
 ) -> None:
-    del selections
     if not compiled.nested and not compiled.decorator_nested:
         return
     target = compiled.version(parent_label)

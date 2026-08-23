@@ -698,6 +698,55 @@ def test_decorator_set_projection_rejects_target_cardinality_collapse() -> None:
         )
 
 
+def test_unselected_overlapping_union_route_checks_nested_set_cardinality() -> None:
+    @versioned_schema(
+        name="all_route_cardinality_grand",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Grand(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+
+    @versioned_schema(
+        name="all_route_cardinality_set_branch",
+        versions=("1", "2"),
+        current="2",
+    )
+    class SetBranch(BaseModel):
+        values: set[Grand]
+
+    @versioned_schema(
+        name="all_route_cardinality_selected_branch",
+        versions=("1", "2"),
+        current="2",
+    )
+    class SelectedBranch(BaseModel):
+        values: list[dict[str, int | str]]
+
+    @versioned_schema(
+        name="all_route_cardinality_parent",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Parent(BaseModel):
+        item: SetBranch | SelectedBranch
+
+    source = Parent(
+        item=SelectedBranch(
+            values=[{"value": 1}, {"value": "1"}],
+        ),
+    )
+
+    assert type(source.item) is SelectedBranch
+    with pytest.raises(InvalidMigrationError, match="set cardinality") as error:
+        dump_versioned(Parent, version="1", data=source)
+
+    assert "all_route_cardinality_grand" in str(error.value)
+    assert "('values',)" in str(error.value)
+
+
 def test_decorator_boundaries_recurse_across_decorated_families() -> None:
     @versioned_schema(name="recursive_grandchild", versions=("1", "2"), current="2")
     @schema_version("1", patches=(field_renamed("value", "legacy_value"),))
