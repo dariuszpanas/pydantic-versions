@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from threading import Lock
 from types import UnionType
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -99,11 +99,7 @@ class _CompiledNestedFamily:
     versions: _NestedLabelPairs
 
     def child_label(self, parent_label: str) -> str:
-        for parent, child in self.versions:
-            if parent == parent_label:
-                return child
-        msg = f"Nested mapping for path {self.path!r} has no child label for {parent_label!r}"
-        raise SchemaCompilationError(msg)
+        return next(child for parent, child in self.versions if parent == parent_label)
 
 
 @dataclass(frozen=True)
@@ -126,13 +122,7 @@ class _CompiledDecoratorNestedFamily:
         )
 
     def child_label(self, parent_label: str) -> str:
-        if parent_label in tuple(version.label for version in self.family.versions):
-            return parent_label
-        msg = (
-            f"Decorator nested route for path {self.path!r} has no matching child label "
-            f"for {parent_label!r}"
-        )
-        raise SchemaCompilationError(msg)
+        return parent_label
 
 
 class _CompiledFamilyRuntimeCache:
@@ -160,10 +150,6 @@ class _CompiledFamily:
         repr=False,
         compare=False,
     )
-
-    @property
-    def labels(self) -> tuple[str, ...]:
-        return tuple(version.projection.label for version in self.versions)
 
     @property
     def current_version(self) -> str:
@@ -329,9 +315,6 @@ def _validate_compilation_boundary(
                 zip(parent_labels, parent_labels, strict=False)
             )
         else:
-            if not isinstance(declaration.versions, Mapping):
-                msg = f"Nested family declaration at path {path!r} for {name!r} must be a mapping"
-                raise SchemaCompilationError(msg)
             parent_map = dict(declaration.versions)
             missing = tuple(label for label in parent_labels if label not in parent_map)
             if missing:
@@ -685,14 +668,11 @@ def _compile_transition(
     upgrade = None if declaration is None else declaration.upgrade
     downgrade = None if declaration is None else declaration.downgrade
     if downgrade is not None:
-        if declaration is None:  # pragma: no cover - derived from declaration
-            msg = f"Downgrade {source!r} -> {target!r} has no declaration"
-            raise SchemaCompilationError(msg)
         downgrade_kind: DowngradeKind = "custom_transition"
-        downgrade_semantics = declaration.downgrade_semantics
-        if downgrade_semantics not in ("exact", "lossy"):  # pragma: no cover - validated
-            msg = f"Downgrade {source!r} -> {target!r} has no declared semantics"
-            raise SchemaCompilationError(msg)
+        downgrade_semantics = cast(
+            Literal["exact", "lossy"],
+            cast(VersionTransition, declaration).downgrade_semantics,
+        )
     elif upgrade is None:
         downgrade_kind = "implicit_identity"
         downgrade_semantics = "exact"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Generic, Literal, TypeVar
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -21,6 +22,8 @@ from pydantic_versions import (
     validate_versioned,
     versioned_schema,
 )
+
+_ProbeItem = TypeVar("_ProbeItem")
 
 
 def test_decorator_child_uses_its_historical_wire_projection() -> None:
@@ -341,6 +344,43 @@ def test_historical_overlapping_union_materializes_the_authoritative_current_bra
     assert type(result.current_model.item) is B
     assert result.current_model.item.value == "x:b"
     assert events == ["b"]
+
+
+def test_current_render_accepts_subclasses_with_narrower_route_annotations() -> None:
+    @versioned_schema(name="narrow_route_child", versions=("1", "2"), current="2")
+    class Child(BaseModel):
+        value: int
+
+    @versioned_schema(name="narrow_union_parent", versions=("1", "2"), current="2")
+    class UnionParent(BaseModel):
+        item: Child | int
+
+    class NarrowUnionParent(UnionParent):
+        item: Child
+
+    @versioned_schema(name="narrow_list_parent", versions=("1", "2"), current="2")
+    class ListParent(BaseModel):
+        children: list[Child]
+
+    class BareListParent(ListParent):
+        children: list
+
+    assert dump_versioned(
+        UnionParent,
+        version="2",
+        data=NarrowUnionParent(item=Child(value=7)),
+    ) == {
+        "item": {"value": 7},
+        "schema_version": "2",
+    }
+    assert dump_versioned(
+        ListParent,
+        version="2",
+        data=BareListParent(children=[Child(value=8)]),
+    ) == {
+        "children": [{"value": 8}],
+        "schema_version": "2",
+    }
 
 
 def test_single_family_raw_duplication_raises_typed_cardinality_error() -> None:
@@ -903,6 +943,96 @@ def test_parent_callback_rejects_untyped_decorator_branch_introduction() -> None
 
     with pytest.raises(InvalidMigrationError, match="untyped decorator nested mapping"):
         dump_versioned(Parent, version="1", data=Parent(item=0))
+
+
+def test_parent_callback_fails_closed_when_a_mapping_subclass_probe_raises() -> None:
+    probe_active = False
+    probe_count = 0
+
+    class RaisingMappingSubclassMeta(type):
+        def __subclasscheck__(cls, subclass: type[Any]) -> bool:
+            nonlocal probe_count
+            if probe_active and subclass is dict:
+                probe_count += 1
+                raise TypeError("custom mapping probe failed")
+            return super().__subclasscheck__(subclass)
+
+    @dataclass
+    class Envelope(metaclass=RaisingMappingSubclassMeta):
+        marker: str
+
+    @versioned_schema(name="mapping_probe_child", versions=("1", "2"), current="2")
+    class Child(BaseModel):
+        value: int
+
+    def introduce_raw_child(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, "item": {"value": 1}}
+
+    @versioned_schema(
+        name="mapping_probe_parent",
+        versions=("1", "2"),
+        current="2",
+        transitions=(VersionTransition("1", "2", upgrade=introduce_raw_child),),
+    )
+    class Parent(BaseModel):
+        item: Envelope | Child
+
+    probe_active = True
+    try:
+        with pytest.raises(InvalidMigrationError, match="untyped decorator nested mapping"):
+            validate_versioned(
+                Parent,
+                {"schema_version": "1", "item": {"marker": "source"}},
+            )
+    finally:
+        probe_active = False
+
+    assert probe_count > 0
+
+
+def test_dump_tolerates_generic_annotation_instance_probe_type_errors() -> None:
+    probe_active = False
+    probe_count = 0
+
+    class RaisingInstanceMeta(type):
+        def __instancecheck__(cls, instance: object) -> bool:
+            nonlocal probe_count
+            if probe_active:
+                probe_count += 1
+                raise TypeError("custom instance probe failed")
+            return super().__instancecheck__(instance)
+
+    @dataclass
+    class Envelope(Generic[_ProbeItem], metaclass=RaisingInstanceMeta):
+        value: _ProbeItem
+
+    @dataclass
+    class IntegerEnvelope(Envelope[int]):
+        pass
+
+    @versioned_schema(name="instance_probe_child", versions=("1",), current="1")
+    class Child(BaseModel):
+        value: int
+
+    class Parent(BaseModel):
+        payload: Child | Envelope[int]
+
+    family = SchemaFamily(
+        model=Parent,
+        name="instance_probe_parent",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    value = Parent(payload=IntegerEnvelope(1))
+    probe_active = True
+    try:
+        rendered = family.dump(data=value, version="1")
+    finally:
+        probe_active = False
+
+    assert probe_count > 0
+    assert rendered == {"payload": {"value": 1}}
 
 
 def test_parent_callback_rejects_reused_exact_typed_introductions() -> None:

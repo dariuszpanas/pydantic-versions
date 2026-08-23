@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Raised the enforced statement-coverage floor from 90% to 95% and report the
   measured result to two decimal places.
+- Replaced the broad private-helper coverage scaffold with cohesive public
+  contract tests and a narrow wire-internals safety suite, consolidating
+  overlapping scenarios while retaining distinct error, ordering, identity,
+  and integration guarantees.
 - Corrected the pre-1.0 rendering contract so `defaults_for()` constructs the
   requested target wire model directly, while `dump(data=None)` delegates to
   it and an empty mapping remains current data. Complete output now defaults to
@@ -46,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when Pydantic cannot serialize them directly, without recursive fallback.
 - Kept callback-supplied nested wrapper models hashable when projected through
   declared `set` and `frozenset` family boundaries.
+- Preserved parent-transition supplied `tuple`, `set`, and `frozenset`
+  collections of nested models through subsequent child migrations, including
+  exact target collection types and cardinality checks.
 - Made generated nested models snapshot their source JSON Schema metadata and
   reject malformed or structurally overriding extras, so family-owned metadata
   cannot be omitted or rewritten.
@@ -59,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   families now fail closed. These generated adapters are final, reserve complete
   nested metadata envelopes, preflight declared attribute input, and reject
   output-name collisions from allowed extras.
+- Preserved structurally divergent explicit nested representations by selecting
+  the validated runtime arm of heterogeneous and same-origin generic unions.
+  Scalar arms remain scalar, while BaseModel, dataclass, TypedDict, and mapping
+  output has child-owned metadata pruned; object serializers that relocate a
+  managed child still fail closed.
+- Rejected foreign model instances returned by explicit wire model validators
+  before document-adapter construction, preventing validated user data from
+  being replaced by facade defaults during validation or rendering.
 - Removed redundant family-owned discriminators from embedded child output
   across built-in and decorator-discovered nested routes while retaining
   model-owned child metadata.
@@ -99,6 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed a coverage-masked runtime wrapper with no production caller and two
   undocumented legacy type aliases that were never part of the package-root
   public contract.
+- Removed dead compiled-family state and compile-proven internal fallbacks for
+  declaration states rejected before execution.
 - Removed the unused `VersionedValidationError` placeholder from the public
   package surface before the 1.0.0 contract freeze.
 

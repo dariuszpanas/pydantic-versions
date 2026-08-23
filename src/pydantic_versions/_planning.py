@@ -562,8 +562,6 @@ def _nested_route_semantics(
 ) -> StepSemantics:
     source_index = compiled.index(source_version)
     target_index = compiled.index(target_version)
-    if source_index == target_index:
-        return "exact"
 
     risks: list[StepSemantics] = []
     if source_index < target_index:

@@ -1,7 +1,15 @@
-from typing import Any, Self, cast
+from typing import Annotated, Any, Self, cast
 
 import pytest
-from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from pydantic_versions import (
     InvalidMigrationError,
@@ -9,9 +17,13 @@ from pydantic_versions import (
     SchemaFamily,
     SchemaVersion,
     SchemaVersionError,
+    VersionMetadata,
     VersionTransition,
+    dump_versioned,
     field_renamed,
     matching_labels,
+    validate_versioned,
+    versioned_schema,
 )
 
 
@@ -84,6 +96,43 @@ def test_nested_projection_and_pruning_ignore_an_opaque_sibling() -> None:
 
     assert rendered["children"] is None
     assert rendered["opaque"] == opaque
+
+
+def test_nested_paths_cross_multiple_homogeneous_collection_layers() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="multi_collection_layer_child",
+        versions=(
+            SchemaVersion("1", patches=(field_renamed("value", "legacy_value"),)),
+            SchemaVersion("2"),
+        ),
+        version_metadata=None,
+    )
+
+    class Wrapper(BaseModel):
+        child: Child
+
+    class Parent(BaseModel):
+        wrappers: list[list[Wrapper]]
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name="multi_collection_layer_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(NestedFamily(("wrappers", "child"), child_family, matching_labels()),),
+        version_metadata=None,
+    )
+    historical_payload = {
+        "wrappers": [[{"child": {"legacy_value": 7}}]],
+    }
+
+    result = parent_family.validate(historical_payload, version="1")
+
+    assert result.current_model.wrappers[0][0].child.value == 7
+    assert parent_family.dump(version="1", data=result.current_model) == historical_payload
 
 
 def test_nested_metadata_preflight_uses_second_alias_choice() -> None:
@@ -457,3 +506,281 @@ def test_nested_render_validates_parent_and_child_only_once(model_input: bool) -
     }
     assert validation_counts == {"parent": 1, "child": 1}
     assert transition_events == ["child", "parent"]
+
+
+def test_nested_family_metadata_rejects_a_scalar_envelope_from_a_migration() -> None:
+    class Payload(BaseModel):
+        value: int
+
+    family = SchemaFamily(
+        model=Payload,
+        name="scalar_metadata_envelope",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=lambda data: data,
+                downgrade=lambda data: {**data, "meta": "not-an-object"},
+                downgrade_semantics="exact",
+            ),
+        ),
+        version_metadata=VersionMetadata(("meta", "version"), owner="family"),
+    )
+
+    with pytest.raises(
+        InvalidMigrationError,
+        match=r"Cannot set version metadata at \('meta', 'version'\).*'meta'.*not an object",
+    ):
+        family.dump(version="1", data=Payload(value=7))
+
+
+def test_alias_path_does_not_overwrite_a_scalar_intermediate_field() -> None:
+    class Payload(BaseModel):
+        model_config = ConfigDict(validate_by_name=True)
+
+        envelope: str
+        value: int = Field(validation_alias=AliasPath("envelope", "value"))
+
+    family = SchemaFamily(
+        model=Payload,
+        name="scalar_alias_envelope",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    raw = {"envelope": "preserve-me", "value": 7}
+
+    with pytest.raises(ValidationError) as exc_info:
+        family.validate(raw, version="1")
+
+    assert [(error["type"], error["loc"]) for error in exc_info.value.errors()] == [
+        ("missing", ("envelope", "value")),
+    ]
+    assert raw == {"envelope": "preserve-me", "value": 7}
+
+
+def test_nested_validation_preserves_python_set_container_types() -> None:
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="python_collection_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=lambda data: {"value": data["value"] + 10},
+            ),
+        ),
+    )
+
+    class Parent(BaseModel):
+        values: set[Child]
+        frozen_values: frozenset[Child]
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name="python_collection_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(
+            NestedFamily("values", child_family, matching_labels()),
+            NestedFamily("frozen_values", child_family, matching_labels()),
+        ),
+    )
+
+    result = parent_family.validate(
+        {
+            "schema_version": "1",
+            "values": [{"schema_version": "1", "value": 1}],
+            "frozen_values": [{"schema_version": "1", "value": 2}],
+        },
+    )
+
+    assert type(result.current_model.values) is set
+    assert type(result.current_model.frozen_values) is frozenset
+    assert {child.value for child in result.current_model.values} == {11}
+    assert {child.value for child in result.current_model.frozen_values} == {12}
+
+
+@pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+def test_invalid_nested_child_callback_result_names_the_failed_route(direction: str) -> None:
+    class Child(BaseModel):
+        value: int
+
+    def invalid(_data: dict[str, Any]) -> dict[str, Any]:
+        return cast(Any, "not-a-mapping")
+
+    child_family = SchemaFamily(
+        model=Child,
+        name=f"invalid_{direction}_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=invalid if direction == "upgrade" else lambda data: data,
+                downgrade=invalid if direction == "downgrade" else lambda data: data,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name=f"invalid_{direction}_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+    source, target = ("1", "2") if direction == "upgrade" else ("2", "1")
+
+    with pytest.raises(
+        InvalidMigrationError,
+        match=rf"Nested migration '{source}' -> '{target}'.*'invalid_{direction}_child'.*dict",
+    ):
+        if direction == "upgrade":
+            parent_family.validate(
+                {"schema_version": "1", "child": {"schema_version": "1", "value": 1}},
+            )
+        else:
+            parent_family.dump(version="1", data=Parent(child=Child(value=1)))
+
+
+def test_decorator_infers_aliased_model_metadata_and_runs_identity_migration() -> None:
+    @versioned_schema(
+        name="aliased_model_metadata_owner",
+        versions=("1", "2"),
+        current="2",
+        version_field="version",
+    )
+    class Payload(BaseModel):
+        model_config = ConfigDict(validate_by_name=True)
+
+        schema_version: str = Field("2", alias="version")
+        value: int
+
+    result = validate_versioned(Payload, {"version": "1", "value": 7})
+
+    assert result.source_model.model_dump()["schema_version"] == "1"
+    assert result.current_model == Payload(schema_version="2", value=7)
+    assert result.migrations_applied == ()
+    assert dump_versioned(Payload, version="1", data=result.current_model) == {
+        "version": "1",
+        "value": 7,
+    }
+
+
+def test_current_dump_inserts_nested_family_metadata() -> None:
+    class Payload(BaseModel):
+        value: int
+
+    family = SchemaFamily(
+        model=Payload,
+        name="current_nested_metadata",
+        versions=(SchemaVersion("1"),),
+        version_metadata=VersionMetadata(("meta", "version"), owner="family"),
+    )
+
+    assert family.dump(version="1", data=Payload(value=7)) == {
+        "value": 7,
+        "meta": {"version": "1"},
+    }
+
+
+def test_invalid_top_level_downgrade_result_names_the_failed_route() -> None:
+    class Payload(BaseModel):
+        value: int
+
+    family = SchemaFamily(
+        model=Payload,
+        name="invalid_top_level_downgrade",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=lambda _data: cast(Any, "not-a-mapping"),
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        InvalidMigrationError,
+        match=r"Migration '1' -> '2' downgrade must return a dict",
+    ):
+        family.dump(version="1", data=Payload(value=7))
+
+
+def test_parent_migration_can_inject_python_nested_collections() -> None:
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="injected_collection_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=lambda data: {"value": data["value"] + 10},
+            ),
+            VersionTransition(
+                "2",
+                "3",
+                upgrade=lambda data: {"value": data["value"] + 100},
+            ),
+        ),
+        version_metadata=None,
+    )
+
+    class Parent(BaseModel):
+        tupled: Annotated[tuple[Child, ...], Field(description="tuple children")]
+        set_values: Annotated[set[Child], Field(description="set children")]
+        frozen_values: Annotated[
+            frozenset[Child],
+            Field(description="frozen children"),
+        ]
+
+    def inject_collections(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **data,
+            "tupled": (Child(value=20),),
+            "set_values": {Child(value=30)},
+            "frozen_values": frozenset({Child(value=40)}),
+        }
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name="injected_collection_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
+        transitions=(VersionTransition("1", "2", upgrade=inject_collections),),
+        nested=(
+            NestedFamily("tupled", child_family, matching_labels()),
+            NestedFamily("set_values", child_family, matching_labels()),
+            NestedFamily("frozen_values", child_family, matching_labels()),
+        ),
+        version_metadata=None,
+    )
+
+    result = parent_family.validate(
+        {
+            "tupled": [{"value": 1}],
+            "set_values": [{"value": 2}],
+            "frozen_values": [{"value": 3}],
+        },
+        version="1",
+    )
+
+    assert result.current_model.tupled == (Child(value=120),)
+    assert result.current_model.set_values == {Child(value=130)}
+    assert result.current_model.frozen_values == frozenset({Child(value=140)})

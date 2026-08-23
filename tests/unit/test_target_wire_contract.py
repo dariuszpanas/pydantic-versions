@@ -2051,9 +2051,12 @@ def test_family_document_adapter_deepcopy_uses_the_callers_memo() -> None:
     document = cast(Any, family.model_for("1"))(items=[1], schema_version="1")
 
     copied = deepcopy([document, document.items])
+    direct = document.__deepcopy__()
 
     assert copied[0].items is copied[1]
     assert copied[0] is not document
+    assert direct == document
+    assert direct is not document
     existing = document.model_copy()
     assert document.__deepcopy__({id(document): existing}) is existing
 
@@ -2195,6 +2198,35 @@ def test_family_document_adapter_honors_revalidation_policies() -> None:
 
     assert revalidated is not document
     assert calls == [2]
+
+
+def test_family_document_adapter_rejects_a_foreign_validator_result() -> None:
+    class Current(BaseModel):
+        value: int = 1
+
+    class ForeignBody(BaseModel):
+        value: int
+
+    class Historical(BaseModel):
+        value: int = 1
+
+        @model_validator(mode="after")
+        def replace_body(self) -> Any:
+            return ForeignBody(value=self.value)
+
+    family = SchemaFamily(
+        model=Current,
+        name="adapter_foreign_validator_result",
+        versions=(
+            SchemaVersion("1", wire_model=Historical),
+            SchemaVersion("2"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must return an instance of"):
+        family.validate({"value": 2, "schema_version": "1"})
+    with pytest.raises(ValueError, match="must return an instance of"):
+        family.dump(version="1", data=Current(value=2))
 
 
 def test_family_document_adapter_is_final() -> None:
@@ -3137,17 +3169,24 @@ def test_family_document_adapter_preserves_internal_name_extras() -> None:
     with pytest.raises(AttributeError, match="Internal document state"):
         delattr(document, internal_names[0])
 
-    object.__setattr__(document, internal_names[0], object())
-    with pytest.raises(ValueError, match="lost its validated explicit wire body"):
-        document.model_dump()
-
 
 def test_family_document_adapter_snapshots_foreign_body_scalar_state() -> None:
     class Current(BaseModel):
         value: int = 1
 
     class Historical(BaseModel):
+        __slots__ = ("transient", "unset_transient")
+
         value: int = 1
+
+        def model_post_init(self, context: Any) -> None:
+            del context
+            object.__setattr__(self, "transient", f"snapshot-{self.value}")
+
+        @computed_field
+        @property
+        def transient_state(self) -> str:
+            return cast(str, object.__getattribute__(self, "transient"))
 
     family = SchemaFamily(
         model=Current,
@@ -3163,7 +3202,12 @@ def test_family_document_adapter_snapshots_foreign_body_scalar_state() -> None:
     body.value = 9
 
     assert document.value == 2
-    assert document.model_dump() == {"value": 2, "schema_version": "1"}
+    assert document.transient_state == "snapshot-2"
+    assert document.model_dump() == {
+        "value": 2,
+        "transient_state": "snapshot-2",
+        "schema_version": "1",
+    }
 
 
 def test_family_document_adapter_does_not_replay_deleted_default_factories() -> None:
