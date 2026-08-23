@@ -54,12 +54,12 @@ jobs:
           enable-cache: false
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install
 
       - name: Install dependencies
         run: |
           uv lock --check
-          uv sync --frozen --python 3.12 --no-install-project
+          uv sync --frozen --no-install-project
 
       - name: Audit locked dependencies
         run: |
@@ -69,7 +69,7 @@ jobs:
             --requirement "$RUNNER_TEMP/audit-requirements.txt"
 
       - name: Install project with the audited build backend
-        run: uv sync --frozen --python 3.12 --no-editable --no-build-isolation
+        run: uv sync --frozen --no-editable --no-build-isolation
 
       - name: Validate release metadata
         id: release-metadata
@@ -88,7 +88,7 @@ jobs:
           uv run --no-sync zensical build --strict
 
       - name: Build package
-        run: uv build --no-build-isolation
+        run: uv build --python .venv/bin/python --no-build-isolation
 
       - name: Check distribution metadata
         run: uv run --no-sync twine check --strict dist/*

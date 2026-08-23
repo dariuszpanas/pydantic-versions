@@ -78,12 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed fields into migrations and authoritative current models by extracting
   private canonical payloads recursively from declared source fields only.
 - Hardened the tag-driven release path with locked dependency and build-backend
-  audits, non-editable project installation without subsequent dependency
-  synchronization, strict distribution metadata checks, immutable tags
-  restricted to reviewed default-branch commits, private vulnerability
-  reporting, CodeQL, secret scanning, and disabled checkout credentials; manual
-  release rehearsals do not publish unless a main-branch TestPyPI upload is
-  explicitly requested.
+  audits, a pinned Python environment, non-editable project installation without
+  subsequent dependency synchronization, artifact builds bound to the audited
+  environment, strict distribution metadata checks, immutable tags restricted
+  to reviewed default-branch commits, private vulnerability reporting, CodeQL,
+  secret scanning, and disabled checkout credentials; manual release rehearsals
+  do not publish unless a main-branch TestPyPI upload is explicitly requested.
 
 ## [0.3.0] - 2026-08-20
 
