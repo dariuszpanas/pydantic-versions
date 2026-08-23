@@ -1,0 +1,29 @@
+# pydantic-versions
+
+> A Pydantic 2 library for declaring, validating, migrating, inspecting, and rendering versioned model schemas for application-to-application configuration and payload exchange.
+
+Schema version labels are application wire contracts independent of package releases. Treat names exported from the `pydantic_versions` package root and their documented behavior as the supported API; internal modules and implementation details are not public contracts.
+
+The current supported runtime is Python 3.12 through 3.14 with Pydantic 2.12.3 or newer, but below Pydantic 3. Consult the package metadata and compatibility matrix for the authoritative current range. The documentation URLs below can be requested as Markdown with the `Accept: text/markdown` HTTP header.
+
+## Start here
+
+- [Getting Started](https://pydantic-versions.readthedocs.io/en/latest/guide/getting-started/): Install the package and define, validate, and render a first schema family.
+- [Concepts](https://pydantic-versions.readthedocs.io/en/latest/guide/concepts/): Learn the core model, version, patch, migration, and rendering concepts.
+- [Application-to-Application Exchange](https://pydantic-versions.readthedocs.io/en/latest/guide/application-exchange/): Coordinate schema support, version negotiation, defaults, and rollout behavior between applications.
+- [Complex Config Example](https://pydantic-versions.readthedocs.io/en/latest/guide/complex-config-example/): Follow an end-to-end nested configuration evolution scenario.
+
+## Contracts and reference
+
+- [Generated Wire Contracts](https://pydantic-versions.readthedocs.io/en/latest/guide/generated-wire-contracts/): Understand generated historical models, nested projections, and supported boundaries.
+- [Migrations](https://pydantic-versions.readthedocs.io/en/latest/guide/migrations/): Define upgrade and downgrade transitions and inspect their semantics.
+- [Rendering Configs](https://pydantic-versions.readthedocs.io/en/latest/guide/rendering/): Render current data into exact historical wire shapes.
+- [API Reference](https://pydantic-versions.readthedocs.io/en/latest/reference/api/): Use the documented public Python API.
+- [Stability and Compatibility](https://pydantic-versions.readthedocs.io/en/latest/reference/stability-policy/): Read the public compatibility contract and semantic-versioning policy.
+- [Pydantic Compatibility Matrix](https://pydantic-versions.readthedocs.io/en/latest/guide/pydantic-compatibility-matrix/): Check supported Python and Pydantic combinations and the evidence behind them.
+
+## Project
+
+- [Contributing](https://pydantic-versions.readthedocs.io/en/latest/contributing/): Follow the tool-neutral development, testing, and commit policies enforced by the repository.
+- [Changelog](https://pydantic-versions.readthedocs.io/en/latest/changelog/): Review notable changes and migration-relevant fixes.
+- [Source repository](https://github.com/dariuszpanas/pydantic-versions): Inspect the source, tests, examples, and issue tracker.
