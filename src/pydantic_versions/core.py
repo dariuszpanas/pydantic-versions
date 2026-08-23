@@ -10,7 +10,7 @@ from pydantic_versions._compiler import (
     _ensure_pydantic_v2_model,
     _ensure_unique_versions,
 )
-from pydantic_versions._runtime import _infer_metadata_owner, _runtime_label
+from pydantic_versions._runtime_versioning import _infer_metadata_owner, _runtime_label
 from pydantic_versions.declarations import (
     JsonValue as JsonValue,
 )

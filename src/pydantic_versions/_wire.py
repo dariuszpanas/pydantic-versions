@@ -68,6 +68,7 @@ from pydantic_versions._compiler import (
     _stable_digest,
     _VersionProjection,
 )
+from pydantic_versions._runtime_versioning import _remove_version_field, _to_version_names
 from pydantic_versions.exceptions import SchemaCompilationError, UnsupportedWireModelError
 
 if TYPE_CHECKING:
@@ -5152,8 +5153,6 @@ def _project_child_default_value(
         for name in fields_set
         if name in source_model.model_fields and name in value.__dict__
     }
-
-    from pydantic_versions._runtime import _remove_version_field, _to_version_names
 
     target_version = child._compiled_family().version(version)
     projected = _to_version_names(target_version, payload)
