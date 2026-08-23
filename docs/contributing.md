@@ -50,7 +50,8 @@ archives, and changelog tooling without relying on GitHub metadata. Record:
 One large atomic commit is valid. Use proportional detail for small mechanical
 changes and keep unrelated changes in separate logical commits.
 
-The tracked [`.gitmessage`](../.gitmessage) template suggests this layout:
+The tracked [`.gitmessage`](https://github.com/dariuszpanas/pydantic-versions/blob/main/.gitmessage)
+template suggests this layout:
 
 ```text
 <type>[optional scope][!]: <imperative summary>

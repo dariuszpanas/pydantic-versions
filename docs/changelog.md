@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidMigrationError`.
 
 ### Fixed
+- Kept the repository-root and rendered contributor guides synchronized and
+  aligned their type-check instructions with the enforced `ty` and mypy gate.
 - Preserved opaque `Any` values and mapping keys through canonical rendering
   when Pydantic cannot serialize them directly, without recursive fallback.
 - Kept callback-supplied nested wrapper models hashable when projected through

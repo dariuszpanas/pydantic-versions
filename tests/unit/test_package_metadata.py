@@ -4,6 +4,8 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 README = ROOT / "README.md"
 LLMS_TXT = ROOT / "docs" / "llms.txt"
+CONTRIBUTING = ROOT / "CONTRIBUTING.md"
+RENDERED_CONTRIBUTING = ROOT / "docs" / "contributing.md"
 DOCS_URL = "https://pydantic-versions.readthedocs.io/en/latest/"
 DOCS_ORIGIN = "https://pydantic-versions.readthedocs.io/"
 DOCS_BADGE_URL = "https://img.shields.io/readthedocs/pydantic-versions/latest.svg"
@@ -35,3 +37,10 @@ def test_llms_index_links_to_existing_documentation_sources() -> None:
         assert linked_page.endswith("/") and "?" not in linked_page and "#" not in linked_page
         source = ROOT / "docs" / Path(*linked_page.removesuffix("/").split("/"))
         assert source.with_suffix(".md").is_file(), linked_page_url
+
+
+def test_rendered_contributor_guide_matches_the_repository_guide() -> None:
+    rendered = RENDERED_CONTRIBUTING.read_text(encoding="utf-8")
+    repository = CONTRIBUTING.read_text(encoding="utf-8")
+
+    assert rendered == repository
