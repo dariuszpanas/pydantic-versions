@@ -75,7 +75,10 @@ template suggests this layout:
 ```
 
 The headings are guidance, not a required format. Unstructured prose is equally
-valid when it provides the same durable context. Do not retain template tokens,
+valid when it provides the same durable context. A single validation result can
+use a concise `Validation: ...` sentence. Put multiple results in separate
+top-level `- ` Markdown list items under `## Validation`, so rendered history
+does not collapse them into one paragraph. Do not retain template tokens,
 development-only notes such as "address review feedback," a body that merely
 repeats the subject, or validation commands without their result. For work that
 cannot be run locally, state a concrete reason instead of writing a placeholder.
@@ -95,6 +98,8 @@ git config --worktree core.commentChar ";"
 
 The comment-character setting preserves optional `##` headings when Git opens
 the template; instructional comments begin with `;` and are removed by Git.
+Keep these settings worktree-scoped: `--local` writes shared repository config
+and can make one linked checkout use another checkout's template path.
 
 A PR should explain the problem and approach, call out compatibility or release
 impact, list aggregate validation results, and link its issue with
@@ -136,5 +141,8 @@ migrations before the authoritative current-model validation boundary.
 Keep schema labels opaque and leave YAML parsing to callers. Document the
 legacy unversioned fallback and Django Ninja inspection boundary.
 
-Validation: `uv run make ci` passed; strict docs and package build passed.
+## Validation
+
+- `uv run make ci`: passed.
+- Strict docs and package build: passed.
 ```

@@ -25,6 +25,7 @@ _ALLOWED_TYPES = frozenset(
         "fix",
         "perf",
         "refactor",
+        "release",
         "revert",
         "style",
         "test",
@@ -108,6 +109,11 @@ _VALIDATION_NARRATIVE_RE = re.compile(
     r"\b(?:earlier|historical|previous|prior)(?!-)\b",
     re.IGNORECASE,
 )
+_VALIDATION_LAYOUT_NARRATIVE_RE = re.compile(
+    r"\b(?:brings?|ensures?|holds?|keeps?|leaves?|makes?|maintains?|"
+    r"preserves?|restores?|returns?|sets?)\b",
+    re.IGNORECASE,
+)
 _GENERIC_VALIDATION_SUBJECT_RE = re.compile(
     r"^(?:(?:all|the)\s+)?(?:tests?|checks?)$",
     re.IGNORECASE,
@@ -168,6 +174,11 @@ _DEPENDABOT_GROUP_SUMMARY_RE = re.compile(
     re.IGNORECASE,
 )
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(?:\[[ xX]\]\s+)?")
+_MARKDOWN_LIST_ITEM_RE = re.compile(
+    r"^(?P<indent> {0,3})(?P<marker>[-*+]|[0-9]{1,9}[.)])"
+    r"[ \t]+(?:\[[ xX]\][ \t]+)?"
+)
+_VALIDATION_SENTENCE_BOUNDARY_RE = re.compile(r"(?:(?<=[.!?])|;)[ \t]+")
 _ISSUE_TRAILER_RE = re.compile(
     r"^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s+#\d+(?:\s*,\s*#\d+)*$",
     re.IGNORECASE,
@@ -240,10 +251,52 @@ def validate_header(header: str, *, label: str) -> str | None:
 
 def _strip_markup(line: str) -> str:
     """Return visible prose without list markers or unwrappable destinations."""
-    stripped = _BULLET_RE.sub("", line.strip()).strip()
+    stripped = _MARKDOWN_LIST_ITEM_RE.sub("", line.strip()).strip()
+    stripped = _BULLET_RE.sub("", stripped).strip()
     stripped = _MARKDOWN_LINK_RE.sub(lambda match: match.group(1), stripped)
     stripped = _URL_RE.sub("", stripped)
     return re.sub(r"[`*_~]+", "", stripped).strip()
+
+
+def _validation_list_item_owners(lines: Sequence[str]) -> dict[int, int]:
+    """Map canonical top-level validation items and their continuations."""
+    owners: dict[int, int] = {}
+    active_owner: int | None = None
+    in_html_comment = False
+    setext_lines = _setext_heading_lines(lines)
+    top_level_indexes = _top_level_line_indexes(lines)
+
+    for index, line in enumerate(lines):
+        raw = line.strip()
+        if in_html_comment:
+            if "-->" in raw:
+                in_html_comment = False
+            active_owner = None
+            continue
+        if raw.startswith("<!--"):
+            in_html_comment = "-->" not in raw
+            active_owner = None
+            continue
+        if (
+            index not in top_level_indexes
+            or not raw
+            or index in setext_lines
+            or raw.startswith(";")
+            or _HEADING_RE.fullmatch(raw)
+            or _is_trailer(raw)
+        ):
+            active_owner = None
+            continue
+
+        if line.startswith("- "):
+            active_owner = index
+            owners[index] = index
+            continue
+
+        if active_owner is not None:
+            owners[index] = active_owner
+
+    return owners
 
 
 def _is_placeholder(line: str) -> bool:
@@ -396,7 +449,7 @@ def _validation_blocks(
             continue
 
         starts_record = bool(
-            _BULLET_RE.match(line)
+            _MARKDOWN_LIST_ITEM_RE.match(line)
             or _VALIDATION_LABEL_RE.match(visible)
             or _VALIDATION_COMMAND_RE.match(visible)
         )
@@ -510,30 +563,150 @@ def _classify_validation_block(
     return False, block
 
 
+def _validation_result_indexes(
+    parts: Sequence[str],
+    block_indexes: Sequence[int],
+    *,
+    explicit_context: bool,
+) -> tuple[int, ...]:
+    """Return high-confidence concrete result locations in one block."""
+    if not explicit_context:
+        return ()
+
+    def without_label(candidate: str) -> str:
+        if label_match := _VALIDATION_LABEL_RE.match(candidate):
+            return candidate[label_match.end() :].strip()
+        return candidate
+
+    def has_result_subject(candidate: str) -> bool:
+        if _VALIDATION_LABEL_RE.match(candidate):
+            return True
+        candidate = without_label(candidate)
+        if _VALIDATION_COMMAND_RE.match(candidate):
+            return True
+        result_matches = tuple(
+            match
+            for pattern in (
+                _VALIDATION_NOT_RUN_RE,
+                _VALIDATION_SKIPPED_RE,
+                _VALIDATION_COUNT_RESULT_RE,
+                _VALIDATION_OUTCOME_TRAIL_RE,
+                _VALIDATION_EXPLICIT_OUTCOME_TRAIL_RE,
+            )
+            if (match := pattern.search(candidate)) is not None
+        )
+        if not result_matches:
+            return False
+        first_result = min(result_matches, key=lambda match: match.start())
+        return bool(candidate[: first_result.start()].strip(" :=-\N{EM DASH}"))
+
+    def is_explicit_generic_result(candidate: str) -> bool:
+        candidate = without_label(candidate)
+        for result_pattern in (
+            _VALIDATION_COUNT_RESULT_RE,
+            _VALIDATION_OUTCOME_TRAIL_RE,
+            _VALIDATION_EXPLICIT_OUTCOME_TRAIL_RE,
+        ):
+            if result := result_pattern.search(candidate):
+                subject = candidate[: result.start()].strip(" :=-\N{EM DASH}")
+                return bool(
+                    subject
+                    and _GENERIC_VALIDATION_SUBJECT_RE.fullmatch(
+                        " ".join(subject.casefold().split())
+                    )
+                )
+        return False
+
+    def is_concrete_result(candidate: str) -> bool:
+        unlabeled = without_label(candidate)
+        is_command = _VALIDATION_COMMAND_RE.match(unlabeled) is not None
+        return bool(
+            candidate
+            and (
+                is_command
+                or not (
+                    _VALIDATION_NARRATIVE_RE.search(candidate)
+                    or _VALIDATION_LAYOUT_NARRATIVE_RE.search(candidate)
+                )
+            )
+            and (
+                _is_validation_record(candidate, validation_section=True)
+                or is_explicit_generic_result(candidate)
+            )
+        )
+
+    results: list[int] = []
+    has_prior_result = False
+    for part, index in zip(parts, block_indexes, strict=True):
+        for candidate in _VALIDATION_SENTENCE_BOUNDARY_RE.split(part):
+            candidate = candidate.strip()
+            if is_concrete_result(candidate) and not (
+                has_prior_result and not has_result_subject(candidate)
+            ):
+                results.append(index)
+                has_prior_result = True
+    if results:
+        return tuple(results)
+
+    block = " ".join(parts)
+    if is_concrete_result(block):
+        return (block_indexes[0],)
+    return ()
+
+
 def _analyze_validation(
     lines: Sequence[str],
     *,
     metadata_candidate_bounds: tuple[int, int] | None,
-) -> tuple[bool, set[int], list[str]]:
-    """Return evidence state, excluded lines, and mixed-block context."""
+) -> tuple[bool, set[int], list[str], list[bool]]:
+    """Return evidence state, excluded lines, context, and list-item layout."""
     has_evidence = False
     indexes: set[int] = set()
     context_prefixes: list[str] = []
+    list_item_records: list[bool] = []
+    list_item_owners = _validation_list_item_owners(lines)
+    claimed_list_items: set[int] = set()
+    previous_block_end: int | None = None
+    previous_block_explicit = False
     for parts, validation_section, block_indexes in _validation_blocks(
         lines,
         metadata_candidate_bounds=metadata_candidate_bounds,
     ):
+        first = parts[0]
+        directly_explicit = bool(
+            validation_section
+            or _VALIDATION_LABEL_RE.match(first)
+            or _VALIDATION_COMMAND_RE.match(first)
+        )
+        continues_previous_block = bool(
+            previous_block_end is not None and block_indexes[0] == previous_block_end + 1
+        )
+        continues_explicit_block = bool(previous_block_explicit and continues_previous_block)
+        explicit_context = directly_explicit or continues_explicit_block
+        result_indexes = _validation_result_indexes(
+            parts,
+            block_indexes,
+            explicit_context=explicit_context,
+        )
+        for result_index in result_indexes:
+            owner = list_item_owners.get(result_index)
+            owns_distinct_item = owner is not None and owner not in claimed_list_items
+            list_item_records.append(owns_distinct_item)
+            if owner is not None:
+                claimed_list_items.add(owner)
+
         is_validation, context_prefix = _classify_validation_block(
             parts,
             validation_section=validation_section,
         )
-        if not is_validation:
-            continue
-        has_evidence = True
-        indexes.update(block_indexes)
-        if context_prefix:
-            context_prefixes.append(context_prefix)
-    return has_evidence, indexes, context_prefixes
+        if is_validation:
+            has_evidence = True
+            indexes.update(block_indexes)
+            if context_prefix:
+                context_prefixes.append(context_prefix)
+        previous_block_end = block_indexes[-1]
+        previous_block_explicit = explicit_context
+    return has_evidence, indexes, context_prefixes, list_item_records
 
 
 def _word_count(lines: Sequence[str]) -> int:
@@ -914,10 +1087,12 @@ def validate_message(message: str, *, label: str) -> list[str]:
     metadata_candidate_bounds = _generated_metadata_candidate_bounds(lines)
     metadata_bounds = _generated_metadata_bounds(lines)
     metadata_records = _generated_metadata_records(lines, metadata_bounds)
-    validation_evidence, validation_indexes, validation_context_prefixes = _analyze_validation(
-        lines,
-        metadata_candidate_bounds=metadata_candidate_bounds,
-    )
+    (
+        validation_evidence,
+        validation_indexes,
+        validation_context_prefixes,
+        validation_list_item_records,
+    ) = _analyze_validation(lines, metadata_candidate_bounds=metadata_candidate_bounds)
     generated_dependency_message = metadata_bounds is not None and _has_generated_dependency_header(
         lines[0], metadata_records
     )
@@ -945,6 +1120,16 @@ def validate_message(message: str, *, label: str) -> list[str]:
             f"{label} must record validation evidence or a specific reason validation "
             "was not run. Include a result such as `uv run make ci: passed` or "
             "`Validation: not run because this changes documentation only`."
+        )
+    if (
+        not generated_dependency_message
+        and len(validation_list_item_records) > 1
+        and not all(validation_list_item_records)
+    ):
+        errors.append(
+            f"{label} records multiple validation results outside separate top-level "
+            "`- ` list items. Put each result in its own item under a `## Validation` "
+            "heading so rendered history keeps the results separate."
         )
     errors.extend(
         _line_length_errors(
