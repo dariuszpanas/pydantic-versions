@@ -52,6 +52,19 @@ Generated model object identity is stable within one compiled family. Private
 attributes and implementation class names are not a cross-release contract.
 The supported JSON Schema and serialized payload behavior is the contract.
 
+The [explicit historical nested-shape
+grammar](../guide/generated-wire-contracts.md#explicit-historical-nested-shapes)
+is part of the supported declaration contract. Compatible 1.x releases preserve
+its statically owned scalar, model, dataclass, `TypedDict`, union, and exact
+built-in-container behavior, including the post-validation requirement that a
+managed value still conform to its annotation. Effective alias normalization,
+family-owned metadata preflight and envelope verification, reserved
+omitted-route output locations, scalar ownership of recoverable scalar output,
+and fail-closed rejection of runtime-unrecoverable overlapping union arms are
+part of that boundary. Broad mappings, abstract or custom containers, and other
+opaque carriers remain unsupported declarations; support for a new, statically
+identifiable shape may be added in a compatible minor release.
+
 ## Inventories and plans
 
 Exported inventory and plan records, their frozen fields, `to_dict()` keys and
