@@ -1,4 +1,5 @@
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
@@ -11,6 +12,16 @@ DOCS_ORIGIN = "https://pydantic-versions.readthedocs.io/"
 DOCS_BADGE_URL = "https://img.shields.io/readthedocs/pydantic-versions/latest.svg"
 REDIRECTING_BADGE_URL = "https://readthedocs.org/projects/pydantic-versions/badge/?version=latest"
 MARKDOWN_LINK = re.compile(r"\[[^]]+\]\((?P<url>[^)\s]+)\)")
+
+
+def test_runtime_dependencies_match_direct_production_requirements() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["dependencies"] == [
+        "annotated-types>=0.6.0",
+        "pydantic>=2.12.3,<3.0",
+        "typing-extensions>=4.14.1",
+    ]
 
 
 def test_readme_uses_a_non_redirecting_documentation_badge_for_pypi() -> None:

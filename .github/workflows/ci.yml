@@ -25,7 +25,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -53,7 +53,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -75,7 +75,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -99,7 +99,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -146,7 +146,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python ${{ matrix.python-version }}
         env:
@@ -161,14 +161,21 @@ jobs:
       - name: Install Pydantic ${{ matrix.pydantic-profile }} endpoint
         if: matrix.pydantic-spec != ''
         env:
+          PYDANTIC_PROFILE: ${{ matrix.pydantic-profile }}
           PYDANTIC_SPEC: ${{ matrix.pydantic-spec }}
-        run: >-
-          uv pip install
-          --python .venv/bin/python
-          --upgrade
-          --refresh-package pydantic
-          --refresh-package pydantic-core
-          "$PYDANTIC_SPEC"
+        run: |
+          PACKAGES=("$PYDANTIC_SPEC")
+          if [ "$PYDANTIC_PROFILE" = "2.12.3" ]; then
+            PACKAGES+=("annotated-types==0.6.0" "typing-extensions==4.14.1")
+          fi
+          uv pip install \
+            --python .venv/bin/python \
+            --upgrade \
+            --refresh-package annotated-types \
+            --refresh-package pydantic \
+            --refresh-package pydantic-core \
+            --refresh-package typing-extensions \
+            "${PACKAGES[@]}"
 
       - name: Verify test runtime
         env:
@@ -200,6 +207,8 @@ jobs:
               )
           elif profile == "2.12.3":
               assert actual_pydantic == "2.12.3", actual_pydantic
+              assert version("annotated-types") == "0.6.0"
+              assert version("typing-extensions") == "4.14.1"
           else:
               release = tuple(map(int, actual_pydantic.split(".")[:3]))
               assert (2, 12, 3) <= release < (3, 0, 0), actual_pydantic
@@ -225,7 +234,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          version: "0.11.31"
+          version: "0.12.5"
 
       - name: Set up Python
         run: uv python install 3.12
