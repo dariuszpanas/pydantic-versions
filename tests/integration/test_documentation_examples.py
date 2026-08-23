@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -155,10 +156,18 @@ def _runtime_signature_shape(
             name,
             parameter.kind.name,
             _annotation_source(parameter.annotation),
-            None if parameter.default is inspect.Parameter.empty else repr(parameter.default),
+            _runtime_default_source(parameter.default),
         )
         for name, parameter in inspect.signature(callable_).parameters.items()
     )
+
+
+def _runtime_default_source(default: Any) -> str | None:
+    if default is inspect.Parameter.empty:
+        return None
+    if type(default) is object:
+        return "..."
+    return repr(default)
 
 
 def _documented_signature_shape(
@@ -223,13 +232,10 @@ def _documented_signature_shape(
     return function.name, tuple(shape), ast.unparse(function.returns)
 
 
-def test_documented_decorator_signatures_match_the_public_api() -> None:
+def test_every_public_helper_has_one_exact_documented_signature() -> None:
     reference = API_REFERENCE.read_text(encoding="utf-8")
     expected_names = {
-        "migration",
-        "schema_version",
-        "schema_versions",
-        "versioned_schema",
+        name for name in public_api.__all__ if inspect.isfunction(getattr(public_api, name))
     }
     blocks: defaultdict[str, list[str]] = defaultdict(list)
     for match in _API_SIGNATURE_BLOCK.finditer(reference):
@@ -246,6 +252,51 @@ def test_documented_decorator_signatures_match_the_public_api() -> None:
         runtime = getattr(public_api, name)
         assert signature == _runtime_signature_shape(runtime)
         assert return_annotation == _annotation_source(inspect.signature(runtime).return_annotation)
+
+
+def _is_frozen_dataclass_definition(node: ast.ClassDef) -> bool:
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if not isinstance(decorator.func, ast.Name) or decorator.func.id != "dataclass":
+            continue
+        return any(
+            keyword.arg == "frozen"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in decorator.keywords
+        )
+    return False
+
+
+def test_every_exported_frozen_record_has_one_exact_documented_definition() -> None:
+    reference = API_REFERENCE.read_text(encoding="utf-8")
+    documented: defaultdict[str, list[tuple[str, ...]]] = defaultdict(list)
+    for _, source in _python_fences(reference):
+        for node in ast.parse(source).body:
+            if not isinstance(node, ast.ClassDef) or not _is_frozen_dataclass_definition(node):
+                continue
+            documented[node.name].append(
+                tuple(
+                    statement.target.id
+                    for statement in node.body
+                    if isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)
+                )
+            )
+
+    expected = {
+        name: tuple(field.name for field in fields(record))
+        for name in public_api.__all__
+        if isinstance((record := getattr(public_api, name)), type)
+        and is_dataclass(record)
+        and record.__dataclass_params__.frozen
+    }
+    assert {name: len(definitions) for name, definitions in documented.items()} == dict.fromkeys(
+        expected,
+        1,
+    )
+    assert {name: definitions[0] for name, definitions in documented.items()} == expected
 
 
 def test_documented_package_version_is_a_single_typed_api_entry() -> None:

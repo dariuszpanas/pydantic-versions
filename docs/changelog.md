@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forcibly rebuilt after compilation.
 - Kept the repository-root and rendered contributor guides synchronized and
   aligned their type-check instructions with the enforced `ty` and mypy gate.
+- Completed the stable API reference for every exported frozen record and
+  public helper signature, added executable drift checks, and replaced stale
+  pre-1.0 contract wording in the migrations guide.
 - Preserved opaque `Any` values and mapping keys through canonical rendering
   when Pydantic cannot serialize them directly, without recursive fallback.
 - Kept callback-supplied nested wrapper models hashable when projected through

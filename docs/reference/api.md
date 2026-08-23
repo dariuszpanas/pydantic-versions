@@ -186,13 +186,33 @@ The generated plan inventory and plans are the preferred compatibility artifacts
 
 ### Nested declarations
 
-`NestedFamily`, `MatchingLabels`, and `matching_labels()` are exported as frozen
-declaration types so the final constructor remains stable. These allow complex
-nested schema execution and graph compilation to handle tree-structured data safely.
-An explicit mapping may select child labels independently for historical parent
-versions, but the current parent label must map to the child's current label.
-Compilation rejects a different current mapping because application models hold
-authoritative current child data.
+```python
+@dataclass(frozen=True)
+class MatchingLabels:
+    pass
+
+
+@dataclass(frozen=True)
+class NestedFamily:
+    path: VersionPath
+    family: SchemaFamily[Any] | Callable[[], SchemaFamily[Any]]
+    versions: Mapping[str, str] | MatchingLabels
+```
+
+<!-- pv-api-signature: matching_labels -->
+```python
+def matching_labels() -> MatchingLabels: ...
+```
+
+`NestedFamily` declares the path to a child family and the child label selected
+for each parent label. `family` accepts either the family itself or a
+zero-argument callable that resolves it lazily. An explicit `versions` mapping
+may select child labels independently for historical parent versions;
+`matching_labels()` returns the fieldless `MatchingLabels` sentinel for the
+common case where parent and child labels match exactly. The current parent
+label must map to the child's current label. Compilation rejects a different
+current mapping because application models hold authoritative current child
+data.
 
 ## Compiled inventory and plans
 
@@ -406,15 +426,52 @@ duplicate registrations fail.
 
 ## Patch helpers and records
 
-`field_default(name, default)` or `field_default(name, default_factory=callable)`
+```python
+@dataclass(frozen=True)
+class FieldDefault:
+    name: str
+    default: Any = None
+    default_factory: Callable[[], Any] | None = None
+    has_default: bool = True
+
+
+@dataclass(frozen=True)
+class FieldRemoved:
+    name: str
+
+
+@dataclass(frozen=True)
+class FieldRenamed:
+    current_name: str
+    version_name: str
+```
+
+<!-- pv-api-signature: field_default -->
+```python
+def field_default(
+    name: str,
+    default: Any = ...,
+    *,
+    default_factory: Callable[[], Any] | None = None,
+) -> FieldDefault: ...
+```
 
 Changes a field default for a historical version and returns `FieldDefault`.
+Exactly one of `default` or `default_factory` is required. The ellipsis above
+represents the helper's private missing-value sentinel, not a supported default
+value.
 
-`field_removed(name)`
+<!-- pv-api-signature: field_removed -->
+```python
+def field_removed(name: str) -> FieldRemoved: ...
+```
 
 Removes a field from a historical version and returns `FieldRemoved`.
 
-`field_renamed(current_name, version_name)`
+<!-- pv-api-signature: field_renamed -->
+```python
+def field_renamed(current_name: str, version_name: str) -> FieldRenamed: ...
+```
 
 Uses `version_name` in the historical schema and maps it back to `current_name`
 during upgrade validation. Returns `FieldRenamed`.
@@ -423,17 +480,41 @@ during upgrade validation. Returns `FieldRenamed`.
 
 ## Runtime compatibility helpers
 
-`model_for_version(subject, version)`
+<!-- pv-api-signature: model_for_version -->
+```python
+def model_for_version(
+    subject: type[T] | SchemaFamily[T],
+    version: str,
+) -> type[BaseModel]: ...
+```
 
 Returns the generated object-shaped Pydantic wire contract for a declared
 version. `subject` may be a family or a model with an explicit default family.
 
-`validate_versioned(subject, data, *, version=None)`
+<!-- pv-api-signature: validate_versioned -->
+```python
+def validate_versioned(
+    subject: type[T] | SchemaFamily[T],
+    data: Any,
+    *,
+    version: str | None = None,
+) -> VersionedValidation[T]: ...
+```
 
 Validates `data` against the discovered source version, applies adjacent
 forward upgrades, and validates the current model.
 
-`dump_versioned(subject, *, version, data=None, include_version=True, **dump_kwargs)`
+<!-- pv-api-signature: dump_versioned -->
+```python
+def dump_versioned(
+    subject: type[T] | SchemaFamily[T],
+    *,
+    version: str,
+    data: T | Mapping[str, Any] | None = None,
+    include_version: bool = True,
+    **dump_kwargs: Any,
+) -> dict[str, Any]: ...
+```
 
 With `data=None`, delegates to target-direct `defaults_for()` and does not
 require a render route. With model or mapping data, converts current data using
