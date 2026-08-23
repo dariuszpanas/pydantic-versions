@@ -652,8 +652,10 @@ def _nested_family_collection_kind(
 
 def _has_duplicate_payload(payload: list[Any]) -> bool:
     for index, item in enumerate(payload):
-        if item in payload[:index]:
-            return True
+        for previous_index in range(index):
+            previous = payload[previous_index]
+            if previous is item or previous == item:
+                return True
     return False
 
 

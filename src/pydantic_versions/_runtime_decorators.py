@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -28,12 +29,22 @@ from pydantic_versions._runtime_versioning import (
 )
 from pydantic_versions.exceptions import InvalidMigrationError
 
+type _DecoratorDispatchSite = tuple[tuple[str, str], ...]
+type _DecoratorLocation = tuple[str | int, ...]
+type _DecoratorCandidate = tuple[Any, _DecoratorLocation, _DecoratorLocation]
+type _DecoratorUnionArmCache = dict[tuple[int, int], Any]
+type _DecoratorRouteGroups = dict[
+    _DecoratorDispatchSite,
+    tuple[_CompiledDecoratorNestedFamily, ...],
+]
+type _DecoratorRouteGroupCache = dict[int, _DecoratorRouteGroups]
+
 
 @dataclass
 class _DecoratorRouteSelection:
     route: _CompiledDecoratorNestedFamily
-    location: tuple[str | int, ...]
-    relative_location: tuple[str | int, ...]
+    location: _DecoratorLocation
+    relative_location: _DecoratorLocation
     site_routes: tuple[_CompiledDecoratorNestedFamily, ...]
     label: str
     parent: _DecoratorRouteSelection | None = None
@@ -48,9 +59,15 @@ def _select_decorator_routes(
     source_version: _CompiledVersion | None,
     location_prefix: tuple[str | int, ...] = (),
     parent_selection: _DecoratorRouteSelection | None = None,
+    _union_arm_cache: _DecoratorUnionArmCache | None = None,
+    _route_group_cache: _DecoratorRouteGroupCache | None = None,
 ) -> tuple[_DecoratorRouteSelection, ...]:
     if not compiled.decorator_nested:
         return ()
+    if _union_arm_cache is None:
+        _union_arm_cache = {}
+    if _route_group_cache is None:
+        _route_group_cache = {}
     root_names = {
         route.path[0]: (
             route.path[0]
@@ -60,6 +77,10 @@ def _select_decorator_routes(
         for route in compiled.decorator_nested
     }
     selected: list[_DecoratorRouteSelection] = []
+    route_groups = _decorator_route_groups(
+        compiled,
+        cache=_route_group_cache,
+    )
     for route in compiled.decorator_nested:
         if root_names[route.path[0]] is None:
             continue
@@ -68,19 +89,15 @@ def _select_decorator_routes(
             annotation=type(value),
             route=route,
             root_names=root_names,
+            union_arm_cache=_union_arm_cache,
         ):
             expected = (route.family.model, route.family.model_for(parent_label))
             if isinstance(nested_value, expected):
-                site = _decorator_dispatch_site(route)
                 selection = _DecoratorRouteSelection(
                     route=route,
                     location=(*location_prefix, *location),
                     relative_location=location,
-                    site_routes=tuple(
-                        candidate
-                        for candidate in compiled.decorator_nested
-                        if _decorator_dispatch_site(candidate) == site
-                    ),
+                    site_routes=route_groups[_decorator_dispatch_site(route)],
                     label=route.child_label(parent_label),
                     parent=parent_selection,
                 )
@@ -99,6 +116,8 @@ def _select_decorator_routes(
                         source_version=child_source,
                         location_prefix=selection.location,
                         parent_selection=selection,
+                        _union_arm_cache=_union_arm_cache,
+                        _route_group_cache=_route_group_cache,
                     )
                 )
     return tuple(selected)
@@ -110,6 +129,7 @@ def _walk_authoritative_decorator_route(
     annotation: Any,
     route: _CompiledDecoratorNestedFamily,
     root_names: Mapping[str, str | None],
+    union_arm_cache: _DecoratorUnionArmCache,
 ) -> tuple[tuple[Any, tuple[str | int, ...]], ...]:
     states: list[tuple[Any, Any, tuple[str | int, ...]]] = [(value, annotation, ())]
     for step_index, step in enumerate(route.traversal):
@@ -141,7 +161,13 @@ def _walk_authoritative_decorator_route(
                 ordinal = int(step.value)
                 if ordinal >= len(arguments):
                     continue
-                selected = _matching_declared_annotation(normalized_annotation, current)
+                cache_key = (id(normalized_annotation), id(current))
+                if cache_key not in union_arm_cache:
+                    union_arm_cache[cache_key] = _matching_declared_annotation(
+                        normalized_annotation,
+                        current,
+                    )
+                selected = union_arm_cache[cache_key]
                 candidate = _strip_annotated(arguments[ordinal])
                 if _strip_annotated(selected) != candidate:
                     continue
@@ -461,11 +487,34 @@ def _decorator_selections_parent_first(
 
 def _decorator_dispatch_site(
     route: _CompiledDecoratorNestedFamily,
-) -> tuple[tuple[str, str], ...]:
+) -> _DecoratorDispatchSite:
     return tuple(
         (step.kind, "*") if step.kind == "union_arm" else (step.kind, step.value)
         for step in route.traversal
     )
+
+
+def _decorator_route_groups(
+    compiled: _CompiledFamily,
+    *,
+    cache: _DecoratorRouteGroupCache,
+) -> _DecoratorRouteGroups:
+    cache_key = id(compiled)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    mutable_groups: dict[
+        _DecoratorDispatchSite,
+        list[_CompiledDecoratorNestedFamily],
+    ] = {}
+    for route in compiled.decorator_nested:
+        site = _decorator_dispatch_site(route)
+        mutable_groups.setdefault(site, []).append(route)
+
+    groups = {site: tuple(routes) for site, routes in mutable_groups.items()}
+    cache[cache_key] = groups
+    return groups
 
 
 def _walk_decorator_payload_candidates(
@@ -550,7 +599,7 @@ def _reconcile_decorator_selections(
         )
 
     selected_by_site: dict[
-        tuple[int, tuple[tuple[str, str], ...]],
+        tuple[int, _DecoratorDispatchSite],
         list[_DecoratorRouteSelection],
     ] = {}
     for selection in selections:
@@ -590,16 +639,17 @@ def _reconcile_decorator_selections(
                 )
                 raise InvalidMigrationError(msg)
             location_prefix = parent.location
-        candidates = [
+        candidates = tuple(
             (value, (*location_prefix, *relative_location), relative_location)
             for value, relative_location in _walk_decorator_payload_candidates(
                 base_payload,
                 declarations[0],
             )
-        ]
+        )
+        candidate_identities = tuple(id(value) for value, _, _ in candidates)
         if any(
-            id(value) in identity_sites and identity_sites[id(value)] != site_key
-            for value, _, _ in candidates
+            identity in identity_sites and identity_sites[identity] != site_key
+            for identity in candidate_identities
         ):
             msg = (
                 "Parent migration moved a decorator nested occurrence across dispatch "
@@ -613,44 +663,78 @@ def _reconcile_decorator_selections(
             )
             raise InvalidMigrationError(msg)
 
-        remaining_candidates = list(enumerate(candidates))
-        remaining_previous = list(previous)
+        candidate_indexes_by_identity: dict[int, list[int]] = {}
+        for candidate_index, identity in enumerate(candidate_identities):
+            candidate_indexes_by_identity.setdefault(identity, []).append(candidate_index)
+        claimed_candidate_indexes: set[int] = set()
+        available_previous_indexes = set(range(len(previous)))
 
         # Object identity is the authoritative occurrence token. It permits a
         # heterogeneous list to reorder without rediscovering its union branch.
-        for selection in tuple(remaining_previous):
-            if selection.value_identity is None:
+        for previous_index, selection in enumerate(previous):
+            identity = selection.value_identity
+            if identity is None:
                 continue
-            matches = [
-                (index, candidate)
-                for index, candidate in remaining_candidates
-                if id(candidate[0]) == selection.value_identity
-            ]
-            if len(matches) > 1:
+            candidate_indexes = candidate_indexes_by_identity.get(identity, ())
+            if len(candidate_indexes) > 1:
                 msg = (
                     "Parent migration reused one decorator nested occurrence at "
                     f"path {selection.route.path!r}"
                 )
                 raise InvalidMigrationError(msg)
-            if not matches:
+            if not candidate_indexes:
                 continue
-            candidate_index, (value, location, relative_location) = matches[0]
+            candidate_index = candidate_indexes[0]
+            if candidate_index in claimed_candidate_indexes:
+                continue
+            value, location, relative_location = candidates[candidate_index]
             selection.location = location
             selection.relative_location = relative_location
-            selection.value_identity = id(value)
-            remaining_previous.remove(selection)
-            remaining_candidates = [
-                item for item in remaining_candidates if item[0] != candidate_index
-            ]
+            selection.value_identity = candidate_identities[candidate_index]
+            available_previous_indexes.remove(previous_index)
+            claimed_candidate_indexes.add(candidate_index)
+
+        previous_indexes_by_location: dict[
+            _DecoratorLocation,
+            deque[int],
+        ] = {}
+        for previous_index in range(len(previous)):
+            if previous_index not in available_previous_indexes:
+                continue
+            selection = previous[previous_index]
+            previous_indexes_by_location.setdefault(
+                selection.location,
+                deque(),
+            ).append(previous_index)
+
+        routes_by_exact_model: dict[
+            type[BaseModel],
+            list[_CompiledDecoratorNestedFamily],
+        ] = {}
+        for declaration in declarations:
+            routes_by_exact_model.setdefault(
+                declaration.family.model,
+                [],
+            ).append(declaration)
 
         # An exact current-model instance is an explicit, authoritative branch
         # replacement and may establish a new route without validation.
-        for candidate_index, (value, location, relative_location) in tuple(remaining_candidates):
-            if not remaining_previous:
+        remaining_candidates: list[_DecoratorCandidate] = []
+        fallback_previous_index = 0
+        for candidate_index, (value, location, relative_location) in enumerate(candidates):
+            if candidate_index in claimed_candidate_indexes:
+                continue
+            if not available_previous_indexes:
+                remaining_candidates.extend(
+                    candidates[index]
+                    for index in range(candidate_index, len(candidates))
+                    if index not in claimed_candidate_indexes
+                )
                 break
             if not isinstance(value, BaseModel):
+                remaining_candidates.append((value, location, relative_location))
                 continue
-            matching = tuple(route for route in declarations if type(value) is route.family.model)
+            matching = routes_by_exact_model.get(type(value), ())
             if len(matching) != 1:
                 msg = (
                     "Parent migration supplied a typed decorator nested replacement "
@@ -658,26 +742,36 @@ def _reconcile_decorator_selections(
                 )
                 raise InvalidMigrationError(msg)
             route = matching[0]
-            replaced = next(
-                (selection for selection in remaining_previous if selection.location == location),
-                remaining_previous[0],
-            )
+            location_indexes = previous_indexes_by_location.get(location)
+            while location_indexes and location_indexes[0] not in available_previous_indexes:
+                location_indexes.popleft()
+            if location_indexes:
+                previous_index = location_indexes.popleft()
+            else:
+                while fallback_previous_index not in available_previous_indexes:
+                    fallback_previous_index += 1
+                previous_index = fallback_previous_index
+                fallback_previous_index += 1
+            available_previous_indexes.remove(previous_index)
+            replaced = previous[previous_index]
             replaced.route = route
             replaced.location = location
             replaced.relative_location = relative_location
             replaced.label = route.family.current_version
             replaced.value_identity = id(value)
             replaced_owner_ids.add(id(replaced))
-            remaining_previous.remove(replaced)
-            remaining_candidates = [
-                item for item in remaining_candidates if item[0] != candidate_index
-            ]
+            claimed_candidate_indexes.add(candidate_index)
+
+        remaining_previous = [
+            selection
+            for previous_index, selection in enumerate(previous)
+            if previous_index in available_previous_indexes
+        ]
 
         if not remaining_previous:
             if remaining_candidates and not all(
-                len(tuple(route for route in declarations if type(value) is route.family.model))
-                == 1
-                for _, (value, _, _) in remaining_candidates
+                len(routes_by_exact_model.get(type(value), ())) == 1
+                for value, _, _ in remaining_candidates
             ):
                 msg = (
                     "Parent migration changed decorator nested occurrence cardinality at "
@@ -692,9 +786,9 @@ def _reconcile_decorator_selections(
         if all(_route_has_mapping_anchor(selection.route) for selection in remaining_previous):
             anchored = {selection.location: selection for selection in remaining_previous}
             if len(anchored) == len(remaining_previous) and all(
-                location in anchored for _, (_, location, _) in remaining_candidates
+                location in anchored for _, location, _ in remaining_candidates
             ):
-                for _, (value, location, relative_location) in remaining_candidates:
+                for value, location, relative_location in remaining_candidates:
                     selection = anchored[location]
                     selection.relative_location = relative_location
                     selection.value_identity = id(value)
@@ -710,7 +804,7 @@ def _reconcile_decorator_selections(
                     "one-to-one"
                 )
                 raise InvalidMigrationError(msg)
-            for selection, (_, (value, location, relative_location)) in zip(
+            for selection, (value, location, relative_location) in zip(
                 remaining_previous,
                 remaining_candidates,
                 strict=True,
@@ -781,6 +875,16 @@ def _discover_typed_decorator_selections(
     selections: tuple[_DecoratorRouteSelection, ...],
 ) -> tuple[_DecoratorRouteSelection, ...]:
     discovered = list(selections)
+    occupied_locations = {(id(selection.parent), selection.location) for selection in selections}
+    locations_by_identity: dict[int, set[tuple[str | int, ...]]] = {}
+    children_by_parent: dict[int, list[_DecoratorRouteSelection]] = {}
+    for selection in selections:
+        children_by_parent.setdefault(id(selection.parent), []).append(selection)
+        if selection.value_identity is not None:
+            locations_by_identity.setdefault(selection.value_identity, set()).add(
+                selection.location
+            )
+    route_group_cache: _DecoratorRouteGroupCache = {}
 
     def visit_owner(
         owner_payload: Any,
@@ -789,28 +893,29 @@ def _discover_typed_decorator_selections(
         location_prefix: tuple[str | int, ...],
         parent: _DecoratorRouteSelection | None,
     ) -> None:
-        sites: dict[
-            tuple[tuple[str, str], ...],
-            list[_CompiledDecoratorNestedFamily],
-        ] = {}
-        for route in owner_compiled.decorator_nested:
-            sites.setdefault(_decorator_dispatch_site(route), []).append(route)
-
-        for routes in sites.values():
-            declarations = tuple(routes)
+        parent_identity = id(parent)
+        route_groups = _decorator_route_groups(
+            owner_compiled,
+            cache=route_group_cache,
+        )
+        for declarations in route_groups.values():
+            routes_by_exact_model: dict[
+                type[BaseModel],
+                list[_CompiledDecoratorNestedFamily],
+            ] = {}
+            for declaration in declarations:
+                routes_by_exact_model.setdefault(
+                    declaration.family.model,
+                    [],
+                ).append(declaration)
             for value, relative_location in _walk_decorator_payload_candidates(
                 owner_payload,
                 declarations[0],
             ):
                 location = (*location_prefix, *relative_location)
-                if any(
-                    selection.parent is parent and selection.location == location
-                    for selection in discovered
-                ):
+                if (parent_identity, location) in occupied_locations:
                     continue
-                matches = tuple(
-                    route for route in declarations if type(value) is route.family.model
-                )
+                matches = routes_by_exact_model.get(type(value), ())
                 if len(matches) != 1:
                     if isinstance(value, Mapping) and not _route_has_non_child_mapping_arm(
                         owner_compiled.model,
@@ -824,28 +929,31 @@ def _discover_typed_decorator_selections(
                         raise InvalidMigrationError(msg)
                     continue
                 route = matches[0]
-                if any(
-                    selection.value_identity == id(value) and selection.location != location
-                    for selection in discovered
+                value_identity = id(value)
+                existing_locations = locations_by_identity.get(value_identity)
+                if existing_locations is not None and (
+                    len(existing_locations) != 1 or location not in existing_locations
                 ):
                     msg = (
                         "Parent migration reused one decorator nested occurrence at "
                         f"path {route.path!r}"
                     )
                     raise InvalidMigrationError(msg)
-                discovered.append(
-                    _DecoratorRouteSelection(
-                        route=route,
-                        location=location,
-                        relative_location=relative_location,
-                        site_routes=declarations,
-                        label=route.family.current_version,
-                        parent=parent,
-                        value_identity=id(value),
-                    )
+                selection = _DecoratorRouteSelection(
+                    route=route,
+                    location=location,
+                    relative_location=relative_location,
+                    site_routes=declarations,
+                    label=route.family.current_version,
+                    parent=parent,
+                    value_identity=value_identity,
                 )
+                discovered.append(selection)
+                occupied_locations.add((parent_identity, location))
+                locations_by_identity.setdefault(value_identity, set()).add(location)
+                children_by_parent.setdefault(parent_identity, []).append(selection)
 
-        children = tuple(selection for selection in discovered if selection.parent is parent)
+        children = tuple(children_by_parent.get(parent_identity, ()))
         for child in children:
             found, child_payload = _payload_at_location(payload, child.location)
             if not found:

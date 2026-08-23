@@ -571,6 +571,8 @@ def _prune_serialized_decorator_metadata(
     selections: tuple[_DecoratorRouteSelection, ...],
     by_alias: Any,
 ) -> None:
+    if not selections:
+        return
     source_payload = _extract_declared_fields(source_model)
     for selection in _decorator_selections_child_first(selections):
         location = _serialized_decorator_selection_location(

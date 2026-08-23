@@ -174,8 +174,17 @@ def _is_runtime_base_model_type(annotation: Any) -> bool:
 
 
 def _runtime_value_matches_annotation(value: Any, annotation: Any) -> bool:
+    supertype = getattr(annotation, "__supertype__", None)
+    if (
+        isinstance(annotation, type)
+        and type(value) is annotation
+        and (supertype is None or supertype is annotation)
+    ):
+        return True
     normalized = _runtime_annotation_value(annotation)
     if normalized is Any:
+        return True
+    if isinstance(normalized, type) and type(value) is normalized:
         return True
     if isinstance(normalized, TypeVar):
         candidates = _runtime_type_parameter_values(normalized)
@@ -627,6 +636,15 @@ def _field_crosses_wire_boundary(field_info: Any) -> bool:
 
 
 def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
+    value_type = type(value)
+    if (
+        value_type is NoneType
+        or value_type is bool
+        or value_type is int
+        or value_type is float
+        or value_type is str
+    ):
+        return value
     try:
         if isinstance(value, bytes):
             return to_jsonable_python(
