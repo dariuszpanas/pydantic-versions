@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import typing
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -1289,6 +1290,55 @@ def test_nested_family_mapping_boundary_is_rejected_during_compilation() -> None
         family.compile()
 
 
+def test_nested_family_scalar_boundary_is_rejected_during_compilation() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="scalar_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        child: int
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="scalar_boundary_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="resolve to exactly one Pydantic model"):
+        family.compile()
+
+
+def test_nested_family_unparameterized_collection_is_rejected_during_compilation() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="unparameterized_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+    legacy_list = typing.List  # noqa: UP006  # Intentionally exercise the legacy bare alias.
+    parent_model = create_model(
+        "UnparameterizedBoundaryParent",
+        child=(legacy_list, ...),
+    )
+    family = SchemaFamily(
+        model=parent_model,
+        name="unparameterized_boundary_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="unparameterized collection"):
+        family.compile()
+
+
 def test_nested_family_wrong_model_is_rejected_with_context() -> None:
     class ExpectedChild(BaseModel):
         value: int
@@ -1350,6 +1400,33 @@ def test_nested_family_heterogeneous_union_is_rejected_during_compilation() -> N
         family.compile()
 
 
+def test_nested_family_heterogeneous_tuple_is_rejected_during_compilation() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    class OtherPayload(BaseModel):
+        other: str
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="tuple_boundary_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentPayload(BaseModel):
+        child: tuple[ChildPayload, OtherPayload]
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="tuple_boundary_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="heterogeneous collection"):
+        family.compile()
+
+
 def test_nested_family_supported_container_boundaries_compile() -> None:
     class ChildPayload(BaseModel):
         value: int
@@ -1379,6 +1456,38 @@ def test_nested_family_supported_container_boundaries_compile() -> None:
     wire = family.model_for("1")
 
     assert set(wire.model_fields) == set(paths) | {"schema_version"}
+
+
+def test_nested_projection_rewrites_annotated_collection_elements() -> None:
+    class ChildPayload(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=ChildPayload,
+        name="annotated_element_child",
+        versions=(
+            SchemaVersion("1", patches=(field_renamed("value", "legacy_value"),)),
+            SchemaVersion("2"),
+        ),
+    )
+
+    class ParentPayload(BaseModel):
+        children: list[Annotated[ChildPayload, Field(description="nested child")]]
+
+    family = SchemaFamily(
+        model=ParentPayload,
+        name="annotated_element_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(NestedFamily("children", child_family, matching_labels()),),
+    )
+
+    historical = family.model_for("1")
+    validated = historical.model_validate({"children": [{"legacy_value": 7}]})
+
+    assert validated.model_dump() == {
+        "children": [{"legacy_value": 7, "schema_version": "1"}],
+        "schema_version": "1",
+    }
 
 
 def test_nested_projection_rewrites_deeply_nested_models() -> None:

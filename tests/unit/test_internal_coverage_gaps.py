@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Discriminator, Field, create_model
 
 from pydantic_versions import SchemaFamily, SchemaVersion, VersionTransition
 from pydantic_versions._compiler import (
+    _CompiledDecoratorNestedFamily,
     _CompiledField,
     _CompiledNestedFamily,
     _validate_compilation_boundary,
@@ -86,6 +87,19 @@ def test_compiler_private_paths_raise_expected_errors() -> None:
         _CompiledNestedFamily(path=("child",), family=cast(Any, object()), versions=()).child_label(
             "legacy"
         )
+
+    decorator_child = SchemaFamily(
+        model=Base,
+        name="compiled-decorator-child",
+        versions=(SchemaVersion("current"),),
+    )
+    with pytest.raises(SchemaCompilationError, match="has no matching child label"):
+        _CompiledDecoratorNestedFamily(
+            path=("child",),
+            family=decorator_child,
+            traversal=(),
+            collection_kind=None,
+        ).child_label("legacy")
 
     with pytest.raises(SchemaCompilationError, match="must declare at least one version"):
         _validate_family_declarations(
