@@ -925,53 +925,32 @@ def _validate_document_metadata_attributes(
     family_name: str,
 ) -> None:
     path = (metadata_path,) if isinstance(metadata_path, str) else metadata_path
-    current = value
-    for index, part in enumerate(path):
-        if index > 0:
-            current_mapping = _document_metadata_mapping(current)
-            if current_mapping is None:
-                try:
-                    namespace = object.__getattribute__(current, "__dict__")
-                except (AttributeError, TypeError):
-                    namespace = None
-                if isinstance(namespace, Mapping):
-                    current_mapping = namespace
-            if current_mapping is None or set(current_mapping) != {part}:
-                msg = (
-                    f"Version metadata for family {family_name!r} reserves the entire "
-                    f"root {path[0]!r}; the complete metadata path is required "
-                    "without siblings"
-                )
-                raise ValueError(msg)
-            current = current_mapping[part]
-            continue
-        if isinstance(current, Mapping):
-            if part not in current:
-                if index == 0:
-                    return
-                msg = (
-                    f"Version metadata for family {family_name!r} is incomplete at "
-                    f"reserved path component {part!r}"
-                )
-                raise ValueError(msg)
-            current = current[part]
-            continue
-        try:
-            current = getattr(current, part)
-        except AttributeError:
-            if index == 0:
-                return
+    try:
+        current = getattr(value, path[0])
+    except AttributeError:
+        return
+    except Exception as exc:
+        msg = (
+            f"Version metadata for family {family_name!r} could not be read "
+            f"from attribute path component {path[0]!r}"
+        )
+        raise ValueError(msg) from exc
+    for part in path[1:]:
+        current_mapping = _document_metadata_mapping(current)
+        if current_mapping is None:
+            try:
+                namespace = object.__getattribute__(current, "__dict__")
+            except (AttributeError, TypeError):
+                namespace = None
+            if isinstance(namespace, Mapping):
+                current_mapping = namespace
+        if current_mapping is None or set(current_mapping) != {part}:
             msg = (
-                f"Version metadata for family {family_name!r} is incomplete at "
-                f"reserved path component {part!r}"
+                f"Version metadata for family {family_name!r} reserves the entire "
+                f"root {path[0]!r}; the complete metadata path is required without siblings"
             )
-            raise ValueError(msg) from None
-        except Exception as exc:
-            msg = (
-                f"Version metadata for family {family_name!r} could not be read "
-                f"from attribute path component {part!r}"
-            )
-            raise ValueError(msg) from exc
+            raise ValueError(msg)
+        current = current_mapping[part]
     if current != expected:
         msg = f"Version metadata for family {family_name!r} is {current!r}; expected {expected!r}"
         raise ValueError(msg)
@@ -1094,7 +1073,8 @@ def _add_document_metadata_json_schema(
         current.setdefault("type", "object")
         properties = current.setdefault("properties", {})
         if not isinstance(properties, dict):
-            return
+            msg = "Family-owned document metadata requires object-shaped JSON Schema properties"
+            raise SchemaCompilationError(msg)
         if index == len(path) - 1:
             properties[part] = {
                 "const": label,
@@ -1124,13 +1104,7 @@ def _validate_explicit_wire_model_metadata(
     if metadata is None or metadata.owner != "model":
         return
 
-    metadata_field = _model_metadata_field(family)
-    if metadata_field is None:
-        _raise_projection_unsupported(
-            family,
-            projection,
-            "explicit wire models do not yet support nested model-owned metadata",
-        )
+    metadata_field = cast(str, _model_metadata_field(family))
     if metadata_field not in wire_model.model_fields:
         _raise_projection_unsupported(
             family,
@@ -1142,8 +1116,6 @@ def _validate_explicit_wire_model_metadata(
     field_info = wire_model.model_fields[metadata_field]
     model_label_type = _literal_type(projection.label)
     model_field_type = field_info.annotation
-    if get_origin(model_field_type) is Annotated:
-        model_field_type = get_args(model_field_type)[0]
 
     if model_field_type != model_label_type:
         msg = (
@@ -1172,8 +1144,10 @@ def _build_model_for_projection_unchecked(
 ) -> type[BaseModel]:
     model_metadata_field = _model_metadata_field(family)
     used_nested: set[tuple[str, ...]] = set()
-    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None] = {}
-    nested_projection_stack: set[tuple[int, tuple[str, ...], str]] = set()
+    nested_projection_cache: dict[
+        tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None
+    ] = {}
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str, bool]] = set()
     fields: dict[str, Any] = {}
     for compiled_field in projection.fields:
         if compiled_field.version_name is None:
@@ -1219,6 +1193,11 @@ def _build_model_for_projection_unchecked(
                 f"validated-data default factory for field {compiled_field.current_name!r} "
                 "cannot be projected without materializing current-model behavior",
             )
+        attributes = _wire_field_attributes(
+            family,
+            compiled_field.current_name,
+            field_dict["attributes"],
+        )
         annotation = _rewrite_annotation(
             field_dict["annotation"],
             projection.label,
@@ -1231,11 +1210,6 @@ def _build_model_for_projection_unchecked(
             allow_child_projection=True,
             nested_projection_cache=nested_projection_cache,
             nested_projection_stack=nested_projection_stack,
-        )
-        attributes = _wire_field_attributes(
-            family,
-            compiled_field.current_name,
-            field_dict["attributes"],
         )
         if compiled_field.version_name != compiled_field.current_name:
             if compiled_field.current_name == model_metadata_field:
@@ -1427,8 +1401,6 @@ def _wire_field_attributes(
 
     attributes: dict[str, Any] = {}
     for key in _WIRE_FIELD_ATTRIBUTES:
-        if key not in source:
-            continue
         value = source[key]
         if key == "default_factory" or value is PydanticUndefined:
             attributes[key] = value
@@ -1715,14 +1687,31 @@ def _owner_annotations(owner: type[Any]) -> Mapping[str, Any]:
             resolved[name] = value
             continue
         try:
-            resolved[name] = ForwardRef(value)._evaluate(
-                globalns=globals_dict,
+            resolved[name] = _evaluate_owner_forward_ref(
+                value,
+                globals_dict=globals_dict,
                 localns=localns,
-                recursive_guard=frozenset(),
             )
         except (AttributeError, NameError, SyntaxError, TypeError):
             resolved[name] = value
     return resolved
+
+
+def _evaluate_owner_forward_ref(
+    value: str,
+    *,
+    globals_dict: dict[str, Any],
+    localns: dict[str, Any],
+) -> Any:
+    reference = ForwardRef(value)
+    evaluate = getattr(reference, "evaluate", None)
+    if evaluate is not None:
+        return evaluate(globals=globals_dict, locals=localns)
+    return reference._evaluate(
+        globalns=globals_dict,
+        localns=localns,
+        recursive_guard=frozenset(),
+    )
 
 
 def _has_behavioral_structured_annotation(
@@ -2311,9 +2300,7 @@ def _validate_explicit_nested_serializer_boundaries(
     nested: tuple[_CompiledNestedFamily, ...],
 ) -> None:
     for route in nested:
-        first = projection.field(route.path[0]).version_name
-        if first is None:
-            continue
+        first = cast(str, projection.field(route.path[0]).version_name)
         target_path = (first, *route.path[1:])
         owners = [wire_model]
         for index, field_name in enumerate(target_path):
@@ -2625,6 +2612,14 @@ def _validate_object_schema(
             f"has a non-object {mode} schema"
         )
         raise UnsupportedWireModelError(msg)
+    properties = root.get("properties")
+    if properties is not None and not isinstance(properties, Mapping):
+        msg = (
+            f"Automatic wire model for family {family.name!r}, version "
+            f"{projection.label!r}, and model {_model_display(family.model)!r} "
+            f"has malformed {mode} schema: object properties must be a mapping"
+        )
+        raise UnsupportedWireModelError(msg)
 
 
 def _first_defining_class(model: type[BaseModel], attribute: str) -> type[Any] | None:
@@ -2742,8 +2737,10 @@ def _nested_projection_cache_key(
     nested_model: type[BaseModel],
     field_path: tuple[str, ...],
     version: str,
-) -> tuple[int, tuple[str, ...], str]:
-    return (id(nested_model), field_path, version)
+    *,
+    hash_required: bool,
+) -> tuple[int, tuple[str, ...], str, bool]:
+    return (id(nested_model), field_path, version, hash_required)
 
 
 def _nested_model_name(
@@ -2765,13 +2762,28 @@ def _nested_model_name(
     return f"{_generated_model_name(parent.model, parent.name, version)}_Nested_{suffix}"
 
 
-def _nested_wire_model_config(model: type[BaseModel]) -> ConfigDict:
+def _nested_wire_model_config(
+    family: SchemaFamily[Any],
+    model: type[BaseModel],
+) -> ConfigDict:
     config: dict[str, Any] = {
         key: value for key, value in model.model_config.items() if key in _WIRE_CONFIG_KEYS
     }
     schema_extra = model.model_config.get("json_schema_extra")
     if isinstance(schema_extra, Mapping):
-        config["json_schema_extra"] = schema_extra
+        structural_keys = sorted(_MODEL_SCHEMA_STRUCTURE_KEYS & set(schema_extra))
+        if structural_keys:
+            _raise_unsupported(
+                family,
+                f"nested wrapper {_model_display(model)!r} JSON Schema metadata cannot "
+                "override generated structure: "
+                f"{', '.join(structural_keys)}",
+            )
+        config["json_schema_extra"] = _safe_deepcopy(
+            family,
+            dict(schema_extra),
+            detail=f"JSON Schema metadata for nested wrapper {_model_display(model)!r}",
+        )
     return ConfigDict(**config)
 
 
@@ -2838,14 +2850,13 @@ def _compile_decorator_nested_families(
         origin = get_origin(annotation)
         if origin is Annotated:
             arguments = get_args(annotation)
-            if arguments:
-                visit(
-                    arguments[0],
-                    field_path=field_path,
-                    traversal=traversal,
-                    collection_kind=collection_kind,
-                    model_stack=model_stack,
-                )
+            visit(
+                arguments[0],
+                field_path=field_path,
+                traversal=traversal,
+                collection_kind=collection_kind,
+                model_stack=model_stack,
+            )
             return
 
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -3010,12 +3021,6 @@ def _compile_decorator_nested_families(
             return
         if origin in (list, set, frozenset):
             if len(arguments) != 1:
-                if _annotation_has_decorator_child(owner, annotation):
-                    _raise_unsupported(
-                        owner,
-                        f"decorator child at path {field_path!r} uses an "
-                        "unparameterized or ambiguous collection",
-                    )
                 return
             kind = cast(_NestedCollectionKind, origin.__name__)
             visit(
@@ -3028,11 +3033,6 @@ def _compile_decorator_nested_families(
             return
         if origin is tuple:
             if not arguments:
-                if _annotation_has_decorator_child(owner, annotation):
-                    _raise_unsupported(
-                        owner,
-                        f"decorator child at path {field_path!r} uses an unparameterized tuple",
-                    )
                 return
             if len(arguments) == 2 and arguments[1] is Ellipsis:
                 visit(
@@ -3060,11 +3060,6 @@ def _compile_decorator_nested_families(
             return
         if origin is dict:
             if len(arguments) != 2:
-                if _annotation_has_decorator_child(owner, annotation):
-                    _raise_unsupported(
-                        owner,
-                        f"decorator child at path {field_path!r} uses an unparameterized mapping",
-                    )
                 return
             key_annotation, value_annotation = arguments
             if _annotation_has_decorator_child(owner, key_annotation):
@@ -3243,16 +3238,8 @@ def _validate_ordinary_wrapper_model(
 
 def _compat_child_family(
     owner: SchemaFamily[Any],
-    annotation: Any,
+    annotation: type[BaseModel],
 ) -> SchemaFamily[Any] | None:
-    if not owner._decorator_created:
-        return None
-    if (
-        not isinstance(annotation, type)
-        or is_typeddict(annotation)
-        or not issubclass(annotation, BaseModel)
-    ):
-        return None
     from pydantic_versions.family import _default_family_for_model
 
     child = _default_family_for_model(annotation)
@@ -3297,8 +3284,8 @@ def _rewrite_annotation(
     used_nested: set[tuple[str, ...]],
     field_name: str,
     allow_child_projection: bool,
-    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None],
-    nested_projection_stack: set[tuple[int, tuple[str, ...], str]],
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None],
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str, bool]],
     in_set_element: bool = False,
 ) -> Any:
     child = _find_nested_family_for_path(nested, field_path)
@@ -3443,12 +3430,17 @@ def _rewrite_nested_model(
     field_path: tuple[str, ...],
     nested: tuple[_CompiledNestedFamily, ...],
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
-    nested_projection_cache: dict[tuple[int, tuple[str, ...], str], type[BaseModel] | None],
-    nested_projection_stack: set[tuple[int, tuple[str, ...], str]],
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None],
+    nested_projection_stack: set[tuple[int, tuple[str, ...], str, bool]],
     used_nested: set[tuple[str, ...]],
     in_set_element: bool = False,
 ) -> type[BaseModel]:
-    cache_key = _nested_projection_cache_key(annotation, field_path, version)
+    cache_key = _nested_projection_cache_key(
+        annotation,
+        field_path,
+        version,
+        hash_required=in_set_element,
+    )
     nested_projection = nested_projection_cache.get(cache_key)
     if nested_projection is not None:
         return nested_projection
@@ -3475,6 +3467,7 @@ def _rewrite_nested_model(
             )
             if excluded:
                 continue
+            attributes = _wire_field_attributes(owner, source_name, source["attributes"])
             rewritten_annotation = _rewrite_annotation(
                 source["annotation"],
                 version,
@@ -3489,7 +3482,6 @@ def _rewrite_nested_model(
                 nested_projection_cache=nested_projection_cache,
                 nested_projection_stack=nested_projection_stack,
             )
-            attributes = _wire_field_attributes(owner, source_name, source["attributes"])
             metadata = _wire_field_metadata(owner, source_name, source["metadata"])
             _rewrite_nested_default(
                 attributes,
@@ -3511,10 +3503,12 @@ def _rewrite_nested_model(
         nested_projection = create_model(
             _nested_model_name(owner, annotation, field_path, version),
             __module__=annotation.__module__,
-            __config__=_nested_wire_model_config(annotation),
+            __config__=_nested_wire_model_config(owner, annotation),
             **fields,
         )
         nested_projection.model_rebuild(force=True)
+        if in_set_element:
+            nested_projection = _set_element_wire_model(nested_projection)
     except UnsupportedWireModelError:
         raise
     except Exception as exc:
@@ -3527,8 +3521,6 @@ def _rewrite_nested_model(
     finally:
         nested_projection_stack.remove(cache_key)
     nested_projection_cache[cache_key] = nested_projection
-    if nested_projection is not None:
-        nested_projection_cache[cache_key] = nested_projection
     return nested_projection
 
 
@@ -3633,8 +3625,6 @@ def _rewrite_nested_default(
     target_model = _default_model_annotation(version_annotation)
     default_factory = attributes.get("default_factory")
     original_base = original_annotation
-    while get_origin(original_base) is Annotated:
-        original_base = get_args(original_base)[0]
     original_origin = get_origin(original_base)
     if (
         original_model is not None
@@ -3667,11 +3657,8 @@ def _rewrite_nested_default(
 
 
 def _default_model_annotation(annotation: Any) -> type[BaseModel] | None:
-    current = annotation
-    while get_origin(current) is Annotated:
-        current = get_args(current)[0]
-    if isinstance(current, type) and issubclass(current, BaseModel):
-        return current
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
     return None
 
 

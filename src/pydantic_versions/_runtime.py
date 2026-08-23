@@ -5,7 +5,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from types import NoneType, UnionType
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, cast, get_args, get_origin
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    NoReturn,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 from pydantic import (
     AliasChoices,
@@ -168,10 +178,6 @@ def _matching_declared_annotation(annotation: Any, value: Any) -> Any:
             key=lambda candidate: mro.index(candidate) if candidate in mro else len(mro),
         )
     for candidate in candidates:
-        if candidate is type(None):
-            if value is None:
-                return candidate
-            continue
         candidate_origin = get_origin(candidate)
         if candidate_origin is not None and isinstance(candidate_origin, type):
             try:
@@ -430,55 +436,65 @@ def _field_crosses_wire_boundary(field_info: Any) -> bool:
 
 
 def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
-    if isinstance(value, bytes):
-        return to_jsonable_python(
-            value,
-            bytes_mode=config.get("ser_json_bytes", "utf8"),
-            fallback=_preserve_unknown_scalar,
-        )
-    if isinstance(value, dt.timedelta):
-        temporal_mode = config.get("ser_json_temporal")
-        if temporal_mode is not None:
+    try:
+        if isinstance(value, bytes):
             return to_jsonable_python(
                 value,
-                temporal_mode=temporal_mode,
-                fallback=_preserve_unknown_scalar,
+                bytes_mode=config.get("ser_json_bytes", "utf8"),
+                fallback=_signal_unknown_scalar,
             )
-        return to_jsonable_python(
-            value,
-            timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
-            fallback=_preserve_unknown_scalar,
-        )
-    if isinstance(value, dt.datetime | dt.date | dt.time):
-        return to_jsonable_python(
-            value,
-            temporal_mode=config.get("ser_json_temporal", "iso8601"),
-            fallback=_preserve_unknown_scalar,
-        )
-    return to_jsonable_python(value, fallback=_preserve_unknown_scalar)
+        if isinstance(value, dt.timedelta):
+            temporal_mode = config.get("ser_json_temporal")
+            if temporal_mode is not None:
+                return to_jsonable_python(
+                    value,
+                    temporal_mode=temporal_mode,
+                    fallback=_signal_unknown_scalar,
+                )
+            return to_jsonable_python(
+                value,
+                timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
+                fallback=_signal_unknown_scalar,
+            )
+        if isinstance(value, dt.datetime | dt.date | dt.time):
+            return to_jsonable_python(
+                value,
+                temporal_mode=config.get("ser_json_temporal", "iso8601"),
+                fallback=_signal_unknown_scalar,
+            )
+        return to_jsonable_python(value, fallback=_signal_unknown_scalar)
+    except _UnknownScalarError:
+        return value
 
 
 def _jsonable_declared_mapping_key(value: Any, *, config: Mapping[str, Any]) -> Any:
     temporal_mode = config.get("ser_json_temporal")
-    if temporal_mode is not None:
-        dumped = to_jsonable_python(
-            {value: None},
-            bytes_mode=config.get("ser_json_bytes", "utf8"),
-            temporal_mode=temporal_mode,
-            fallback=_preserve_unknown_scalar,
-        )
-    else:
-        dumped = to_jsonable_python(
-            {value: None},
-            bytes_mode=config.get("ser_json_bytes", "utf8"),
-            timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
-            fallback=_preserve_unknown_scalar,
-        )
+    try:
+        if temporal_mode is not None:
+            dumped = to_jsonable_python(
+                {value: None},
+                bytes_mode=config.get("ser_json_bytes", "utf8"),
+                temporal_mode=temporal_mode,
+                fallback=_signal_unknown_scalar,
+            )
+        else:
+            dumped = to_jsonable_python(
+                {value: None},
+                bytes_mode=config.get("ser_json_bytes", "utf8"),
+                timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
+                fallback=_signal_unknown_scalar,
+            )
+    except _UnknownScalarError:
+        return value
     return next(iter(dumped))
 
 
-def _preserve_unknown_scalar(value: Any) -> Any:
-    return value
+class _UnknownScalarError(Exception):
+    pass
+
+
+def _signal_unknown_scalar(_value: Any) -> NoReturn:
+    raise _UnknownScalarError
 
 
 def _validate_family[T: BaseModel](
@@ -1716,27 +1732,6 @@ def _read_render_metadata_path(
             continue
         return False, None
     return True, current
-
-
-def _remove_model_metadata_output_aliases(
-    compiled: _CompiledFamily,
-    payload: dict[str, Any],
-) -> None:
-    metadata = compiled.version_metadata
-    if metadata is None:
-        msg = f"Compiled family {compiled.name!r} lost its version metadata"
-        raise SchemaCompilationError(msg)
-    field_name = _model_metadata_field_name(compiled)
-    field_info = compiled.model.model_fields[field_name]
-    candidates = (
-        field_name,
-        field_info.alias,
-        field_info.validation_alias,
-        field_info.serialization_alias,
-    )
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate != metadata.path:
-            payload.pop(candidate, None)
 
 
 def _normalize_selected_decorator_payloads(

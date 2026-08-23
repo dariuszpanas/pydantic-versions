@@ -134,7 +134,6 @@ def versioned_schema[T: BaseModel](
             None,
         )
         declared_patch_labels: set[str] = set()
-        declared_wire_model_labels: set[str] = set()
         for spec in pending:
             if spec.label not in labels:
                 msg = f"Patch schema version {spec.label!r} is not in versions for {name!r}"
@@ -145,13 +144,6 @@ def versioned_schema[T: BaseModel](
             declared_patch_labels.add(spec.label)
             patches_by_label[spec.label] = spec.patches
             if spec.wire_model is not None:
-                if spec.label in declared_wire_model_labels:
-                    msg = (
-                        f"Schema version {spec.label!r} has multiple wire-model declarations for "
-                        f"{name!r}"
-                    )
-                    raise DuplicateSchemaVersionError(msg)
-                declared_wire_model_labels.add(spec.label)
                 wire_models_by_label[spec.label] = spec.wire_model
 
         owner = metadata_owner

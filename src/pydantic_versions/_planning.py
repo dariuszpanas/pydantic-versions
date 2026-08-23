@@ -482,8 +482,6 @@ def _decorator_nested_steps(
         first = declarations[0]
         source_version = first.child_label(parent_source_version)
         target_version = first.child_label(parent_target_version)
-        if source_version == target_version:
-            continue
         semantics = _aggregate_semantics(
             tuple(
                 _nested_route_semantics(

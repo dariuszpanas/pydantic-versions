@@ -665,6 +665,52 @@ def test_nested_plan_semantics_propagate_through_child_families(
         assert parent.plan_render("1") is candidate
 
 
+def test_stationary_grandchild_mapping_does_not_add_recursive_render_risk() -> None:
+    class GrandchildPayload(BaseModel):
+        value: int
+
+    grandchild = SchemaFamily(
+        model=GrandchildPayload,
+        name="stationary_mapping_grandchild",
+        versions=(SchemaVersion("0"), SchemaVersion("1")),
+        transitions=(VersionTransition("0", "1", upgrade=_identity),),
+        version_metadata=None,
+    )
+
+    class ChildPayload(BaseModel):
+        grandchild: GrandchildPayload
+
+    child = SchemaFamily(
+        model=ChildPayload,
+        name="stationary_mapping_child",
+        versions=(SchemaVersion("a"), SchemaVersion("b")),
+        nested=(NestedFamily("grandchild", grandchild, {"a": "1", "b": "1"}),),
+        version_metadata=None,
+    )
+
+    class ParentPayload(BaseModel):
+        child: ChildPayload
+
+    parent = SchemaFamily(
+        model=ParentPayload,
+        name="stationary_mapping_parent",
+        versions=(SchemaVersion("a"), SchemaVersion("b")),
+        nested=(NestedFamily("child", child, matching_labels()),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(IrreversibleTransitionError):
+        grandchild.plan_render("0")
+
+    child_render = child.plan_render("a")
+    assert all(step.kind != "nested" for step in child_render.steps)
+
+    parent_render = parent.plan_render("a")
+    parent_nested = tuple(step for step in parent_render.steps if step.kind == "nested")
+    assert tuple(map(_step_signature, parent_nested)) == (("nested", "b", "a", "$.child", "exact"),)
+    assert parent_render.semantics == "exact"
+
+
 def test_three_level_nested_runtime_executes_each_owned_transition_in_order() -> None:
     events: list[str] = []
 
