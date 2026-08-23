@@ -10,7 +10,7 @@ from typing import Any, cast, get_args
 import pytest
 from pydantic import BaseModel, create_model
 
-import pydantic_versions._runtime as runtime
+import pydantic_versions._runtime_render as runtime_render
 import pydantic_versions.family as family_module
 from pydantic_versions import NestedFamily, SchemaCompilationError, SchemaFamily, SchemaVersion
 
@@ -136,7 +136,7 @@ def test_current_wire_validator_is_built_once_under_concurrent_use(
         version_metadata=None,
     )
     current_wire = family.model_for("1").model_validate({"value": 7})
-    original_builder = runtime._build_current_wire_validation_adapter
+    original_builder = runtime_render._build_current_wire_validation_adapter
     builder_lock = Lock()
     builder_calls = 0
 
@@ -146,7 +146,11 @@ def test_current_wire_validator_is_built_once_under_concurrent_use(
             builder_calls += 1
         return original_builder(model, family_name=family_name)
 
-    monkeypatch.setattr(runtime, "_build_current_wire_validation_adapter", counting_builder)
+    monkeypatch.setattr(
+        runtime_render,
+        "_build_current_wire_validation_adapter",
+        counting_builder,
+    )
     workers = 8
     barrier = Barrier(workers)
 

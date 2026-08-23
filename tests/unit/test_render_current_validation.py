@@ -1045,6 +1045,52 @@ def test_excluded_current_fields_do_not_cross_the_transition_boundary(
     assert seen_payloads == [{"public": "visible"}]
 
 
+@pytest.mark.parametrize("field_kind", ["exclude", "exclude_if"])
+def test_generated_current_wire_extras_cannot_restore_excluded_fields(
+    field_kind: str,
+) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+    excluded = (
+        Field(default="private", exclude=True)
+        if field_kind == "exclude"
+        else Field(default="private", exclude_if=lambda value: value == "private")
+    )
+
+    class CurrentPayload(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        public: str
+        internal: str = excluded
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        seen_payloads.append(data)
+        return data
+
+    family = SchemaFamily(
+        model=CurrentPayload,
+        name=f"excluded_current_wire_extra_{field_kind}",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        version_metadata=None,
+    )
+    current_wire = family.model_for("2").model_validate(
+        {"public": "visible", "internal": "injected"},
+    )
+
+    assert current_wire.__pydantic_extra__ == {"internal": "injected"}
+    assert family.dump(version="1", data=cast(Any, current_wire)) == {
+        "public": "visible",
+    }
+    assert seen_payloads == [{"public": "visible"}]
+
+
 def test_mapping_render_honors_disabled_name_validation() -> None:
     class AliasOnlyPayload(BaseModel):
         model_config = ConfigDict(validate_by_alias=True, validate_by_name=False)
