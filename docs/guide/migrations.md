@@ -229,5 +229,6 @@ must return a dictionary. Returning any other type raises
 `InvalidMigrationError`.
 
 Downgrade declarations and historical rendering across value-changing upgrades
-are executed natively by the 0.2 conversion contract. A missing downgrade across
-a value-changing upgrade makes historical rendering irreversible and raises an error.
+are executed natively by the active conversion contract. A missing downgrade
+across a value-changing upgrade makes historical rendering irreversible and
+raises an error.
