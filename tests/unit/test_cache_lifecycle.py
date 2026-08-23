@@ -12,7 +12,15 @@ from pydantic import BaseModel, create_model
 
 import pydantic_versions._runtime_render as runtime_render
 import pydantic_versions.family as family_module
-from pydantic_versions import NestedFamily, SchemaCompilationError, SchemaFamily, SchemaVersion
+from pydantic_versions import (
+    NestedFamily,
+    SchemaCompilationError,
+    SchemaFamily,
+    SchemaFamilySelectionError,
+    SchemaVersion,
+    model_for_version,
+    versioned_schema,
+)
 
 type _ModelRef = weakref.ReferenceType[type[BaseModel]]
 
@@ -123,6 +131,112 @@ def test_discarded_families_do_not_accumulate_in_a_global_model_cache() -> None:
     assert all(wrapper() is None and child() is None for wrapper, child in first_batch)
 
 
+def _discarded_default_model_refs(count: int) -> tuple[_ModelRef, ...]:
+    references = []
+    for index in range(count):
+        model = create_model(
+            f"DefaultLifecycleModel{index}",
+            __module__=__name__,
+            value=(int, ...),
+        )
+        family = SchemaFamily(
+            model=model,
+            name=f"default_lifecycle_{index}",
+            versions=(SchemaVersion("stable"),),
+            version_metadata=None,
+        ).as_default()
+        family.compile()
+        references.append(weakref.ref(model))
+    return tuple(references)
+
+
+def test_discarded_model_owned_default_families_are_collectable() -> None:
+    references = _discarded_default_model_refs(32)
+
+    gc.collect()
+
+    assert all(reference() is None for reference in references)
+
+
+def test_default_family_selection_is_isolated_to_the_exact_model_class() -> None:
+    class Parent(BaseModel):
+        value: int
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name="exact_parent_default",
+        versions=(SchemaVersion("parent"),),
+        version_metadata=None,
+    ).as_default()
+
+    class Child(Parent):
+        pass
+
+    with pytest.raises(SchemaFamilySelectionError, match="no explicit default"):
+        model_for_version(Child, "parent")
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="exact_child_default",
+        versions=(SchemaVersion("child"),),
+        version_metadata=None,
+    ).as_default()
+
+    assert model_for_version(Parent, "parent") is parent_family.model_for("parent")
+    assert model_for_version(Child, "child") is child_family.model_for("child")
+
+
+@pytest.mark.parametrize("collision", [None, "application-owned", property(lambda _: None)])
+def test_reserved_default_family_attribute_collision_fails_closed(collision: object) -> None:
+    class Payload(BaseModel):
+        value: int
+
+    setattr(Payload, family_module._DEFAULT_FAMILY_ATTRIBUTE, collision)
+    candidate = SchemaFamily(
+        model=Payload,
+        name="reserved_attribute_collision",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(SchemaFamilySelectionError, match="reserved default-family attribute"):
+        candidate.as_default()
+    with pytest.raises(SchemaFamilySelectionError, match="rename or remove"):
+        model_for_version(Payload, "1")
+
+    assert Payload.__dict__[family_module._DEFAULT_FAMILY_ATTRIBUTE] is collision
+
+
+def test_foreign_model_default_family_attribute_collision_fails_closed() -> None:
+    class Foreign(BaseModel):
+        value: int
+
+    foreign_family = SchemaFamily(
+        model=Foreign,
+        name="foreign_reserved_attribute_owner",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    class Payload(BaseModel):
+        value: int
+
+    setattr(Payload, family_module._DEFAULT_FAMILY_ATTRIBUTE, foreign_family)
+    candidate = SchemaFamily(
+        model=Payload,
+        name="wrong_reserved_attribute_owner",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(SchemaFamilySelectionError, match="owned by that exact model"):
+        model_for_version(Payload, "1")
+    with pytest.raises(SchemaFamilySelectionError, match="owned by that exact model"):
+        candidate.as_default()
+
+    assert Payload.__dict__[family_module._DEFAULT_FAMILY_ATTRIBUTE] is foreign_family
+
+
 def test_current_wire_validator_is_built_once_under_concurrent_use(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,6 +312,71 @@ def test_forced_model_rebuild_invalidates_an_existing_family() -> None:
     assert replacement.validate({"value": 2}, version="1").current_model == Payload(value=2)
 
 
+def test_forced_model_rebuild_allows_default_family_replacement() -> None:
+    class Payload(BaseModel):
+        value: int
+
+    selected = SchemaFamily(
+        model=Payload,
+        name="selected_before_rebuild",
+        versions=(SchemaVersion("before"),),
+        version_metadata=None,
+    ).as_default()
+    selected.compile()
+    premature = SchemaFamily(
+        model=Payload,
+        name="premature_replacement",
+        versions=(SchemaVersion("premature"),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(SchemaFamilySelectionError, match="already has explicit default"):
+        premature.as_default()
+
+    assert Payload.model_rebuild(force=True) is True
+    with pytest.raises(SchemaCompilationError, match=r"call as_default\(\)"):
+        model_for_version(Payload, "before")
+
+    replacement = SchemaFamily(
+        model=Payload,
+        name="selected_after_rebuild",
+        versions=(SchemaVersion("after"),),
+        version_metadata=None,
+    ).as_default()
+
+    assert model_for_version(Payload, "after") is replacement.model_for("after")
+    with pytest.raises(SchemaFamilySelectionError, match="already has explicit default"):
+        selected.as_default()
+
+
+def test_forced_model_rebuild_allows_decorator_default_replacement() -> None:
+    @versioned_schema(
+        name="decorator_selected_before_rebuild",
+        versions=("before",),
+        current="before",
+        metadata_owner="family",
+    )
+    class Payload(BaseModel):
+        value: int
+
+    selected = family_module._default_family_for_model(Payload)
+    assert selected is not None
+    selected.compile()
+
+    assert Payload.model_rebuild(force=True) is True
+    replacement_model = versioned_schema(
+        name="decorator_selected_after_rebuild",
+        versions=("after",),
+        current="after",
+        metadata_owner="family",
+    )(Payload)
+
+    replacement = family_module._default_family_for_model(Payload)
+    assert replacement_model is Payload
+    assert replacement is not None and replacement is not selected
+    assert model_for_version(Payload, "after") is replacement.model_for("after")
+
+
 def test_nested_model_rebuild_invalidates_dependent_families() -> None:
     class Child(BaseModel):
         value: int
@@ -224,6 +403,155 @@ def test_nested_model_rebuild_invalidates_dependent_families() -> None:
     assert Child.model_rebuild(force=True) is True
     with pytest.raises(SchemaCompilationError, match="schema family 'rebuilt_child'"):
         parent_family.model_for("1")
+
+
+def test_nested_model_rebuild_allows_dependent_default_family_replacement() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="selected_nested_child",
+        versions=(SchemaVersion("before"),),
+        version_metadata=None,
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    parent_family = SchemaFamily(
+        model=Parent,
+        name="selected_nested_parent",
+        versions=(SchemaVersion("before"),),
+        nested=(NestedFamily("child", child_family, {"before": "before"}),),
+        version_metadata=None,
+    ).as_default()
+    parent_family.compile()
+
+    assert Child.model_rebuild(force=True) is True
+    with pytest.raises(SchemaCompilationError, match="schema family 'selected_nested_child'"):
+        model_for_version(Parent, "before")
+
+    replacement_child = SchemaFamily(
+        model=Child,
+        name="replacement_nested_child",
+        versions=(SchemaVersion("after"),),
+        version_metadata=None,
+    )
+    replacement_parent = SchemaFamily(
+        model=Parent,
+        name="replacement_nested_parent",
+        versions=(SchemaVersion("after"),),
+        nested=(NestedFamily("child", replacement_child, {"after": "after"}),),
+        version_metadata=None,
+    ).as_default()
+
+    assert model_for_version(Parent, "after") is replacement_parent.model_for("after")
+
+
+def test_compiled_nested_rebuild_allows_uncompiled_default_parent_replacement() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="compiled_nested_child",
+        versions=(SchemaVersion("before"),),
+        version_metadata=None,
+    )
+    child_family.compile()
+
+    class Parent(BaseModel):
+        child: Child
+
+    selected_parent = SchemaFamily(
+        model=Parent,
+        name="uncompiled_selected_parent",
+        versions=(SchemaVersion("before"),),
+        nested=(NestedFamily("child", child_family, {"before": "before"}),),
+        version_metadata=None,
+    ).as_default()
+    replacement_child = SchemaFamily(
+        model=Child,
+        name="replacement_compiled_nested_child",
+        versions=(SchemaVersion("after"),),
+        version_metadata=None,
+    )
+    replacement_parent = SchemaFamily(
+        model=Parent,
+        name="replacement_uncompiled_parent",
+        versions=(SchemaVersion("after"),),
+        nested=(NestedFamily("child", replacement_child, {"after": "after"}),),
+        version_metadata=None,
+    )
+
+    assert selected_parent._compiled is None
+    with pytest.raises(SchemaFamilySelectionError, match="already has explicit default"):
+        replacement_parent.as_default()
+
+    assert Child.model_rebuild(force=True) is True
+    with pytest.raises(SchemaCompilationError, match="schema family 'compiled_nested_child'"):
+        model_for_version(Parent, "before")
+
+    assert replacement_parent.as_default() is replacement_parent
+    assert model_for_version(Parent, "after") is replacement_parent.model_for("after")
+
+
+def _race_default_selection(
+    candidates: tuple[SchemaFamily[Any], ...],
+) -> tuple[bool, ...]:
+    barrier = Barrier(len(candidates))
+
+    def select(family: SchemaFamily[Any]) -> bool:
+        barrier.wait()
+        try:
+            family.as_default()
+        except SchemaFamilySelectionError:
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+        return tuple(executor.map(select, candidates))
+
+
+def test_concurrent_default_selection_and_rebuild_replacement_choose_one_family() -> None:
+    class Payload(BaseModel):
+        value: int
+
+    initial = tuple(
+        SchemaFamily(
+            model=Payload,
+            name=f"concurrent_initial_{index}",
+            versions=(SchemaVersion(f"initial-{index}"),),
+            version_metadata=None,
+        )
+        for index in range(8)
+    )
+    initial_results = _race_default_selection(initial)
+
+    assert sum(initial_results) == 1
+    initial_winner = initial[initial_results.index(True)]
+    assert family_module._default_family_for_model(Payload) is initial_winner
+    initial_winner.compile()
+
+    assert Payload.model_rebuild(force=True) is True
+    replacements = tuple(
+        SchemaFamily(
+            model=Payload,
+            name=f"concurrent_replacement_{index}",
+            versions=(SchemaVersion(f"replacement-{index}"),),
+            version_metadata=None,
+        )
+        for index in range(8)
+    )
+    replacement_results = _race_default_selection(replacements)
+
+    assert sum(replacement_results) == 1
+    replacement_winner = replacements[replacement_results.index(True)]
+    assert family_module._default_family_for_model(Payload) is replacement_winner
+    assert model_for_version(Payload, replacement_winner.current_version) is (
+        replacement_winner.model_for(replacement_winner.current_version)
+    )
 
 
 def test_rebuild_detected_during_compilation_does_not_publish_state(

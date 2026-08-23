@@ -35,7 +35,8 @@ declaration sequence and has no default-selection side effect.
   `missing_version`: read-only copies of the family declarations.
 - `current_version`: the final declared version label.
 - `compile()`: lazily and atomically compile the immutable family state; returns the family.
-- `as_default()`: deliberately select this family for model-only compatibility calls; returns the family.
+- `as_default()`: deliberately select this family on its exact model class for
+  model-only compatibility calls; returns the family.
 - `describe()`: return the frozen compiled `SchemaInventory`.
 - `plan_validation(source_version)`: return the cached source-to-current `ConversionPlan`.
 - `plan_render(target_version)`: return the cached current-to-target `ConversionPlan`, or raise `IrreversibleTransitionError` if no complete reverse route exists.
@@ -56,9 +57,11 @@ forced `model_rebuild()` after compilation invalidates the compiled family;
 dependent parent families are invalidated transitively. Discard the affected
 family graph and recreate its declarations from fully rebuilt models rather
 than mixing stale projections with replacement Pydantic core schemas.
-Forced rebuilds must not race family operations. A decorator-managed default
-cannot be rebound on the same model class; redeclare and reinitialize those
-models, or use a new explicit family graph.
+Forced rebuilds must not race family operations. Once a compiled component of a
+selected family graph has been invalidated directly or through a nested family,
+calling `as_default()` on its recreated replacement atomically rebinds
+model-only calls. A graph with no compiled component, or whose compiled
+components all remain valid, still rejects a different second default.
 
 ### `SchemaVersion`
 

@@ -222,9 +222,11 @@ invalidated transitively because their wire models embed the child projection.
 Discard the affected family graph and recreate its declarations from fully
 rebuilt models. An ordinary no-op `model_rebuild()` remains safe.
 Do not race a forced rebuild with compilation or runtime family operations.
-For decorator-managed default families, redeclare the affected model classes
-and reinitialize the application, or switch callers to a newly constructed
-explicit `SchemaFamily` graph.
+When the invalid graph was selected for model-only calls, call `as_default()` on
+the recreated replacement. The replacement is accepted only because the
+selected family graph contains an invalid compiled component. A graph with no
+compiled component, or whose compiled components all remain valid, still
+rejects a different second default.
 
 An excluded field is also absent from the generated wire model. This is the
 supported way to keep server-internal state on the authoritative model while

@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidMigrationError`.
 
 ### Fixed
+- Stored deliberate default-family selection on the exact model class instead
+  of in a permanent process-global registry, so dynamic model/family cycles are
+  collectable, subclasses do not inherit defaults, and a rebuilt replacement
+  can atomically take over only after the selected family graph contains an
+  invalid compiled component.
 - Scoped generated set-element models and cached render validators to their
   owning compiled family, preventing temporary families from accumulating in
   process-global caches while preserving stable identities and thread-safe

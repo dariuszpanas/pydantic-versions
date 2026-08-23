@@ -122,8 +122,8 @@ INTERNAL_CONFIG = SchemaFamily(
 )
 ```
 
-Constructing either family does not select it globally. A model-only call has no
-basis for choosing and raises `SchemaFamilySelectionError`.
+Constructing either family does not select it for model-only calls. A model-only
+call has no basis for choosing and raises `SchemaFamilySelectionError`.
 
 ## Select one compatibility default deliberately
 
@@ -137,8 +137,19 @@ PUBLIC_CONFIG.as_default()
 
 After that call, `validate_versioned(AppConfig, data)` delegates to
 `PUBLIC_CONFIG`. Repeating `as_default()` on the same family is safe. Selecting a
-different second default raises `SchemaFamilySelectionError` and leaves the
-first selection unchanged.
+different second default while that selection is valid raises
+`SchemaFamilySelectionError` and leaves the first selection unchanged. The
+selection belongs to the exact `AppConfig` class: subclasses neither inherit it
+nor become defaults accidentally. Because the model owns the selection, no
+process-global registry keeps discarded dynamic model and family cycles alive.
+
+A forced `model_rebuild()` after compilation invalidates both the selected
+family and every compiled parent graph that embeds it. Recreate the complete
+affected family graph from the rebuilt models, then call `as_default()` on the
+replacement to atomically redirect model-only calls. Replacement is accepted
+only after a compiled component of the existing family graph has become
+invalid. A graph with no compiled component, or whose compiled components all
+remain valid, cannot be displaced.
 
 The `@versioned_schema` compatibility decorator performs this selection for its
 own family automatically. External family construction never does.
