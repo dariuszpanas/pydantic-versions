@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from functools import partial
 from types import NoneType, UnionType
 from typing import (
@@ -31,7 +31,6 @@ from pydantic_versions._compiler import (
     _CompiledFamily,
     _CompiledVersion,
 )
-from pydantic_versions._planning import _nested_route_semantics
 from pydantic_versions.declarations import VersionedValidation, VersionPath
 from pydantic_versions.exceptions import (
     InvalidMigrationError,
@@ -177,14 +176,24 @@ def _matching_declared_annotation(annotation: Any, value: Any) -> Any:
             class_matches,
             key=lambda candidate: mro.index(candidate) if candidate in mro else len(mro),
         )
+    generic_matches: list[Any] = []
     for candidate in candidates:
         candidate_origin = get_origin(candidate)
         if candidate_origin is not None and isinstance(candidate_origin, type):
             try:
                 if isinstance(value, candidate_origin):
-                    return candidate
+                    generic_matches.append(candidate)
             except TypeError:
                 continue
+    shape_matches = tuple(
+        candidate
+        for candidate in generic_matches
+        if _runtime_value_matches_annotation(value, candidate)
+    )
+    if len(shape_matches) == 1:
+        return shape_matches[0]
+    if generic_matches:
+        return generic_matches[0]
     return normalized
 
 
@@ -195,6 +204,48 @@ def _safe_annotation_instance(value: Any, annotation: Any) -> bool:
         return isinstance(value, annotation)
     except TypeError:
         return False
+
+
+def _runtime_value_matches_annotation(value: Any, annotation: Any) -> bool:
+    normalized = _strip_annotated(annotation)
+    if normalized is Any:
+        return True
+    origin = get_origin(normalized)
+    arguments = get_args(normalized)
+    if origin in (Union, UnionType):
+        return any(_runtime_value_matches_annotation(value, item) for item in arguments)
+    if origin is Literal:
+        return value in arguments
+    if origin in (list, set, frozenset):
+        if not isinstance(value, origin):
+            return False
+        if not arguments:
+            return True
+        return all(_runtime_value_matches_annotation(item, arguments[0]) for item in value)
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        if not arguments:
+            return True
+        if arguments[-1] is Ellipsis:
+            return all(_runtime_value_matches_annotation(item, arguments[0]) for item in value)
+        return len(value) == len(arguments) and all(
+            _runtime_value_matches_annotation(item, item_annotation)
+            for item, item_annotation in zip(value, arguments, strict=True)
+        )
+    if origin is dict:
+        if not isinstance(value, dict):
+            return False
+        if len(arguments) != 2:
+            return True
+        key_annotation, item_annotation = arguments
+        return all(
+            _runtime_value_matches_annotation(key, key_annotation)
+            and _runtime_value_matches_annotation(item, item_annotation)
+            for key, item in value.items()
+        )
+    runtime_type = origin if isinstance(origin, type) else normalized
+    return isinstance(runtime_type, type) and _safe_annotation_instance(value, runtime_type)
 
 
 def _select_decorator_routes(
@@ -362,21 +413,13 @@ def _raw_decorator_route_values(
                 actual_name = root_names.get(step.value) if step_index == 0 else step.value
                 if actual_name is None:
                     continue
-                if not isinstance(normalized_annotation, type) or not issubclass(
-                    normalized_annotation,
-                    BaseModel,
-                ):
-                    continue
-                field_info = normalized_annotation.model_fields.get(actual_name)
-                if field_info is None:
-                    continue
+                field_info = normalized_annotation.model_fields[actual_name]
                 found, field_value = _declared_field_payload_value(
                     current,
                     field_name=actual_name,
                     field_info=field_info,
                     model_config=normalized_annotation.model_config,
                     prefer_aliases=True,
-                    include_serialization_aliases=False,
                 )
                 if found:
                     next_states.append(
@@ -384,12 +427,9 @@ def _raw_decorator_route_values(
                     )
                 continue
             if step.kind == "union_arm":
-                if get_origin(normalized_annotation) not in (Union, UnionType):
-                    continue
                 arguments = get_args(normalized_annotation)
                 ordinal = int(step.value)
-                if ordinal < len(arguments):
-                    next_states.append((current, arguments[ordinal], location))
+                next_states.append((current, arguments[ordinal], location))
                 continue
             if step.kind == "each":
                 if not isinstance(current, list | tuple | set | frozenset):
@@ -958,8 +998,6 @@ def _apply_serialized_version_metadata(
             _remove_version_field(dumped, metadata.path)
         return
 
-    if not include_version:
-        _validate_include_version_mode(compiled, include_version)
     _verify_serialized_model_metadata(
         dumped,
         compiled=compiled,
@@ -1149,72 +1187,42 @@ def _serialized_decorator_selection_location(
     for step_index, step in enumerate(selection.route.traversal):
         normalized = _strip_annotated(annotation)
         if step.kind == "field":
-            try:
-                location_part = next(relative)
-            except StopIteration:
-                return None
-            if location_part != step.value:
-                return None
-            if not isinstance(normalized, type) or not issubclass(normalized, BaseModel):
-                return None
+            next(relative)
             field_name = step.value
             if step_index == 0:
                 projected_name = owner_target.projection.field(field_name).version_name
                 if projected_name is None:
                     return None
                 field_name = projected_name
-            field_info = normalized.model_fields.get(field_name)
-            if field_info is None:
-                return None
+            field_info = normalized.model_fields[field_name]
             serialized.append(_serialized_field_name(normalized, field_name, by_alias=by_alias))
             annotation = field_info.annotation
             continue
         if step.kind == "union_arm":
             arguments = get_args(normalized)
             ordinal = int(step.value)
-            if ordinal >= len(arguments):
-                return None
             annotation = arguments[ordinal]
             continue
         if step.kind == "each":
-            try:
-                occurrence = next(relative)
-            except StopIteration:
-                return None
+            occurrence = next(relative)
             arguments = get_args(normalized)
-            if not arguments:
-                return None
             serialized.append(occurrence)
             annotation = arguments[0]
             continue
         if step.kind == "tuple_index":
-            try:
-                occurrence = next(relative)
-            except StopIteration:
-                return None
+            occurrence = next(relative)
             ordinal = int(step.value)
             arguments = get_args(normalized)
-            if occurrence != ordinal or ordinal >= len(arguments):
-                return None
             serialized.append(occurrence)
             annotation = arguments[ordinal]
             continue
         if step.kind == "mapping_values":
-            try:
-                occurrence = next(relative)
-            except StopIteration:
-                return None
+            occurrence = next(relative)
             arguments = get_args(normalized)
-            if len(arguments) != 2:
-                return None
             serialized.append(occurrence)
             annotation = arguments[1]
             continue
-    try:
-        next(relative)
-    except StopIteration:
-        return tuple(serialized)
-    return None
+    return tuple(serialized)
 
 
 def _validated_current_render_payload[T: BaseModel](
@@ -1899,7 +1907,6 @@ def _convert_decorator_value(
         source_label=source_label,
         target_label=target_label,
         source_payload_is_canonical=True,
-        normalize_unchanged=True,
         collection_kind=collection_kind,
     )
 
@@ -2513,18 +2520,11 @@ def _route_has_non_child_mapping_arm(
     for step in route.traversal:
         normalized = _strip_annotated(annotation)
         if step.kind == "field":
-            if not isinstance(normalized, type) or not issubclass(normalized, BaseModel):
-                return False
-            field_info = normalized.model_fields.get(step.value)
-            if field_info is None:
-                return False
-            annotation = field_info.annotation
+            annotation = normalized.model_fields[step.value].annotation
             continue
         if step.kind == "union_arm":
             arguments = get_args(normalized)
             ordinal = int(step.value)
-            if ordinal >= len(arguments):
-                return False
             if any(
                 _annotation_accepts_raw_mapping(argument)
                 for index, argument in enumerate(arguments)
@@ -2535,14 +2535,10 @@ def _route_has_non_child_mapping_arm(
             continue
         arguments = get_args(normalized)
         if step.kind in ("each", "mapping_values"):
-            if not arguments:
-                return False
             annotation = arguments[1] if step.kind == "mapping_values" else arguments[0]
             continue
         if step.kind == "tuple_index":
             ordinal = int(step.value)
-            if ordinal >= len(arguments):
-                return False
             annotation = arguments[ordinal]
     return False
 
@@ -2574,8 +2570,6 @@ def _apply_nested_family_migrations(
     if not compiled.nested:
         return payload
     current_payload: dict[str, Any] = payload
-    if source_label == target_label and source_payload_is_canonical:
-        return current_payload
     for nested in compiled.nested:
         nested_source = nested.child_label(source_label)
         nested_target = nested.child_label(target_label)
@@ -2589,7 +2583,6 @@ def _apply_nested_family_migrations(
             source_label=nested_source,
             target_label=nested_target,
             source_payload_is_canonical=source_payload_is_canonical,
-            normalize_unchanged=True,
             collection_kind=_nested_family_collection_kind(
                 model=compiled.model,
                 path=nested.path,
@@ -2643,8 +2636,6 @@ def _preflight_nested_version_metadata(
 
     for nested in compiled.nested:
         source_path = _target_nested_path(parent_version, nested.path)
-        if source_path is None:
-            continue
         expected = nested.child_label(parent_label)
         child_compiled = nested.family._compiled_family()
         for nested_payload in _declared_payload_values_at_path(
@@ -2899,10 +2890,7 @@ def _collection_kind(
 def _strip_annotated(annotation: Any) -> Any:
     origin = get_origin(annotation)
     if origin is Annotated:
-        args = get_args(annotation)
-        if not args:
-            return annotation
-        return args[0]
+        return get_args(annotation)[0]
     return annotation
 
 
@@ -2963,8 +2951,6 @@ def _prune_nested_family_metadata_payload(
     target = family.version(resolved_target)
     for child in family.nested:
         target_path = _target_nested_path(target, child.path)
-        if target_path is None:
-            continue
         _prune_nested_family_metadata_at_path(
             payload=payload,
             source_payload=source_value,
@@ -2980,31 +2966,14 @@ def _prune_nested_family_metadata_at_path(
     *,
     payload: Any,
     source_payload: Any = _MISSING,
-    path: tuple[str, ...] | None,
+    path: tuple[str, ...],
     family: SchemaFamily[Any] | _CompiledFamily,
-    model: type[BaseModel] | None = None,
+    model: type[BaseModel],
     target_label: str | None = None,
     by_alias: Any = False,
 ) -> None:
-    if path is None:
-        return
     compiled_family = family if isinstance(family, _CompiledFamily) else family._compiled_family()
     resolved_target = compiled_family.current_version if target_label is None else target_label
-    if not path:
-        _prune_serialized_nested_value(
-            payload,
-            source_payload=source_payload,
-            annotation=compiled_family.version(resolved_target).model,
-            family=compiled_family,
-            target_label=resolved_target,
-            by_alias=by_alias,
-        )
-        return
-    elif model is None:
-        # A path without its declaring model cannot be traversed safely: searching
-        # arbitrary mapping values would let unrelated payload data impersonate a
-        # declared nested field.
-        return
     _prune_serialized_nested_path(
         payload,
         source_payload=source_payload,
@@ -3128,6 +3097,21 @@ def _prune_serialized_nested_path_through_annotation(
             and (source_payload is None or source_payload is _MISSING)
         ):
             return
+        runtime_value = payload if source_payload is _MISSING else source_payload
+        selected = _matching_declared_annotation(annotation, runtime_value)
+        if get_origin(selected) not in (Union, UnionType):
+            if selected is NoneType or not _annotation_declares_path(selected, path):
+                return
+            _prune_serialized_nested_path_through_annotation(
+                payload,
+                source_payload=source_payload,
+                annotation=selected,
+                path=path,
+                family=family,
+                target_label=target_label,
+                by_alias=by_alias,
+            )
+            return
         candidates = tuple(
             argument
             for argument in get_args(annotation)
@@ -3201,15 +3185,18 @@ def _prune_serialized_nested_value(
         ):
             return
         concrete = tuple(argument for argument in arguments if argument is not NoneType)
-        child_model = family.version(target_label).model
-        selected = next(
-            (
-                argument
-                for argument in concrete
-                if _annotation_contains_model(argument, child_model)
-            ),
-            concrete[0] if concrete else annotation,
-        )
+        runtime_value = payload if source_payload is _MISSING else source_payload
+        selected = _matching_declared_annotation(annotation, runtime_value)
+        if get_origin(selected) in (Union, UnionType):
+            child_model = family.version(target_label).model
+            selected = next(
+                (
+                    argument
+                    for argument in concrete
+                    if _annotation_contains_model(argument, child_model)
+                ),
+                concrete[0] if concrete else annotation,
+            )
         _prune_serialized_nested_value(
             payload,
             source_payload=source_payload,
@@ -3241,6 +3228,16 @@ def _prune_serialized_nested_value(
             kind=kind,
             family_name=family.name,
         )
+        return
+    runtime_value = payload if source_payload is _MISSING else source_payload
+    annotation_is_object = (
+        isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    ) or is_dataclass(annotation)
+    if (
+        not annotation_is_object
+        and not isinstance(runtime_value, BaseModel | Mapping)
+        and not isinstance(payload, Mapping)
+    ):
         return
     _prune_nested_family_metadata_payload(
         payload,
@@ -3353,7 +3350,6 @@ def _convert_nested_child_family(
     source_label: str,
     target_label: str,
     source_payload_is_canonical: bool = False,
-    normalize_unchanged: bool = False,
     collection_kind: Literal["list", "tuple", "set", "frozenset"] | None = None,
 ) -> Any:
     def convert(nested_payload: Any) -> Any:
@@ -3363,7 +3359,6 @@ def _convert_nested_child_family(
             source_label=source_label,
             target_label=target_label,
             source_payload_is_canonical=source_payload_is_canonical,
-            normalize_unchanged=normalize_unchanged,
             collection_kind=collection_kind,
         )
 
@@ -3381,43 +3376,11 @@ def _convert_nested_family_payload(
     source_label: str,
     target_label: str,
     source_payload_is_canonical: bool = False,
-    normalize_unchanged: bool = False,
     collection_kind: Literal["list", "tuple", "set", "frozenset"] | None = None,
 ) -> Any:
     compiled = family._compiled_family()
     source_index = compiled.index(source_label)
     target_index = compiled.index(target_label)
-    if (
-        _nested_route_semantics(
-            compiled,
-            source_version=source_label,
-            target_version=target_label,
-        )
-        == "unavailable"
-    ):
-        blocked = (
-            next(
-                (
-                    compiled.transitions[edge_index]
-                    for edge_index in range(source_index - 1, target_index - 1, -1)
-                    if compiled.transitions[edge_index].downgrade_kind == "unavailable"
-                ),
-                None,
-            )
-            if source_index > target_index
-            else None
-        )
-        if blocked is None:
-            detail = "the route has no complete nested downgrade"
-        else:
-            detail = (
-                f"transition {blocked.source!r} -> {blocked.target!r} has no declared downgrade"
-            )
-        msg = (
-            f"Nested family {family.name!r} cannot convert "
-            f"{source_label!r} -> {target_label!r}: {detail}"
-        )
-        raise IrreversibleTransitionError(msg)
     if payload is None:
         return payload
     if isinstance(payload, BaseModel):
@@ -3445,7 +3408,6 @@ def _convert_nested_family_payload(
                 source_label=source_label,
                 target_label=target_label,
                 source_payload_is_canonical=source_payload_is_canonical,
-                normalize_unchanged=normalize_unchanged,
                 collection_kind=collection_kind,
             )
             for item in payload
@@ -3470,7 +3432,6 @@ def _convert_nested_family_payload(
                 source_label=source_label,
                 target_label=target_label,
                 source_payload_is_canonical=source_payload_is_canonical,
-                normalize_unchanged=normalize_unchanged,
                 collection_kind=collection_kind,
             )
             for item in payload
@@ -3481,50 +3442,30 @@ def _convert_nested_family_payload(
         ):
             return converted
         return payload
-    if isinstance(payload, set):
-        converted = {
+    if isinstance(payload, set | frozenset):
+        converted_items = [
             _convert_nested_family_payload(
                 family=family,
                 payload=item,
                 source_label=source_label,
                 target_label=target_label,
                 source_payload_is_canonical=source_payload_is_canonical,
-                normalize_unchanged=normalize_unchanged,
                 collection_kind=collection_kind,
             )
             for item in payload
-        }
-        if len(converted) != len(payload):
+        ]
+        if _has_duplicate_payload(converted_items):
             msg = (
                 f"Nested migration for family {family.name!r} "
                 "cannot preserve set cardinality while converting mixed payload values"
             )
             raise InvalidMigrationError(msg)
-        return converted
-    if isinstance(payload, frozenset):
-        converted = frozenset(
-            _convert_nested_family_payload(
-                family=family,
-                payload=item,
-                source_label=source_label,
-                target_label=target_label,
-                source_payload_is_canonical=source_payload_is_canonical,
-                normalize_unchanged=normalize_unchanged,
-                collection_kind=collection_kind,
-            )
-            for item in payload
-        )
-        if len(converted) != len(payload):
-            msg = (
-                f"Nested migration for family {family.name!r} "
-                "cannot preserve set cardinality while converting mixed payload values"
-            )
-            raise InvalidMigrationError(msg)
-        return converted
+        try:
+            return type(payload)(converted_items)
+        except TypeError:
+            return converted_items
     if not isinstance(payload, Mapping):
         return payload
-    if source_index == target_index and not source_payload_is_canonical and not normalize_unchanged:
-        return dict(payload)
     if source_payload_is_canonical:
         current_payload = dict(payload)
     else:
@@ -3813,8 +3754,6 @@ def _validate_nested_collection_cardinality_payloads(
     target = compiled.version(parent_label)
     for nested in compiled.nested:
         target_path = _target_nested_path(target, nested.path)
-        if target_path is None:
-            continue
         input_values = tuple(
             item
             for payload in input_payloads
@@ -3936,12 +3875,9 @@ def _validate_nested_collection_cardinality_payloads(
 def _target_nested_path(
     target: _CompiledVersion,
     path: tuple[str, ...],
-) -> tuple[str, ...] | None:
-    if not path:
-        return path
+) -> tuple[str, ...]:
     first = target.projection.field(path[0]).version_name
-    if first is None:
-        return None
+    assert first is not None
     return (first, *path[1:])
 
 
@@ -3951,7 +3887,6 @@ def _declared_payload_values_at_path(
     model: type[BaseModel],
     path: tuple[str, ...],
     prefer_aliases: bool = False,
-    include_serialization_aliases: bool = False,
 ) -> tuple[Any, ...]:
     if not path:
         return (payload,)
@@ -3979,7 +3914,6 @@ def _declared_payload_values_at_path(
         field_info=field_info,
         model_config=model.model_config,
         prefer_aliases=prefer_aliases,
-        include_serialization_aliases=include_serialization_aliases,
     )
     if not found:
         return ()
@@ -3990,7 +3924,6 @@ def _declared_payload_values_at_path(
         annotation=field_info.annotation,
         path=tuple(remaining),
         prefer_aliases=prefer_aliases,
-        include_serialization_aliases=include_serialization_aliases,
     )
 
 
@@ -4000,7 +3933,6 @@ def _declared_payload_values_through_annotation(
     annotation: Any,
     path: tuple[str, ...],
     prefer_aliases: bool,
-    include_serialization_aliases: bool,
 ) -> tuple[Any, ...]:
     annotation = _unwrap_optional_annotated(annotation)
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -4009,11 +3941,13 @@ def _declared_payload_values_through_annotation(
             model=annotation,
             path=path,
             prefer_aliases=prefer_aliases,
-            include_serialization_aliases=include_serialization_aliases,
         )
 
     element_annotation = _declared_collection_element(annotation)
-    if element_annotation is None or not isinstance(payload, list | tuple | set | frozenset):
+    if element_annotation is None or not isinstance(
+        payload,
+        list | tuple | set | frozenset,
+    ):
         return ()
     values: list[Any] = []
     for item in payload:
@@ -4023,7 +3957,6 @@ def _declared_payload_values_through_annotation(
                 annotation=element_annotation,
                 path=path,
                 prefer_aliases=prefer_aliases,
-                include_serialization_aliases=include_serialization_aliases,
             ),
         )
     return tuple(values)
@@ -4035,29 +3968,17 @@ def _transform_declared_payload_at_path(
     model: type[BaseModel],
     path: tuple[str, ...],
     transform: Callable[[Any], Any],
-    prefer_aliases: bool = False,
 ) -> Any:
-    if not path:
-        return transform(payload)
     if isinstance(payload, BaseModel):
         payload = _extract_declared_fields(payload)
     if not isinstance(payload, Mapping):
         return payload
 
     field_name, *remaining = path
-    field_info = model.model_fields.get(field_name)
-    if field_info is None:
+    field_info = model.model_fields[field_name]
+    if field_name not in payload:
         return payload
-    access_path = _declared_field_payload_path(
-        payload,
-        field_name=field_name,
-        field_info=field_info,
-        model_config=model.model_config,
-        prefer_aliases=prefer_aliases,
-    )
-    if access_path is None:
-        return payload
-    field_value = _payload_value_at_access_path(payload, access_path)
+    field_value = payload[field_name]
     if not remaining:
         transformed = transform(field_value)
     else:
@@ -4066,11 +3987,12 @@ def _transform_declared_payload_at_path(
             annotation=field_info.annotation,
             path=tuple(remaining),
             transform=transform,
-            prefer_aliases=prefer_aliases,
         )
     if transformed is field_value:
         return payload
-    return _replace_payload_value_at_access_path(payload, access_path, transformed)
+    updated = dict(payload)
+    updated[field_name] = transformed
+    return updated
 
 
 def _transform_declared_payload_through_annotation(
@@ -4079,7 +4001,6 @@ def _transform_declared_payload_through_annotation(
     annotation: Any,
     path: tuple[str, ...],
     transform: Callable[[Any], Any],
-    prefer_aliases: bool,
 ) -> Any:
     annotation = _unwrap_optional_annotated(annotation)
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -4088,11 +4009,13 @@ def _transform_declared_payload_through_annotation(
             model=annotation,
             path=path,
             transform=transform,
-            prefer_aliases=prefer_aliases,
         )
 
     element_annotation = _declared_collection_element(annotation)
-    if element_annotation is None or not isinstance(payload, list | tuple | set | frozenset):
+    if element_annotation is None or not isinstance(
+        payload,
+        list | tuple | set | frozenset,
+    ):
         return payload
     transformed_items = [
         _transform_declared_payload_through_annotation(
@@ -4100,7 +4023,6 @@ def _transform_declared_payload_through_annotation(
             annotation=element_annotation,
             path=path,
             transform=transform,
-            prefer_aliases=prefer_aliases,
         )
         for item in payload
     ]
@@ -4143,7 +4065,6 @@ def _declared_field_payload_value(
     field_info: Any,
     model_config: Mapping[str, Any],
     prefer_aliases: bool,
-    include_serialization_aliases: bool,
 ) -> tuple[bool, Any]:
     access_path = _declared_field_payload_path(
         payload,
@@ -4151,7 +4072,6 @@ def _declared_field_payload_value(
         field_info=field_info,
         model_config=model_config,
         prefer_aliases=prefer_aliases,
-        include_serialization_aliases=include_serialization_aliases,
     )
     if access_path is None:
         return False, None
@@ -4165,14 +4085,8 @@ def _declared_field_payload_path(
     field_info: Any,
     model_config: Mapping[str, Any],
     prefer_aliases: bool,
-    include_serialization_aliases: bool = False,
 ) -> tuple[Any, ...] | None:
-    if include_serialization_aliases:
-        output_alias = field_info.serialization_alias
-        if output_alias is None:
-            output_alias = field_info.alias
-        candidates = ((field_name,), *_alias_path(output_alias))
-    elif prefer_aliases:
+    if prefer_aliases:
         validation_aliases = _field_alias_paths(field_info)
         if not validation_aliases:
             # An unaliased field is always accepted by its field name, even
@@ -4221,38 +4135,6 @@ def _payload_value_at_access_path(payload: Any, path: tuple[Any, ...]) -> Any:
     for part in path:
         current = current[part]
     return current
-
-
-def _replace_payload_value_at_access_path(
-    payload: Any,
-    path: tuple[Any, ...],
-    value: Any,
-) -> Any:
-    if not path:
-        return value
-    part, *remaining = path
-    if isinstance(payload, Mapping):
-        if part not in payload:
-            return payload
-        child = payload[part]
-        replaced = _replace_payload_value_at_access_path(child, tuple(remaining), value)
-        if replaced is child:
-            return payload
-        updated = dict(payload)
-        updated[part] = replaced
-        return updated
-    if isinstance(payload, list | tuple) and isinstance(part, int):
-        try:
-            child = payload[part]
-        except IndexError:
-            return payload
-        replaced = _replace_payload_value_at_access_path(child, tuple(remaining), value)
-        if replaced is child:
-            return payload
-        updated_items = list(payload)
-        updated_items[part] = replaced
-        return updated_items if isinstance(payload, list) else tuple(updated_items)
-    return payload
 
 
 def _infer_metadata_owner(
@@ -4457,8 +4339,6 @@ def _alias_path(alias: Any) -> tuple[tuple[Any, ...], ...]:
         return ((alias,),)
     if isinstance(alias, AliasPath):
         return (tuple(alias.path),)
-    if isinstance(alias, AliasChoices):
-        return tuple(path for choice in alias.choices for path in _alias_path(choice))
     return ()
 
 
@@ -4487,19 +4367,15 @@ def _get_payload_path(payload: Mapping[Any, Any], path: tuple[Any, ...]) -> Any:
 
 
 def _remove_payload_path(payload: dict[str, Any], path: tuple[Any, ...]) -> None:
-    if not path:
-        return
     parent_path: list[tuple[dict[str, Any], Any]] = []
     current: Any = payload
     for part in path[:-1]:
-        if not isinstance(current, dict) or part not in current:
+        if part not in current:
             return
-        if not isinstance(current[part], Mapping):
+        if not isinstance(current[part], dict):
             return
         parent_path.append((current, part))
         current = current[part]
-    if not isinstance(current, Mapping):
-        return
     removed = path[-1] in current
     if removed:
         current.pop(path[-1], None)
@@ -4511,21 +4387,15 @@ def _remove_payload_path(payload: dict[str, Any], path: tuple[Any, ...]) -> None
 
 
 def _set_payload_path(payload: dict[str, Any], path: tuple[Any, ...], value: Any) -> None:
-    if not path:
-        return
-    current: Any = payload
+    current = payload
     for part in path[:-1]:
-        if not isinstance(current, dict):
-            return
         next_value = current.get(part)
         if part not in current:
             next_value = {}
             current[part] = next_value
-        elif not isinstance(next_value, Mapping):
+        elif not isinstance(next_value, dict):
             return
         current = next_value
-    if not isinstance(current, Mapping):
-        return
     current[path[-1]] = value
 
 
@@ -4546,9 +4416,10 @@ def _model_metadata_field_name(compiled: _CompiledFamily) -> str:
     raise SchemaCompilationError(msg)
 
 
-def _to_version_names(version: _CompiledVersion, payload: Any) -> Any:
-    if not isinstance(payload, Mapping):
-        return payload
+def _to_version_names(
+    version: _CompiledVersion,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     normalized = _normalize_payload_field_aliases(version.model, payload)
     original = dict(normalized)
     versioned = dict(normalized)

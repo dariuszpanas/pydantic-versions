@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import typing
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, TypedDict, TypeVar
+from typing import Any, Generic, TypedDict, TypeVar, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, RootModel, create_model, model_serializer
@@ -35,6 +37,58 @@ def _decorated_family(model: type[BaseModel]) -> SchemaFamily[Any]:
     family = _default_family_for_model(model)
     assert family is not None
     return family
+
+
+def test_decorator_child_with_different_labels_requires_an_explicit_mapping() -> None:
+    @versioned_schema(
+        name="compilation_mismatched_labels_child_77",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Child(BaseModel):
+        value: int
+
+    @versioned_schema(
+        name="compilation_mismatched_labels_parent_77",
+        versions=("1",),
+        current="1",
+    )
+    class Parent(BaseModel):
+        child: Child
+
+    with pytest.raises(
+        SchemaCompilationError,
+        match="must use the exact labels.*declare an explicit nested mapping",
+    ):
+        model_for_version(Parent, "1")
+
+
+def test_decorator_child_in_an_unsupported_generic_wrapper_fails_closed() -> None:
+    @versioned_schema(
+        name="compilation_generic_wrapper_child_77",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Child(BaseModel):
+        value: int
+
+    @dataclass
+    class Envelope[T]:
+        value: T
+
+    @versioned_schema(
+        name="compilation_generic_wrapper_parent_77",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Parent(BaseModel):
+        envelope: Envelope[Child]
+
+    with pytest.raises(
+        UnsupportedWireModelError,
+        match="unsupported generic wrapper",
+    ):
+        model_for_version(Parent, "1")
 
 
 def test_exact_explicit_nested_sibling_does_not_suppress_decorator_route() -> None:
@@ -589,6 +643,39 @@ def test_unsafe_ordinary_wrapper_models_fail_closed() -> None:
         )(parent)
         with pytest.raises(UnsupportedWireModelError, match=match):
             model_for_version(decorated, "1")
+
+
+@pytest.mark.parametrize(
+    ("case", "annotation", "payload"),
+    (
+        ("list", typing.List, [1]),  # noqa: UP006 - legacy bare alias contract
+        ("set", typing.Set, {1}),  # noqa: UP006 - legacy bare alias contract
+        ("frozenset", typing.FrozenSet, frozenset({1})),  # noqa: UP006
+        ("dict", typing.Dict, {"value": 1}),  # noqa: UP006 - legacy bare alias contract
+    ),
+)
+def test_bare_legacy_collections_without_nested_children_compile(
+    case: str,
+    annotation: Any,
+    payload: Any,
+) -> None:
+    parent = create_model(
+        f"BareLegacy{case.title()}Parent77",
+        value=(annotation, ...),
+    )
+    decorated = versioned_schema(
+        name=f"bare_legacy_{case}_parent_77",
+        versions=("1", "2"),
+        current="2",
+    )(parent)
+
+    historical = model_for_version(decorated, "1")
+    document = cast(
+        Any,
+        historical.model_validate({"schema_version": "1", "value": payload}),
+    )
+
+    assert document.value == payload
 
 
 def test_unrelated_unsafe_wrappers_remain_supported_without_projection() -> None:

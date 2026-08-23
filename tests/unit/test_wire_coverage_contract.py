@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, make_dataclass
-from typing import Annotated, Any, ClassVar, Literal, NewType, TypedDict, cast
+from typing import Annotated, Any, ClassVar, Literal, NewType, NotRequired, TypedDict, cast
 
 import pytest
 from annotated_types import GroupedMetadata, Predicate
@@ -15,20 +15,24 @@ from pydantic import (
     GetPydanticSchema,
     PlainSerializer,
     Tag,
+    WithJsonSchema,
     computed_field,
     create_model,
     field_validator,
     model_serializer,
 )
 from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
 from typing_extensions import TypeVar
 
 from pydantic_versions import (
     NestedFamily,
+    SchemaCompilationError,
     SchemaFamily,
     SchemaVersion,
     UnsupportedWireModelError,
     VersionMetadata,
+    VersionTransition,
     field_removed,
     field_renamed,
     matching_labels,
@@ -36,6 +40,135 @@ from pydantic_versions import (
     schema_version,
     versioned_schema,
 )
+
+
+@dataclass
+class _SafeRecursiveEnvelope:
+    recursive: _SafeRecursiveEnvelope | None = None
+
+
+def test_explicit_recursive_wire_model_resolves_its_root_schema_reference() -> None:
+    class CurrentNode(BaseModel):
+        value: int
+        child: CurrentNode | None = None
+
+    class HistoricalNode(BaseModel):
+        value: int
+        child: HistoricalNode | None = None
+
+    schema = HistoricalNode.model_json_schema()
+    assert schema["$ref"].startswith("#/$defs/")
+
+    family = SchemaFamily(
+        model=CurrentNode,
+        name="recursive_explicit_wire_model",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalNode),
+            SchemaVersion("2"),
+        ),
+        version_metadata=None,
+    )
+
+    historical = family.model_for("1")
+    validated = historical.model_validate(
+        {"value": 1, "child": {"value": 2, "child": None}},
+    )
+    assert validated.model_dump() == {
+        "value": 1,
+        "child": {"value": 2, "child": None},
+    }
+
+
+def test_decorator_union_tolerates_runtime_subclass_probe_type_errors() -> None:
+    probe_active = False
+    probed_subclasses: list[type[Any]] = []
+
+    class RaisingSubclassMeta(type):
+        def __subclasscheck__(cls, subclass: type[Any]) -> bool:
+            if probe_active:
+                probed_subclasses.append(subclass)
+                raise TypeError("custom subclass probe failed")
+            return super().__subclasscheck__(subclass)
+
+    @dataclass
+    class OtherPayload(metaclass=RaisingSubclassMeta):
+        value: int
+
+    @versioned_schema(name="subclass_probe_child", versions=("1", "2"), current="2")
+    @schema_version("1", patches=(field_renamed("value", "legacy_value"),))
+    class Child(BaseModel):
+        value: int
+
+    @versioned_schema(name="subclass_probe_parent", versions=("1", "2"), current="2")
+    class Parent(BaseModel):
+        payload: Child | OtherPayload
+
+    probe_active = True
+    try:
+        historical = model_for_version(Parent, "1")
+    finally:
+        probe_active = False
+
+    assert probed_subclasses
+    document = cast(
+        Any,
+        historical.model_validate(
+            {"schema_version": "1", "payload": {"value": 7}},
+        ),
+    )
+    assert isinstance(document.payload, OtherPayload)
+    assert document.payload.value == 7
+
+
+def test_explicit_wire_model_rejects_unresolvable_root_schema_references() -> None:
+    class Current(BaseModel):
+        value: int
+
+    class ExternalReference(BaseModel):
+        value: int
+
+        @classmethod
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = DEFAULT_REF_TEMPLATE,
+            schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+            mode: JsonSchemaMode = "validation",
+            *,
+            union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+        ) -> dict[str, Any]:
+            del cls, by_alias, ref_template, schema_generator, mode, union_format
+            return {"$ref": "https://example.invalid/schema"}
+
+    class MissingLocalReference(BaseModel):
+        value: int
+
+        @classmethod
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = DEFAULT_REF_TEMPLATE,
+            schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+            mode: JsonSchemaMode = "validation",
+            *,
+            union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+        ) -> dict[str, Any]:
+            del cls, by_alias, ref_template, schema_generator, mode, union_format
+            return {"$ref": "#/$defs/Missing", "$defs": {}}
+
+    for index, wire_model in enumerate((ExternalReference, MissingLocalReference)):
+        family = SchemaFamily(
+            model=Current,
+            name=f"unresolvable_explicit_schema_reference_{index}",
+            versions=(
+                SchemaVersion("1", wire_model=wire_model),
+                SchemaVersion("2"),
+            ),
+            version_metadata=None,
+        )
+
+        with pytest.raises(UnsupportedWireModelError, match="non-object validation schema"):
+            family.compile()
 
 
 def test_explicit_document_rejects_malformed_object_properties_schema() -> None:
@@ -61,6 +194,41 @@ def test_explicit_document_rejects_malformed_object_properties_schema() -> None:
         match="malformed validation schema: object properties must be a mapping",
     ):
         family.model_for("1")
+
+
+def test_family_document_adapter_rejects_late_malformed_properties_schema() -> None:
+    schema_calls = 0
+
+    def mutate_schema(schema: dict[str, Any]) -> None:
+        nonlocal schema_calls
+        schema_calls += 1
+        if schema_calls >= 3:
+            schema["properties"] = "not-an-object"
+
+    class Current(BaseModel):
+        value: int = 1
+
+    class Historical(BaseModel):
+        model_config = ConfigDict(json_schema_extra=mutate_schema)
+
+        value: int = 1
+
+    family = SchemaFamily(
+        model=Current,
+        name="late_malformed_explicit_properties",
+        versions=(
+            SchemaVersion("1", wire_model=Historical),
+            SchemaVersion("2"),
+        ),
+    )
+
+    with pytest.raises(
+        SchemaCompilationError,
+        match="requires object-shaped JSON Schema properties",
+    ):
+        family.model_for("1")
+
+    assert schema_calls >= 3
 
 
 def test_nested_wrapper_schema_metadata_is_snapshotted() -> None:
@@ -288,10 +456,36 @@ def test_public_field_and_model_safety_rejections_have_specific_diagnostics() ->
 
 def test_behavioral_type_parameters_are_rejected() -> None:
     behavioral = Annotated[int, AfterValidator(lambda value: value)]
+    callable_discriminator = Annotated[
+        Annotated[Literal["cat"], Tag("cat")] | Annotated[Literal["dog"], Tag("dog")],
+        Discriminator(lambda value: value),
+    ]
+
+    class CustomWithJsonSchema(WithJsonSchema):
+        pass
+
+    custom_schema_metadata = Annotated[int, CustomWithJsonSchema({"type": "integer"})]
+
+    class CustomSchemaType:
+        @classmethod
+        def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any:
+            del cls, source_type
+            return handler(int)
+
     defaulted_type = TypeVar("defaulted_type", default=behavioral)
     bounded_type = TypeVar("bounded_type", bound=behavioral)
     constrained_type = TypeVar("constrained_type", behavioral, str)
-    parameters = (defaulted_type, bounded_type, constrained_type)
+    discriminator_type = TypeVar("discriminator_type", bound=callable_discriminator)
+    custom_schema_type = TypeVar("custom_schema_type", bound=custom_schema_metadata)
+    custom_hook_type = TypeVar("custom_hook_type", bound=CustomSchemaType)
+    parameters = (
+        defaulted_type,
+        bounded_type,
+        constrained_type,
+        discriminator_type,
+        custom_schema_type,
+        custom_hook_type,
+    )
 
     for index, value_type in enumerate(parameters):
         payload_model = create_model(
@@ -435,7 +629,7 @@ def test_explicit_wire_model_may_omit_declared_nested_path() -> None:
     )
 
     class Parent(BaseModel):
-        child: Child
+        child: Child = Field(default_factory=Child)
 
     class HistoricalParent(BaseModel):
         note: str = "historical"
@@ -454,6 +648,587 @@ def test_explicit_wire_model_may_omit_declared_nested_path() -> None:
     assert "child" not in historical.model_fields
     assert historical.model_validate({"schema_version": "1"}).model_dump() == {
         "note": "historical",
+        "schema_version": "1",
+    }
+    validated = family.validate({"schema_version": "1", "note": "historical"})
+    assert validated.current_model.child == Child()
+    assert family.dump(version="1", data=Parent(child=Child(value=5))) == {
+        "note": "historical",
+        "schema_version": "1",
+    }
+
+
+def test_explicit_wire_model_reports_a_missing_declared_projection_path() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="missing_projection_path_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        value: int
+
+    class HistoricalParent(BaseModel):
+        value: int
+
+    family = SchemaFamily(
+        model=Parent,
+        name="missing_projection_path_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        nested=(NestedFamily("missing", child_family, matching_labels()),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(
+        SchemaCompilationError,
+        match="Compiled projection does not contain current field 'missing'",
+    ):
+        family.model_for("1")
+
+
+def test_explicit_wire_model_may_replace_a_nested_path_with_a_scalar() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="scalar_explicit_path_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        version_metadata=None,
+    )
+
+    class Wrapper(BaseModel):
+        child: Child
+
+    class Parent(BaseModel):
+        wrapper: Wrapper
+
+    class HistoricalParent(BaseModel):
+        wrapper: str
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"wrapper": {"child": {"value": int(data["wrapper"])}}}
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"wrapper": str(data["wrapper"]["child"]["value"])}
+
+    family = SchemaFamily(
+        model=Parent,
+        name="scalar_explicit_path_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily(("wrapper", "child"), child_family, matching_labels()),),
+        version_metadata=None,
+    )
+
+    validated = family.validate({"wrapper": "7"}, version="1")
+    assert validated.current_model.wrapper.child.value == 7
+    assert family.dump(
+        version="1",
+        data=Parent(wrapper=Wrapper(child=Child(value=8))),
+    ) == {"wrapper": "8"}
+
+
+@pytest.mark.parametrize("union_arm", [False, True], ids=["scalar", "model-or-scalar"])
+def test_explicit_wire_model_may_replace_a_nested_leaf_with_a_scalar(
+    union_arm: bool,
+) -> None:
+    case = "union" if union_arm else "scalar"
+
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name=f"explicit_{case}_leaf_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+    historical_child = child_family.model_for("1")
+
+    class Parent(BaseModel):
+        child: Child
+
+    historical_annotation = historical_child | str if union_arm else str
+    historical_parent = create_model(
+        f"Explicit{case.title()}LeafHistoricalParent",
+        child=(historical_annotation, ...),
+    )
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"child": {"value": int(data["child"])}}
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"child": str(data["child"]["value"])}
+
+    family = SchemaFamily(
+        model=Parent,
+        name=f"explicit_{case}_leaf_parent",
+        versions=(
+            SchemaVersion("1", wire_model=historical_parent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    validated = family.validate({"child": "7", "schema_version": "1"})
+    assert validated.current_model.child.value == 7
+    assert family.dump(version="1", data=Parent(child=Child(value=8))) == {
+        "child": "8",
+        "schema_version": "1",
+    }
+
+
+def test_explicit_wire_model_prunes_an_independent_nested_body_model() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="independent_explicit_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    class HistoricalChildRepresentation(BaseModel):
+        value: int
+        schema_version: Literal["1"] = "1"
+
+    class HistoricalParent(BaseModel):
+        child: HistoricalChildRepresentation
+
+    family = SchemaFamily(
+        model=Parent,
+        name="independent_explicit_child_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {
+            "child": {"value": 7, "schema_version": "1"},
+            "schema_version": "1",
+        },
+    )
+    assert validated.current_model.child.value == 7
+    assert family.dump(version="1", data=Parent(child=Child(value=8))) == {
+        "child": {"value": 8},
+        "schema_version": "1",
+    }
+
+
+def test_explicit_wire_model_prunes_a_structural_dataclass_body() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="dataclass_explicit_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    @dataclass
+    class HistoricalChildRepresentation:
+        value: int
+        schema_version: Literal["1"] = "1"
+
+    class HistoricalParent(BaseModel):
+        child: HistoricalChildRepresentation
+
+    family = SchemaFamily(
+        model=Parent,
+        name="dataclass_explicit_child_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {
+            "child": {"value": 7, "schema_version": "1"},
+            "schema_version": "1",
+        },
+    )
+    assert validated.current_model.child.value == 7
+    assert family.dump(version="1", data=Parent(child=Child(value=8))) == {
+        "child": {"value": 8},
+        "schema_version": "1",
+    }
+
+
+def test_explicit_wire_model_rejects_a_relocated_dataclass_body() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="relocated_dataclass_explicit_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    @pydantic_dataclass
+    class HistoricalChildRepresentation:
+        value: int
+        schema_version: Literal["1"] = "1"
+
+        @model_serializer
+        def serialize(self) -> str:
+            return "relocated"
+
+    class HistoricalParent(BaseModel):
+        child: HistoricalChildRepresentation
+
+    family = SchemaFamily(
+        model=Parent,
+        name="relocated_dataclass_explicit_child_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    with pytest.raises(ValueError, match="Nested target wire model.*must serialize to an object"):
+        family.dump(version="1", data=Parent(child=Child(value=8)))
+
+
+def test_explicit_wire_model_prunes_a_typed_dict_union_arm() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="typed_dict_explicit_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    class HistoricalChildRepresentation(TypedDict):
+        value: int
+        schema_version: NotRequired[Annotated[Literal["1"], Field(default="1")]]
+
+    class HistoricalParent(BaseModel):
+        child: HistoricalChildRepresentation | str
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"child": {"value": data["child"]["value"]}}
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"child": {**data["child"], "schema_version": "1"}}
+
+    family = SchemaFamily(
+        model=Parent,
+        name="typed_dict_explicit_child_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {
+            "child": {"value": 7, "schema_version": "1"},
+            "schema_version": "1",
+        },
+    )
+    assert validated.current_model.child.value == 7
+    assert family.dump(version="1", data=Parent(child=Child(value=8))) == {
+        "child": {"value": 8},
+        "schema_version": "1",
+    }
+
+
+@pytest.mark.parametrize("model_first", [True, False], ids=["model-first", "scalar-first"])
+def test_explicit_wire_model_uses_scalar_items_in_generic_union_arms(
+    model_first: bool,
+) -> None:
+    case = "model_first" if model_first else "scalar_first"
+
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name=f"generic_scalar_union_{case}_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Parent(BaseModel):
+        children: list[Child]
+
+    class HistoricalChildRepresentation(BaseModel):
+        value: int
+        schema_version: Literal["1"] = "1"
+
+    model_arm = list[HistoricalChildRepresentation]
+    scalar_arm = list[str]
+    historical_annotation = model_arm | scalar_arm if model_first else scalar_arm | model_arm
+    historical_parent = create_model(
+        f"GenericScalarUnion{case.title()}HistoricalParent",
+        children=(historical_annotation, ...),
+    )
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"children": [{"value": int(value)} for value in data["children"]]}
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "children": [str(child["value"]) for child in data["children"]],
+        }
+
+    family = SchemaFamily(
+        model=Parent,
+        name=f"generic_scalar_union_{case}_parent",
+        versions=(
+            SchemaVersion("1", wire_model=historical_parent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily("children", child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {"children": ["7"], "schema_version": "1"},
+    )
+    assert [child.value for child in validated.current_model.children] == [7]
+    assert family.dump(version="1", data=Parent(children=[Child(value=8)])) == {
+        "children": ["8"],
+        "schema_version": "1",
+    }
+
+
+def test_explicit_wire_model_uses_scalar_items_in_an_intermediate_generic_union() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="intermediate_generic_scalar_union_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class Wrapper(BaseModel):
+        child: Child
+
+    class Parent(BaseModel):
+        wrappers: list[Wrapper]
+
+    class HistoricalChildRepresentation(BaseModel):
+        value: int
+        schema_version: Literal["1"] = "1"
+
+    class HistoricalWrapper(BaseModel):
+        child: HistoricalChildRepresentation
+
+    historical_parent = create_model(
+        "IntermediateGenericScalarUnionHistoricalParent",
+        wrappers=(list[HistoricalWrapper] | list[str], ...),
+    )
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "wrappers": [{"child": {"value": int(value)}} for value in data["wrappers"]],
+        }
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "wrappers": [str(wrapper["child"]["value"]) for wrapper in data["wrappers"]],
+        }
+
+    family = SchemaFamily(
+        model=Parent,
+        name="intermediate_generic_scalar_union_parent",
+        versions=(
+            SchemaVersion("1", wire_model=historical_parent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily(("wrappers", "child"), child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {"wrappers": ["7"], "schema_version": "1"},
+    )
+    assert validated.current_model.wrappers[0].child.value == 7
+    assert family.dump(
+        version="1",
+        data=Parent(wrappers=[Wrapper(child=Child(value=8))]),
+    ) == {
+        "wrappers": ["8"],
+        "schema_version": "1",
+    }
+
+
+def test_explicit_union_wrapper_prunes_nested_family_metadata() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="explicit_union_metadata_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+    historical_child = child_family.model_for("1")
+
+    class Wrapper(BaseModel):
+        child: Child
+
+    class Parent(BaseModel):
+        wrapper: Wrapper
+
+    historical_wrapper = create_model(
+        "ExplicitUnionMetadataHistoricalWrapper",
+        child=(historical_child, ...),
+    )
+    historical_parent = create_model(
+        "ExplicitUnionMetadataHistoricalParent",
+        wrapper=(historical_wrapper | str, ...),
+    )
+    family = SchemaFamily(
+        model=Parent,
+        name="explicit_union_metadata_parent",
+        versions=(
+            SchemaVersion("1", wire_model=historical_parent),
+            SchemaVersion("2"),
+        ),
+        nested=(NestedFamily(("wrapper", "child"), child_family, matching_labels()),),
+    )
+
+    assert family.dump(
+        version="1",
+        data=Parent(wrapper=Wrapper(child=Child(value=3))),
+    ) == {
+        "wrapper": {"child": {"value": 3}},
+        "schema_version": "1",
+    }
+
+
+def test_explicit_union_wrapper_uses_its_validated_scalar_arm() -> None:
+    class Child(BaseModel):
+        value: int
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="explicit_scalar_union_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+    historical_child = child_family.model_for("1")
+
+    class Wrapper(BaseModel):
+        child: Child
+
+    class Parent(BaseModel):
+        wrapper: Wrapper
+
+    historical_wrapper = create_model(
+        "ExplicitScalarUnionHistoricalWrapper",
+        child=(historical_child, ...),
+    )
+    historical_parent = create_model(
+        "ExplicitScalarUnionHistoricalParent",
+        wrapper=(historical_wrapper | str, ...),
+    )
+
+    def upgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"wrapper": {"child": {"value": int(data["wrapper"])}}}
+
+    def downgrade(data: dict[str, Any]) -> dict[str, Any]:
+        return {"wrapper": str(data["wrapper"]["child"]["value"])}
+
+    family = SchemaFamily(
+        model=Parent,
+        name="explicit_scalar_union_parent",
+        versions=(
+            SchemaVersion("1", wire_model=historical_parent),
+            SchemaVersion("2"),
+        ),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=upgrade,
+                downgrade=downgrade,
+                downgrade_semantics="exact",
+            ),
+        ),
+        nested=(NestedFamily(("wrapper", "child"), child_family, matching_labels()),),
+    )
+
+    validated = family.validate(
+        {"wrapper": "7", "schema_version": "1"},
+    )
+    assert validated.current_model.wrapper.child.value == 7
+    assert family.dump(
+        version="1",
+        data=Parent(wrapper=Wrapper(child=Child(value=8))),
+    ) == {
+        "wrapper": "8",
         "schema_version": "1",
     }
 
@@ -866,6 +1641,7 @@ def test_structured_annotations_detect_nested_runtime_behavior() -> None:
         [
             ("literal", Literal["safe"]),
             ("annotated", Annotated[int, Field(description="safe")]),
+            ("recursive", _SafeRecursiveEnvelope),
         ],
     )
     safe_payload = create_model(
@@ -882,17 +1658,38 @@ def test_structured_annotations_detect_nested_runtime_behavior() -> None:
     safe_family.model_for("1")
 
 
+def test_behavioral_newtype_target_has_a_specific_diagnostic() -> None:
+    behavioral_value = NewType(
+        "behavioral_value",
+        Annotated[int, AfterValidator(lambda value: value)],
+    )
+
+    class Payload(BaseModel):
+        value: behavioral_value
+
+    family = SchemaFamily(
+        model=Payload,
+        name="behavioral_newtype_target",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="behavioral NewType target"):
+        family.compile()
+
+
 def test_safe_recursive_nested_and_generic_aliases_compile() -> None:
     type literal_alias = Literal["ok"]
     type nested_alias = list[literal_alias]
-    type generic_alias[value_type] = list[value_type]
-    type applied_alias = generic_alias[int]
+    type generic_alias[value_type: int] = list[value_type]
+    type nested_generic_alias = generic_alias[int]
     type recursive_alias = int | list[recursive_alias]
     type annotated_alias = Annotated[int, Field(description="safe declarative metadata")]
 
     class Payload(BaseModel):
         nested: nested_alias
-        applied: applied_alias
+        applied: generic_alias[int]
+        nested_applied: nested_generic_alias
         recursive: recursive_alias
         annotated: annotated_alias
 
@@ -908,12 +1705,14 @@ def test_safe_recursive_nested_and_generic_aliases_compile() -> None:
         {
             "nested": ["ok"],
             "applied": [1, 2],
+            "nested_applied": [3, 4],
             "recursive": [1, [2]],
             "annotated": 3,
         }
     ).model_dump() == {
         "nested": ["ok"],
         "applied": [1, 2],
+        "nested_applied": [3, 4],
         "recursive": [1, [2]],
         "annotated": 3,
     }

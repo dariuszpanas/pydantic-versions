@@ -38,7 +38,6 @@ from pydantic_versions import (
     migration,
     validate_versioned,
 )
-from pydantic_versions._runtime import _nested_family_collection_kind
 
 
 class InventoryConfig(BaseModel):
@@ -1076,11 +1075,6 @@ def test_optional_annotated_nested_collections_keep_container_metadata_rules() -
         ),
         version_metadata=None,
     )
-
-    assert [
-        _nested_family_collection_kind(model=ParentPayload, path=(field_name,))
-        for field_name in ("listed", "tupled", "set_values", "frozen_values")
-    ] == ["list", "tuple", "set", "frozenset"]
 
     rendered = parent.dump(
         version="1",

@@ -24,6 +24,7 @@ from typing import (
 )
 
 import pytest
+from annotated_types import GroupedMetadata
 from pydantic import (
     AfterValidator,
     AliasChoices,
@@ -135,6 +136,41 @@ def test_unsupported_wire_model_error_has_safe_context_and_chained_cause() -> No
     assert "non-JSON-serializable validation schema" in message
     assert sensitive_value not in message
     assert isinstance(exc_info.value.__cause__, TypeError)
+    assert family._compiled is None
+
+
+def test_explicit_wire_model_must_have_object_shaped_schemas() -> None:
+    class CurrentPayload(BaseModel):
+        value: int = 1
+
+    class NonObjectWireModel(BaseModel):
+        value: int = 1
+
+        @classmethod
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = "",
+            schema_generator: Any = None,
+            mode: str = "validation",
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            del cls, by_alias, ref_template, schema_generator, mode, kwargs
+            return {"type": "string"}
+
+    family = SchemaFamily(
+        model=CurrentPayload,
+        name="non_object_explicit_wire_schema",
+        versions=(
+            SchemaVersion("1", wire_model=NonObjectWireModel),
+            SchemaVersion("2"),
+        ),
+        version_metadata=None,
+    )
+
+    with pytest.raises(UnsupportedWireModelError, match="has a non-object validation schema"):
+        family.compile()
+
     assert family._compiled is None
 
 
@@ -377,6 +413,47 @@ def test_type_aliases_cannot_hide_mutable_schema_metadata(alias_type: Any) -> No
     schema_extra["x-static"].append("caller")
 
 
+@pytest.mark.parametrize(
+    "alias_type",
+    [StdlibTypeAliasType, ExtensionsTypeAliasType],
+    ids=["typing", "typing_extensions"],
+)
+def test_type_aliases_cannot_hide_executable_schema_metadata(alias_type: Any) -> None:
+    class CustomGroupedMetadata(GroupedMetadata):
+        def __iter__(self) -> Any:
+            yield self
+
+    class CustomSchemaHook:
+        def __get_pydantic_core_schema__(self, source_type: Any, handler: Any) -> Any:
+            return handler(source_type)
+
+    aliases = (
+        (
+            alias_type("GroupedMetadataAlias", Annotated[int, CustomGroupedMetadata()]),
+            "executable metadata hidden in a type alias",
+        ),
+        (
+            alias_type("CustomSchemaHookAlias", Annotated[int, CustomSchemaHook()]),
+            "custom schema metadata hidden in a type alias",
+        ),
+    )
+
+    for index, (field_type, message) in enumerate(aliases):
+        payload = create_model(
+            f"ExecutableAliasMetadataPayload{index}",
+            value=(field_type, ...),
+        )
+        family = SchemaFamily(
+            model=payload,
+            name=f"unsupported_executable_alias_metadata_{index}",
+            versions=(SchemaVersion("1"),),
+            version_metadata=None,
+        )
+
+        with pytest.raises(UnsupportedWireModelError, match=message):
+            family.compile()
+
+
 def test_generated_fields_preserve_constraints_defaults_factories_and_static_schema() -> None:
     factory_calls = 0
 
@@ -442,6 +519,32 @@ def test_generated_fields_preserve_constraints_defaults_factories_and_static_sch
         historical.model_validate({"required_value": 0})
     with pytest.raises(ValidationError):
         historical.model_validate({"required_value": 1, "threshold": 21})
+
+
+def test_uncopyable_defaults_fail_without_leaking_the_default_value() -> None:
+    class UncopyableDefault:
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            del memo
+            msg = "sensitive default details"
+            raise ValueError(msg)
+
+    class Payload(BaseModel):
+        value: Any = Field(default=UncopyableDefault())
+
+    family = SchemaFamily(
+        model=Payload,
+        name="uncopyable_default",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(UnsupportedWireModelError) as exc_info:
+        family.compile()
+
+    message = str(exc_info.value)
+    assert "cannot safely copy attribute 'default' for field 'value'" in message
+    assert "sensitive default details" not in message
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 def test_validated_data_factory_rejects_a_changed_preceding_namespace() -> None:
@@ -1168,6 +1271,39 @@ def test_model_owned_metadata_rejects_disabled_or_output_only_locations() -> Non
         assert family._compiled is None
 
 
+def test_version_metadata_location_must_match_the_wire_body() -> None:
+    class MetadataPayload(BaseModel):
+        schema_version: str = "2"
+
+    cases = (
+        (
+            VersionMetadata(("schema_version", "nested"), owner="model"),
+            "nested model-owned version metadata requires the top-level conversion compiler",
+        ),
+        (
+            VersionMetadata("missing", owner="model"),
+            "model-owned version metadata must resolve to exactly one direct field or alias",
+        ),
+        (
+            VersionMetadata("schema_version", owner="family"),
+            "family-owned version metadata collides with body field 'schema_version'",
+        ),
+    )
+
+    for index, (metadata, message) in enumerate(cases):
+        family = SchemaFamily(
+            model=MetadataPayload,
+            name=f"invalid_metadata_location_{index}",
+            versions=(SchemaVersion("1"), SchemaVersion("2")),
+            version_metadata=metadata,
+        )
+
+        with pytest.raises(UnsupportedWireModelError, match=message):
+            family.compile()
+
+        assert family._compiled is None
+
+
 def test_model_owned_metadata_rejects_a_historical_default_patch() -> None:
     class PatchedMetadataPayload(BaseModel):
         schema_version: str = "2"
@@ -1473,19 +1609,29 @@ def test_nested_projection_rewrites_annotated_collection_elements() -> None:
 
     class ParentPayload(BaseModel):
         children: list[Annotated[ChildPayload, Field(description="nested child")]]
+        legacy_children: typing.List[ChildPayload]  # noqa: UP006 - compatibility contract
 
     family = SchemaFamily(
         model=ParentPayload,
         name="annotated_element_parent",
         versions=(SchemaVersion("1"), SchemaVersion("2")),
-        nested=(NestedFamily("children", child_family, matching_labels()),),
+        nested=(
+            NestedFamily("children", child_family, matching_labels()),
+            NestedFamily("legacy_children", child_family, matching_labels()),
+        ),
     )
 
     historical = family.model_for("1")
-    validated = historical.model_validate({"children": [{"legacy_value": 7}]})
+    validated = historical.model_validate(
+        {
+            "children": [{"legacy_value": 7}],
+            "legacy_children": [{"legacy_value": 8}],
+        }
+    )
 
     assert validated.model_dump() == {
         "children": [{"legacy_value": 7, "schema_version": "1"}],
+        "legacy_children": [{"legacy_value": 8, "schema_version": "1"}],
         "schema_version": "1",
     }
 
@@ -1832,6 +1978,43 @@ def test_model_owned_version_field_cannot_be_excluded() -> None:
         family.compile()
 
 
+def test_explicit_wire_model_must_preserve_model_owned_metadata_contract() -> None:
+    class CurrentPayload(BaseModel):
+        schema_version: Literal["2"] = "2"
+        value: int
+
+    class MissingMetadata(BaseModel):
+        value: int
+
+    class WrongMetadataType(BaseModel):
+        schema_version: str = "1"
+        value: int
+
+    class WrongMetadataDefault(BaseModel):
+        schema_version: Literal["1"] = cast(Any, "2")
+        value: int
+
+    cases = (
+        (MissingMetadata, "must declare the same model metadata field"),
+        (WrongMetadataType, "must annotate field 'schema_version'"),
+        (WrongMetadataDefault, "must provide the exact default '1'"),
+    )
+
+    for index, (wire_model, message) in enumerate(cases):
+        family = SchemaFamily(
+            model=CurrentPayload,
+            name=f"invalid_explicit_model_metadata_{index}",
+            versions=(
+                SchemaVersion("1", wire_model=wire_model),
+                SchemaVersion("2"),
+            ),
+            version_metadata=VersionMetadata("schema_version", owner="model"),
+        )
+
+        with pytest.raises(UnsupportedWireModelError, match=message):
+            family.compile()
+
+
 def test_callable_discriminators_fail_in_field_and_annotated_forms() -> None:
     def discriminator(value: Any) -> str | None:
         candidate = (
@@ -1856,12 +2039,37 @@ def test_callable_discriminators_fail_in_field_and_annotated_forms() -> None:
             Discriminator(discriminator),
         ]
 
+    class CustomDiscriminator(Discriminator):
+        pass
+
+    class CustomAnnotatedDiscriminatorPayload(BaseModel):
+        pet: Annotated[Cat | Dog, CustomDiscriminator("kind")]
+
     unsupported = (
-        ("field_callable_discriminator", FieldDiscriminatorPayload),
-        ("annotated_callable_discriminator", AnnotatedDiscriminatorPayload),
+        (
+            "field_callable_discriminator",
+            FieldDiscriminatorPayload,
+            "callable discriminator",
+        ),
+        (
+            "annotated_callable_discriminator",
+            AnnotatedDiscriminatorPayload,
+            "callable discriminator",
+        ),
+        (
+            "annotated_custom_discriminator",
+            CustomAnnotatedDiscriminatorPayload,
+            "custom discriminator subtype",
+        ),
     )
-    for suffix, model in unsupported:
-        _assert_unsupported(model, family_name=f"unsupported_{suffix}")
+    for suffix, model, message in unsupported:
+        family = SchemaFamily(
+            model=model,
+            name=f"unsupported_{suffix}",
+            versions=(SchemaVersion("1"), SchemaVersion("2")),
+        )
+        with pytest.raises(UnsupportedWireModelError, match=message):
+            family.compile()
 
 
 def test_custom_annotation_hooks_fail_without_generated_hook_invocation() -> None:
@@ -1994,44 +2202,31 @@ def test_behavioral_dataclass_annotations_fail_but_plain_dataclasses_remain_supp
     assert post_init_calls == baseline
 
 
-def test_structured_annotations_with_behavior_in_nested_dataclass_are_rejected() -> None:
+def test_structured_annotations_with_nested_behavior_are_rejected() -> None:
     @dataclass
-    class InnerValue:
+    class InnerDataclass:
         value: Annotated[int, AfterValidator(lambda value: value if value > 0 else 0)]
 
-    class NestedBehavioralPayload(BaseModel):
-        value: InnerValue
-
-    _assert_unsupported(
-        NestedBehavioralPayload,
-        family_name="unsupported_nested_behavioral_dataclass",
-    )
-
-
-def test_structured_annotations_with_behavior_in_nested_typed_dict_are_rejected() -> None:
     class InnerTypedDict(TypedDict):
         value: Annotated[int, AfterValidator(lambda value: value if value > 0 else 0)]
 
-    class NestedBehavioralTypedDictPayload(BaseModel):
-        value: InnerTypedDict
-
-    _assert_unsupported(
-        NestedBehavioralTypedDictPayload,
-        family_name="unsupported_nested_behavioral_typeddict",
-    )
-
-
-def test_structured_annotations_with_behavior_in_nested_named_tuple_are_rejected() -> None:
     class InnerNamedTuple(NamedTuple):
         value: Annotated[int, AfterValidator(lambda value: value if value > 0 else 0)]
 
-    class NestedBehavioralNamedTuplePayload(BaseModel):
-        value: InnerNamedTuple
-
-    _assert_unsupported(
-        NestedBehavioralNamedTuplePayload,
-        family_name="unsupported_nested_behavioral_namedtuple",
+    cases = (
+        ("dataclass", InnerDataclass),
+        ("typeddict", InnerTypedDict),
+        ("namedtuple", InnerNamedTuple),
     )
+    for kind, annotation in cases:
+        payload = create_model(
+            f"NestedBehavioral{kind.title()}Payload",
+            value=(annotation, ...),
+        )
+        _assert_unsupported(
+            payload,
+            family_name=f"unsupported_nested_behavioral_{kind}",
+        )
 
 
 if TYPE_CHECKING:
@@ -2085,6 +2280,27 @@ def test_custom_field_schema_metadata_fails_without_compiler_invocation() -> Non
     baseline = calls.copy()
     _assert_unsupported(ValidateAsPayload, family_name="unsupported_validate_as")
     _assert_unsupported(SchemaMetadataPayload, family_name="unsupported_field_schema")
+    assert calls == baseline
+
+
+def test_dynamic_instance_schema_metadata_fails_without_reinvocation() -> None:
+    calls: Counter[str] = Counter()
+
+    class DynamicSchemaMetadata:
+        __get_pydantic_core_schema__: Any
+
+    def generate_schema(source_type: Any, handler: Any) -> Any:
+        calls["schema"] += 1
+        return handler(source_type)
+
+    metadata = DynamicSchemaMetadata()
+    metadata.__get_pydantic_core_schema__ = generate_schema
+
+    class Payload(BaseModel):
+        value: Annotated[int, metadata]
+
+    baseline = calls.copy()
+    _assert_unsupported(Payload, family_name="unsupported_dynamic_schema_metadata")
     assert calls == baseline
 
 

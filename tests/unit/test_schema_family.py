@@ -259,15 +259,9 @@ def test_compilation_snapshots_mutable_field_defaults() -> None:
     caller_default.append(9)
 
     assert family.model_for("1")().model_dump()["values"] == []
-    compiled_default = family._compiled_family().versions[0].projection.fields[0].default
-    assert compiled_default is not None
-    assert compiled_default.default == []
 
 
 def test_nested_mapping_declaration_copies_the_caller_mapping() -> None:
-    class ParentConfig(BaseModel):
-        value: int = 1
-
     class ChildConfig(BaseModel):
         value: int = 1
 
@@ -285,11 +279,53 @@ def test_nested_mapping_declaration_copies_the_caller_mapping() -> None:
         "1": "legacy",
         "2": "current",
     }
-    assert isinstance(matching_labels(), type(matching_labels()))
     assert VersionMetadata(("meta", "version")).to_dict() == {
         "path": ["meta", "version"],
         "owner": "family",
     }
+
+
+def test_declaration_records_reject_malformed_values() -> None:
+    class ChildConfig(BaseModel):
+        value: int = 1
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="declaration_child",
+        versions=(SchemaVersion("legacy"), SchemaVersion("current")),
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaVersion("legacy", patches=cast(Any, "not-a-sequence"))
+    assert str(raised.value) == "SchemaVersion.patches must be a sequence, not str"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        VersionMetadata(path="")
+    assert str(raised.value) == "VersionMetadata.path cannot be empty"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        VersionMetadata(path=("meta", ""))
+    assert str(raised.value) == "VersionMetadata.path must contain only non-empty strings"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        VersionMetadata(owner=cast(Any, "invalid"))
+    assert str(raised.value) == "VersionMetadata.owner must be 'family' or 'model'"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        NestedFamily(path=(), family=child, versions=matching_labels())
+    assert str(raised.value) == "NestedFamily.path must be a non-empty string or tuple of strings"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        NestedFamily(path="child", family=child, versions=cast(Any, "invalid"))
+    assert str(raised.value) == "NestedFamily.versions must be a mapping or matching_labels()"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        NestedFamily(path="child", family=child, versions={"": "legacy"})
+    assert str(raised.value) == "nested parent label must be a non-empty string"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        NestedFamily(path="child", family=child, versions={"1": ""})
+    assert str(raised.value) == "nested child label must be a non-empty string"
 
 
 def test_nested_mapping_must_anchor_the_current_child_version() -> None:
@@ -325,6 +361,142 @@ def test_nested_mapping_must_anchor_the_current_child_version() -> None:
         parent.compile()
 
 
+def test_callable_nested_family_provider_uses_the_public_compile_path() -> None:
+    class ChildConfig(BaseModel):
+        value: int
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="callable_child",
+        versions=(SchemaVersion("legacy"), SchemaVersion("current")),
+    )
+
+    class ParentConfig(BaseModel):
+        child: ChildConfig
+
+    parent = SchemaFamily(
+        model=ParentConfig,
+        name="callable_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(
+            NestedFamily(
+                "child",
+                lambda: child,
+                {"1": "legacy", "2": "current"},
+            ),
+        ),
+    )
+
+    result = parent.validate(
+        {
+            "schema_version": "1",
+            "child": {"schema_version": "legacy", "value": 4},
+        }
+    )
+
+    assert result.source_version == "1"
+    assert result.current_version == "2"
+    assert result.current_model == ParentConfig(child=ChildConfig(value=4))
+
+
+def test_nested_family_mapping_failures_are_reported_through_compile() -> None:
+    class ChildConfig(BaseModel):
+        value: int = 1
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="mapping_child",
+        versions=(SchemaVersion("legacy"), SchemaVersion("current")),
+    )
+
+    class ParentConfig(BaseModel):
+        child: ChildConfig
+
+    cases = (
+        (
+            "provider",
+            NestedFamily("child", cast(Any, "not-a-family"), matching_labels()),
+            "Nested family declaration at path ('child',) for 'provider' must use a "
+            "SchemaFamily or callable provider",
+        ),
+        (
+            "provider_result",
+            NestedFamily("child", lambda: cast(Any, "not-a-family"), matching_labels()),
+            "Nested family declaration at path ('child',) for 'provider_result' must resolve "
+            "to a SchemaFamily",
+        ),
+        (
+            "matching",
+            NestedFamily("child", child, matching_labels()),
+            "Nested family declaration at path ('child',) for 'matching' must use matching "
+            "labels ('1', '2')",
+        ),
+        (
+            "missing",
+            NestedFamily("child", child, {"1": "legacy"}),
+            "Nested family declaration at path ('child',) for 'missing' is missing mappings "
+            "for parent labels ('2',)",
+        ),
+        (
+            "unknown_parent",
+            NestedFamily(
+                "child",
+                child,
+                {"1": "legacy", "2": "current", "3": "legacy"},
+            ),
+            "Nested family declaration at path ('child',) for 'unknown_parent' has unknown "
+            "parent labels ('3',)",
+        ),
+        (
+            "unknown_child",
+            NestedFamily("child", child, {"1": "legacy", "2": "missing"}),
+            "Nested family declaration at path ('child',) for 'unknown_child' has unknown "
+            "child labels ('missing',)",
+        ),
+    )
+
+    for name, declaration, message in cases:
+        family = SchemaFamily(
+            model=ParentConfig,
+            name=name,
+            versions=(SchemaVersion("1"), SchemaVersion("2")),
+            nested=(declaration,),
+        )
+        with pytest.raises(SchemaCompilationError) as raised:
+            family.compile()
+        assert str(raised.value) == message
+
+
+def test_duplicate_nested_family_paths_are_rejected_through_compile() -> None:
+    class ChildConfig(BaseModel):
+        value: int = 1
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="duplicate_path_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+    )
+
+    class ParentConfig(BaseModel):
+        child: ChildConfig
+
+    family = SchemaFamily(
+        model=ParentConfig,
+        name="duplicate_path_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        nested=(
+            NestedFamily("child", child, matching_labels()),
+            NestedFamily("child", child, matching_labels()),
+        ),
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        family.compile()
+    assert str(raised.value) == (
+        "Duplicate nested family declaration path ('child',) for 'duplicate_path_parent'"
+    )
+
+
 def test_compile_is_lazy_idempotent_and_cache_stable() -> None:
     class LazyConfig(BaseModel):
         value: int = 1
@@ -341,6 +513,39 @@ def test_compile_is_lazy_idempotent_and_cache_stable() -> None:
 
     assert family.compile() is family
     assert family.model_for("1") is first
+
+
+def test_recursive_callable_provider_fails_without_mutating_private_state() -> None:
+    class ChildConfig(BaseModel):
+        value: int = 1
+
+    child = SchemaFamily(
+        model=ChildConfig,
+        name="recursive_provider_child",
+        versions=(SchemaVersion("1"),),
+    )
+
+    class ParentConfig(BaseModel):
+        child: ChildConfig
+
+    parent: SchemaFamily[ParentConfig]
+
+    def provider() -> SchemaFamily[ChildConfig]:
+        parent.compile()
+        return child
+
+    parent = SchemaFamily(
+        model=ParentConfig,
+        name="recursive_provider_parent",
+        versions=(SchemaVersion("1"),),
+        nested=(NestedFamily("child", provider, matching_labels()),),
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        parent.compile()
+    assert str(raised.value) == (
+        "Recursive schema-family compilation is not yet supported for 'recursive_provider_parent'"
+    )
 
 
 def test_lazy_compilation_allows_a_later_forward_reference_rebuild() -> None:
@@ -387,25 +592,6 @@ def test_compile_is_thread_safe_and_publishes_one_model_identity() -> None:
         models = tuple(executor.map(lambda _: compile_model(), range(workers)))
 
     assert len({id(model) for model in models}) == 1
-
-
-def test_private_compiled_state_is_frozen() -> None:
-    class FrozenConfig(BaseModel):
-        value: int = 1
-
-    family = SchemaFamily(
-        model=FrozenConfig,
-        name="frozen",
-        versions=(SchemaVersion("1"), SchemaVersion("2")),
-    )
-    compiled = family._compiled_family()
-
-    assert isinstance(compiled.versions, tuple)
-    assert isinstance(compiled.transitions, tuple)
-    with pytest.raises(FrozenInstanceError):
-        cast(Any, compiled).name = "changed"
-    with pytest.raises(FrozenInstanceError):
-        cast(Any, compiled.versions[0]).model = FrozenConfig
 
 
 def test_sanitized_label_collisions_have_distinct_generated_identities() -> None:
@@ -470,6 +656,43 @@ def test_schema_family_rejects_malformed_names_labels_and_sequences() -> None:
             missing_version=cast(Any, 1),
         )
 
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaFamily(
+            model=StrictConfig,
+            name="invalid_version_item",
+            versions=cast(Any, ("1",)),
+        )
+    assert str(raised.value) == "SchemaFamily.versions must contain only SchemaVersion values"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaFamily(
+            model=StrictConfig,
+            name="invalid_transition_item",
+            versions=versions,
+            transitions=cast(Any, ("1 -> 2",)),
+        )
+    assert str(raised.value) == (
+        "SchemaFamily.transitions must contain only VersionTransition values"
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaFamily(
+            model=StrictConfig,
+            name="invalid_nested_item",
+            versions=versions,
+            nested=cast(Any, ("child",)),
+        )
+    assert str(raised.value) == "SchemaFamily.nested must contain only NestedFamily values"
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaFamily(
+            model=StrictConfig,
+            name="invalid_metadata",
+            versions=versions,
+            version_metadata=cast(Any, "schema_version"),
+        )
+    assert str(raised.value) == "version_metadata must be VersionMetadata or None"
+
 
 def test_compatibility_declarations_reject_coercion_and_nonterminal_current() -> None:
     with pytest.raises(SchemaCompilationError, match="must be a sequence"):
@@ -482,37 +705,87 @@ def test_compatibility_declarations_reject_coercion_and_nonterminal_current() ->
         versioned_schema(name="nonterminal", versions=("1", "2"), current="1")
 
 
+def test_decorator_rejects_duplicate_wire_declarations_for_one_version() -> None:
+    class FirstHistoricalConfig(BaseModel):
+        value: int = 1
+
+    class SecondHistoricalConfig(BaseModel):
+        value: int = 2
+
+    with pytest.raises(DuplicateSchemaVersionError) as raised:
+
+        @versioned_schema(name="duplicate_wire", versions=("1",), current="1")
+        @schema_version("1", wire_model=FirstHistoricalConfig)
+        @schema_version("1", wire_model=SecondHistoricalConfig)
+        class DuplicateWireConfig(BaseModel):
+            value: int = 3
+
+    assert str(raised.value) == "Schema version '1' is declared more than once for 'duplicate_wire'"
+
+
 @pytest.mark.parametrize(
-    "transition, error",
+    "transition, message",
     [
-        (VersionTransition("0", "1", upgrade=_identity), SchemaCompilationError),
-        (VersionTransition("2", "1", upgrade=_identity), SchemaCompilationError),
-        (VersionTransition("1", "3", upgrade=_identity), SchemaCompilationError),
-        (VersionTransition("1", "2"), SchemaCompilationError),
+        (
+            VersionTransition("0", "1", upgrade=_identity),
+            "Transition '0' -> '1' references an unknown version for 'transitions'",
+        ),
+        (
+            VersionTransition("2", "1", upgrade=_identity),
+            "Transition '2' -> '1' for 'transitions' must connect adjacent forward labels",
+        ),
+        (
+            VersionTransition("1", "3", upgrade=_identity),
+            "Transition '1' -> '3' for 'transitions' must connect adjacent forward labels",
+        ),
+        (
+            VersionTransition("1", "2"),
+            "Transition '1' -> '2' must provide at least one callable",
+        ),
         (
             VersionTransition("1", "2", upgrade=cast(Any, "not-callable")),
-            SchemaCompilationError,
+            "Upgrade for '1' -> '2' must be callable",
         ),
         (
             VersionTransition("1", "2", upgrade=_identity, downgrade_semantics="exact"),
-            SchemaCompilationError,
+            "downgrade_semantics is forbidden when no downgrade is declared",
+        ),
+        (
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=_identity,
+                downgrade=cast(Any, "not-callable"),
+            ),
+            "Downgrade for '1' -> '2' must be callable",
+        ),
+        (
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=_identity,
+                downgrade=_identity,
+                downgrade_semantics=cast(Any, "best-effort"),
+            ),
+            "downgrade_semantics must be 'exact' or 'lossy' when a downgrade is declared",
         ),
     ],
 )
 def test_transition_topology_is_validated(
     transition: VersionTransition,
-    error: type[Exception],
+    message: str,
 ) -> None:
     class TransitionConfig(BaseModel):
         value: int = 1
 
-    with pytest.raises(error):
+    with pytest.raises(SchemaCompilationError) as raised:
         SchemaFamily(
             model=TransitionConfig,
             name="transitions",
             versions=(SchemaVersion("1"), SchemaVersion("2"), SchemaVersion("3")),
             transitions=(transition,),
         )
+    assert str(raised.value) == message
 
 
 def test_downgrade_only_transitions_are_accepted_when_declared_explicitly() -> None:
@@ -541,7 +814,7 @@ def test_duplicate_transition_edge_is_rejected() -> None:
     class DuplicateTransitionConfig(BaseModel):
         value: int = 1
 
-    with pytest.raises(DuplicateSchemaVersionError):
+    with pytest.raises(DuplicateSchemaVersionError) as raised:
         SchemaFamily(
             model=DuplicateTransitionConfig,
             name="duplicate_transitions",
@@ -551,6 +824,7 @@ def test_duplicate_transition_edge_is_rejected() -> None:
                 VersionTransition("1", "2", upgrade=_identity),
             ),
         )
+    assert str(raised.value) == "Transition '1' -> '2' is declared more than once"
 
 
 def test_future_declarations_are_rejected_instead_of_ignored() -> None:
@@ -674,6 +948,62 @@ def test_conflicting_patch_declarations_are_rejected() -> None:
                 SchemaVersion("2"),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "patch, message",
+    [
+        (
+            cast(Any, "not-a-patch"),
+            "Unsupported patch declaration for version '1': 'not-a-patch'",
+        ),
+        (
+            FieldDefault(name="", default=1),
+            "Patch field names for version '1' must be non-empty strings",
+        ),
+    ],
+)
+def test_invalid_patch_records_are_rejected_through_schema_family(
+    patch: Any,
+    message: str,
+) -> None:
+    class PatchConfig(BaseModel):
+        value: Any = None
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        SchemaFamily(
+            model=PatchConfig,
+            name="invalid_patch_record",
+            versions=(SchemaVersion("1", patches=(patch,)), SchemaVersion("2")),
+        )
+    assert str(raised.value) == message
+
+
+def test_uncopyable_historical_default_fails_through_compile() -> None:
+    class Uncopyable:
+        def __deepcopy__(self, memo: dict[int, Any]) -> Any:
+            del memo
+            msg = "cannot copy"
+            raise ValueError(msg)
+
+    class DefaultConfig(BaseModel):
+        value: Any = None
+
+    family = SchemaFamily(
+        model=DefaultConfig,
+        name="uncopyable_default",
+        versions=(
+            SchemaVersion("1", patches=(field_default("value", Uncopyable()),)),
+            SchemaVersion("2"),
+        ),
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
+        family.compile()
+    assert str(raised.value) == (
+        "Field default for 'value' in version '1' cannot be copied into the compiled plan"
+    )
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 @pytest.mark.parametrize(
@@ -845,6 +1175,10 @@ def test_legacy_migration_must_be_adjacent_and_registered_before_compilation() -
     with pytest.raises(InvalidMigrationError, match="adjacent"):
         migration(LegacyBuilderConfig, "1", "3")
 
+    with pytest.raises(UnknownSchemaVersionError) as raised:
+        migration(LegacyBuilderConfig, "1", "missing")
+    assert str(raised.value) == ("Unknown migration edge '1' -> 'missing' for 'legacy_builder'")
+
     @migration(LegacyBuilderConfig, "1", "2")
     def first(data: dict[str, Any]) -> dict[str, Any]:
         return {**data, "value": data["value"] + 1}
@@ -899,9 +1233,3 @@ def test_runtime_version_arguments_are_not_coerced() -> None:
         family.model_for(cast(Any, 1))
     with pytest.raises(UnknownSchemaVersionError, match="non-empty string"):
         family.validate({"schema_version": 1})
-
-
-def test_public_patch_records_are_exported() -> None:
-    patch = field_default("value", 1)
-
-    assert isinstance(patch, FieldDefault)
