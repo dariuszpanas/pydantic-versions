@@ -304,6 +304,12 @@ def test_declaration_records_reject_malformed_values() -> None:
     assert str(raised.value) == "VersionMetadata.path cannot be empty"
 
     with pytest.raises(SchemaCompilationError) as raised:
+        VersionMetadata(path=())
+    assert str(raised.value) == (
+        "VersionMetadata.path must be a non-empty string or tuple of strings"
+    )
+
+    with pytest.raises(SchemaCompilationError) as raised:
         VersionMetadata(path=("meta", ""))
     assert str(raised.value) == "VersionMetadata.path must contain only non-empty strings"
 

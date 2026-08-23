@@ -666,7 +666,7 @@ def _rewrite_annotation(
     used_nested: set[tuple[str, ...]],
     field_name: str,
     allow_child_projection: bool,
-    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None],
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel]],
     in_set_element: bool = False,
 ) -> Any:
     child = _find_nested_family_for_path(nested, field_path)
@@ -718,7 +718,6 @@ def _rewrite_annotation(
                 version,
                 family,
                 compilation=compilation,
-                field_name=field_name,
                 field_path=field_path,
                 nested=nested_families,
                 decorator_nested=decorator_families,
@@ -805,11 +804,10 @@ def _rewrite_nested_model(
     owner: SchemaFamily[Any],
     *,
     compilation: _WireCompilationContext,
-    field_name: str,
     field_path: tuple[str, ...],
     nested: tuple[_CompiledNestedFamily, ...],
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
-    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel] | None],
+    nested_projection_cache: dict[tuple[int, tuple[str, ...], str, bool], type[BaseModel]],
     used_nested: set[tuple[str, ...]],
     in_set_element: bool = False,
 ) -> type[BaseModel]:

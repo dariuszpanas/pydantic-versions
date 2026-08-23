@@ -63,6 +63,37 @@ def test_decorator_child_with_different_labels_requires_an_explicit_mapping() ->
         model_for_version(Parent, "1")
 
 
+def test_excluded_decorator_children_do_not_create_incompatible_routes() -> None:
+    @versioned_schema(
+        name="compilation_excluded_mismatched_child_123",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Child(BaseModel):
+        value: int
+
+    @versioned_schema(
+        name="compilation_excluded_mismatched_parent_123",
+        versions=("1",),
+        current="1",
+    )
+    class Parent(BaseModel):
+        excluded_child: Child = Field(exclude=True)
+        conditional_child: Child = Field(exclude_if=lambda _value: False)
+
+    current = Parent(
+        excluded_child=Child(value=1),
+        conditional_child=Child(value=2),
+    )
+    assert current.model_dump() == {"conditional_child": {"value": 2}}
+
+    historical = model_for_version(Parent, "1")
+
+    assert set(historical.model_fields) == {"schema_version"}
+    assert historical().model_dump() == {"schema_version": "1"}
+    assert dump_versioned(Parent, version="1", data=current) == {"schema_version": "1"}
+
+
 def test_decorator_child_in_an_unsupported_generic_wrapper_fails_closed() -> None:
     @versioned_schema(
         name="compilation_generic_wrapper_child_77",
