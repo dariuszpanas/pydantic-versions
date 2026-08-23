@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     computed_field,
     create_model,
     field_serializer,
@@ -2811,8 +2812,12 @@ def test_source_preflight_checks_every_smart_union_structural_arm() -> None:
         },
     }
 
-    selected = cast(Any, historical_parent.model_validate(payload)).child
-    assert isinstance(selected, AliasScoredModelArm)
+    # Both arms intentionally accept the input. Smart-union scoring may select
+    # either one across supported Pydantic minors, while the library contract is
+    # to preflight every compatible structural arm before validation.
+    TypeAdapter(RuntimeSmartUnionExactTypedDictArm).validate_python(payload["child"])
+    AliasScoredModelArm.model_validate(payload["child"])
+    historical_parent.model_validate(payload)
     with pytest.raises(SchemaVersionError) as caught:
         family.validate(payload, version="1")
 
