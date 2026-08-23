@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pydantic_versions
 from benchmarks.decorator_runtime import REPORT_SCHEMA, run_benchmarks
 
 
 def test_decorator_runtime_benchmark_proves_correctness_without_speed_thresholds() -> None:
-    source_root = Path(__file__).resolve().parents[2] / "src"
+    assert pydantic_versions.__file__ is not None
+    package_file = Path(pydantic_versions.__file__).resolve()
+    source_root = package_file.parent.parent
     report = run_benchmarks(
         counts=(7,),
         union_routes=4,
@@ -19,6 +22,8 @@ def test_decorator_runtime_benchmark_proves_correctness_without_speed_thresholds
     )
 
     assert report["benchmark_schema"] == REPORT_SCHEMA
+    assert report["environment"]["pydantic_versions_module"] == str(package_file)
+    assert report["environment"]["source_root"] == str(source_root)
     assert report["configuration"] == {
         "counts": [7],
         "repeats": 1,
