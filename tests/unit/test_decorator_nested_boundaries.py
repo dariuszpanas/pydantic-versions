@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar, cast, get_args
+from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from pydantic_versions import (
     InvalidMigrationError,
@@ -182,6 +184,273 @@ def test_decorator_children_traverse_builtin_containers_and_wrappers() -> None:
     assert validate_versioned(Parent, rendered).current_model.direct.value == 1
 
 
+@pytest.mark.parametrize("operation", ["validate", "render"])
+@pytest.mark.parametrize("exclusion", ["exclude", "exclude_if"])
+def test_decorator_set_rejects_collapse_after_excluded_fields_are_omitted(
+    exclusion: str,
+    operation: str,
+) -> None:
+    omitted = (
+        Field(0, exclude=True)
+        if exclusion == "exclude"
+        else Field(0, exclude_if=lambda _value: True)
+    )
+
+    @versioned_schema(
+        name=f"decorator_excluded_set_child_{exclusion}_{operation}",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+        internal: int = omitted
+
+    def collapse(data: dict[str, Any]) -> dict[str, Any]:
+        children = list(data["children"]) if operation == "render" else tuple(data["children"])
+        for child in children:
+            child["value"] = 0
+        return {**data, "children": children}
+
+    @versioned_schema(
+        name=f"decorator_excluded_set_parent_{exclusion}_{operation}",
+        versions=("1", "2"),
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=collapse,
+                downgrade=collapse,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    class Parent(BaseModel):
+        children: set[Child]
+
+    source = {
+        "children": [
+            {"value": 1, "internal": 1},
+            {"value": 2, "internal": 2},
+        ],
+        "schema_version": "1",
+    }
+    current = Parent(
+        children={
+            Child(value=1, internal=1),
+            Child(value=2, internal=2),
+        }
+    )
+    with pytest.raises(InvalidMigrationError, match="cardinality"):
+        if operation == "render":
+            dump_versioned(Parent, version="1", data=current)
+        else:
+            validate_versioned(Parent, source)
+
+    assert {child.value for child in current.children} == {1, 2}
+    assert [child["value"] for child in source["children"]] == [1, 2]
+
+
+def test_decorator_children_keep_identity_through_nested_hash_containers() -> None:
+    observed_shapes: list[tuple[type[Any], type[Any]]] = []
+    identifiers = {index: UUID(int=index) for index in range(1, 6)}
+
+    @versioned_schema(name="nested_hash_child", versions=("1", "2"), current="2")
+    @schema_version("1", patches=(field_renamed("value", "legacy_value"),))
+    class Child(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True)
+
+        value: UUID
+        internal: str = Field("private", exclude=True)
+
+    def inspect(data: dict[str, Any]) -> dict[str, Any]:
+        observed_shapes.append((type(data["tupled"]), type(data["grouped"])))
+        assert all(type(item) is tuple for item in data["tupled"])
+        assert all(type(item) is frozenset for item in data["grouped"])
+
+        clone_index = 0
+
+        def clone(item: Any) -> Any:
+            nonlocal clone_index
+            assert isinstance(item, Mapping)
+            assert "internal" not in item
+            if clone_index == 0:
+                result = item.copy()
+            elif clone_index == 1:
+                result = item | {}
+            elif clone_index == 2:
+                result = {} | item
+            else:
+                result = item.copy()
+                if clone_index == 3:
+                    result |= {}
+                else:
+                    result.setdefault("probe", True)
+                    result.update(probe=True)
+                    assert result.pop("probe") is True
+            clone_index += 1
+            assert result != item and not result == item
+            assert len({item, result}) == 2
+            assert dict(result) == dict(item)
+            return result
+
+        return {
+            **data,
+            "tupled": {(clone(child), index) for child, index in data["tupled"]},
+            "grouped": frozenset(
+                frozenset(clone(child) for child in group) for group in data["grouped"]
+            ),
+        }
+
+    @versioned_schema(
+        name="nested_hash_parent",
+        versions=("1", "2"),
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=inspect,
+                downgrade=inspect,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    class Parent(BaseModel):
+        model_config = ConfigDict(strict=True)
+
+        tupled: set[tuple[Child, int]]
+        grouped: frozenset[frozenset[Child]]
+
+    current = Parent(
+        tupled={
+            (Child(value=identifiers[1]), 10),
+            (Child(value=identifiers[2]), 20),
+        },
+        grouped=frozenset(
+            {
+                frozenset({Child(value=identifiers[3]), Child(value=identifiers[4])}),
+                frozenset({Child(value=identifiers[5])}),
+            }
+        ),
+    )
+    rendered = dump_versioned(Parent, version="1", data=current)
+    historical_parent = model_for_version(Parent, "1")
+    tuple_child = get_args(get_args(historical_parent.model_fields["tupled"].annotation)[0])[0]
+    grouped_child = get_args(get_args(historical_parent.model_fields["grouped"].annotation)[0])[0]
+    historical = cast(Any, historical_parent)(
+        tupled={
+            (tuple_child(legacy_value=identifiers[1]), 10),
+            (tuple_child(legacy_value=identifiers[2]), 20),
+        },
+        grouped=frozenset(
+            {
+                frozenset(
+                    {
+                        grouped_child(legacy_value=identifiers[3]),
+                        grouped_child(legacy_value=identifiers[4]),
+                    }
+                ),
+                frozenset({grouped_child(legacy_value=identifiers[5])}),
+            }
+        ),
+    )
+    validated = validate_versioned(Parent, historical, version="1")
+
+    tuple_values = {item[0]["legacy_value"] for item in rendered["tupled"]}
+    grouped_values = {item["legacy_value"] for group in rendered["grouped"] for item in group}
+    assert tuple_values | grouped_values == {str(value) for value in identifiers.values()}
+    assert validated.current_model == current
+    assert observed_shapes == [(set, frozenset)] * 2
+
+
+def test_nested_frozenset_dump_prunes_every_child_metadata_without_reordering() -> None:
+    @versioned_schema(
+        name="nested_frozenset_metadata_child",
+        versions=("1", "2"),
+        current="2",
+    )
+    @schema_version("1", patches=(field_renamed("value", "legacy_value"),))
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+        internal: int = Field(0, exclude=True)
+        conditional: int = Field(0, exclude_if=lambda value: value == 0)
+
+    @versioned_schema(
+        name="nested_frozenset_metadata_parent",
+        versions=("1", "2"),
+        current="2",
+    )
+    class Parent(BaseModel):
+        grouped: frozenset[frozenset[Child]]
+
+    for attempt in range(4):
+        expected: set[int] = set()
+        groups: list[frozenset[Child]] = []
+        for group_size in range(1, 9):
+            group = frozenset(
+                Child(
+                    value=attempt * 1_000 + group_size * 100 + item,
+                    internal=item,
+                )
+                for item in range(group_size)
+            )
+            groups.append(group)
+            expected.update(child.value for child in group)
+
+        rendered = dump_versioned(
+            Parent,
+            version="1",
+            data=Parent(grouped=frozenset(groups)),
+        )
+        children = [child for group in rendered["grouped"] for child in group]
+
+        assert rendered["schema_version"] == "1"
+        assert {child["legacy_value"] for child in children} == expected
+        assert all("schema_version" not in child for child in children)
+        assert all("internal" not in child for child in children)
+        assert all("conditional" not in child for child in children)
+
+
+def test_decorator_set_sibling_shifts_preserve_all_occurrences() -> None:
+    def shift(data: dict[str, Any]) -> dict[str, Any]:
+        return {**data, "value": data["value"] + 1}
+
+    @versioned_schema(
+        name="batched_set_child",
+        versions=("1", "2"),
+        current="2",
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                downgrade=shift,
+                downgrade_semantics="exact",
+            ),
+        ),
+    )
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+
+    @versioned_schema(name="batched_set_parent", versions=("1", "2"), current="2")
+    class Parent(BaseModel):
+        children: set[Child]
+
+    rendered = dump_versioned(
+        Parent,
+        version="1",
+        data=Parent(children={Child(value=value) for value in range(32)}),
+    )
+
+    assert {item["value"] for item in rendered["children"]} == set(range(1, 33))
+
+
 def test_discriminated_union_preflights_stale_metadata_and_runs_validator_once() -> None:
     events: list[str] = []
     transitions: list[str] = []
@@ -293,7 +562,8 @@ def test_overlapping_union_rejects_ambiguous_raw_copies_before_next_callback() -
 
 
 def test_historical_overlapping_union_materializes_the_authoritative_current_branch_once() -> None:
-    events: list[str] = []
+    events: list[tuple[str, str]] = []
+    collapse = False
 
     def upgrade_a(data: dict[str, Any]) -> dict[str, Any]:
         return {**data, "value": f"{data['value']}:a"}
@@ -308,12 +578,14 @@ def test_historical_overlapping_union_materializes_the_authoritative_current_bra
         transitions=(VersionTransition("1", "2", upgrade=upgrade_a),),
     )
     class A(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
         value: str
 
         @field_validator("value")
         @classmethod
         def count_a(cls, value: str) -> str:
-            events.append("a")
+            events.append(("model-a", value))
             return value
 
     @versioned_schema(
@@ -323,27 +595,49 @@ def test_historical_overlapping_union_materializes_the_authoritative_current_bra
         transitions=(VersionTransition("1", "2", upgrade=upgrade_b),),
     )
     class B(BaseModel):
-        model_config = ConfigDict(revalidate_instances="always")
+        model_config = ConfigDict(frozen=True, revalidate_instances="always")
 
         value: str
 
         @field_validator("value")
         @classmethod
         def count_b(cls, value: str) -> str:
-            events.append("b")
+            events.append(("model", value))
             return value
+
+    def validate_selected_arm(value: B) -> B:
+        events.append(("arm", value.value))
+        return value.model_copy(update={"value": "same"}) if collapse else value
 
     @versioned_schema(name="materialized_parent", versions=("1", "2"), current="2")
     class Parent(BaseModel):
-        item: A | B
+        items: set[A | Annotated[B, AfterValidator(validate_selected_arm)]]
 
-    historical_b = model_for_version(B, "1").model_validate({"value": "x"})
-    historical_parent = model_for_version(Parent, "1").model_validate({"item": historical_b})
+    historical_parent_model = model_for_version(Parent, "1")
+    historical_union = get_args(
+        get_args(historical_parent_model.model_fields["items"].annotation)[0]
+    )
+    historical_b = historical_union[1]
+    historical_parent = historical_parent_model.model_validate(
+        {
+            "items": {
+                historical_b.model_validate({"value": "x"}),
+                historical_b.model_validate({"value": "y"}),
+            }
+        }
+    )
+    events.clear()
     result = validate_versioned(Parent, historical_parent, version="1")
 
-    assert type(result.current_model.item) is B
-    assert result.current_model.item.value == "x:b"
-    assert events == ["b"]
+    assert {type(item) for item in result.current_model.items} == {B}
+    assert {item.value for item in result.current_model.items} == {"x:b", "y:b"}
+    assert sorted(kind for kind, _value in events) == ["arm", "arm", "model", "model"]
+
+    collapse = True
+    events.clear()
+    with pytest.raises(InvalidMigrationError, match="set cardinality"):
+        validate_versioned(Parent, historical_parent, version="1")
+    assert sorted(kind for kind, _value in events) == ["arm", "arm", "model", "model"]
 
 
 def test_current_render_accepts_subclasses_with_narrower_route_annotations() -> None:
@@ -664,41 +958,7 @@ def test_mapping_keys_do_not_anchor_beneath_a_reordered_dynamic_parent() -> None
         )
 
 
-def test_decorator_set_projection_rejects_target_cardinality_collapse() -> None:
-    def collapse(data: dict[str, Any]) -> dict[str, Any]:
-        return {**data, "value": 0}
-
-    @versioned_schema(
-        name="collapse_child",
-        versions=("1", "2"),
-        current="2",
-        transitions=(
-            VersionTransition(
-                "1",
-                "2",
-                downgrade=collapse,
-                downgrade_semantics="lossy",
-            ),
-        ),
-    )
-    class Child(BaseModel):
-        model_config = ConfigDict(frozen=True)
-
-        value: int
-
-    @versioned_schema(name="collapse_parent", versions=("1", "2"), current="2")
-    class Parent(BaseModel):
-        children: set[Child]
-
-    with pytest.raises(InvalidMigrationError, match="set cardinality"):
-        dump_versioned(
-            Parent,
-            version="1",
-            data=Parent(children={Child(value=1), Child(value=2)}),
-        )
-
-
-def test_unselected_overlapping_union_route_checks_nested_set_cardinality() -> None:
+def test_unselected_overlapping_union_route_uses_selected_exact_list_arm() -> None:
     @versioned_schema(
         name="all_route_cardinality_grand",
         versions=("1", "2"),
@@ -740,11 +1000,10 @@ def test_unselected_overlapping_union_route_checks_nested_set_cardinality() -> N
     )
 
     assert type(source.item) is SelectedBranch
-    with pytest.raises(InvalidMigrationError, match="set cardinality") as error:
-        dump_versioned(Parent, version="1", data=source)
-
-    assert "all_route_cardinality_grand" in str(error.value)
-    assert "('values',)" in str(error.value)
+    assert dump_versioned(Parent, version="1", data=source) == {
+        "item": {"values": [{"value": 1}, {"value": "1"}]},
+        "schema_version": "1",
+    }
 
 
 def test_decorator_boundaries_recurse_across_decorated_families() -> None:

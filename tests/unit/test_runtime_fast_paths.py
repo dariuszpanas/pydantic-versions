@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from enum import Enum
-from typing import Annotated, Any, NewType
-from uuid import UUID
+from typing import Annotated, Any, Literal, NewType
 
 import pytest
-from pydantic import BaseModel
-from pydantic_core import to_jsonable_python as core_to_jsonable_python
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    Strict,
+    ValidationError,
+)
 
 import pydantic_versions._runtime as runtime
 import pydantic_versions._runtime_nested as runtime_nested
 import pydantic_versions._runtime_payload as runtime_payload
-from pydantic_versions import SchemaFamily, SchemaVersion
+import pydantic_versions._runtime_validation as runtime_validation
+from pydantic_versions import (
+    InvalidMigrationError,
+    SchemaFamily,
+    SchemaVersion,
+)
 
 
 def test_empty_decorator_selection_skips_declared_tree_extraction(
@@ -141,69 +151,242 @@ def test_aliases_and_new_types_retain_annotation_normalization(
     assert normalized == [alias, new_type, annotated]
 
 
-def test_exact_json_scalars_skip_general_conversion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unexpected_conversion(_value: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("exact JSON-native scalars must not enter pydantic-core")
+def test_hash_required_extraction_does_not_compare_adversarial_field_values() -> None:
+    class Opaque:
+        compare = False
 
-    monkeypatch.setattr(runtime_payload, "to_jsonable_python", unexpected_conversion)
+        def __init__(self, value: int) -> None:
+            self.value = value
 
-    values = (None, False, True, 0, 1, -1, 1.5, "payload")
+        def __hash__(self) -> int:
+            return 0
+
+        def __eq__(self, other: object) -> bool:
+            if self.compare:
+                raise AssertionError("canonical carrier insertion compared field content")
+            return isinstance(other, Opaque) and self.value == other.value
+
+    class Child(BaseModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+        value: Opaque
+
+    values = {Child(value=Opaque(index)) for index in range(64)}
+    Opaque.compare = True
+    try:
+        extracted = runtime_payload._extract_declared_value(
+            values,
+            annotation=set[Child],
+        )
+    finally:
+        Opaque.compare = False
+
+    assert len(extracted) == len(values)
+
+
+def test_field_level_strict_enum_values_round_trip_from_canonical_storage() -> None:
+    class Mode(Enum):
+        active = "active"
+
+    class FieldStrictPayload(BaseModel):
+        model_config = ConfigDict(use_enum_values=True)
+
+        mode: Mode = Field(strict=True)
+
+    class AnnotatedStrictPayload(BaseModel):
+        model_config = ConfigDict(use_enum_values=True)
+
+        mode: Annotated[Mode, Strict()]
+
+    class LiteralPayload(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
+
+        mode: Literal[Mode.active]
+
+    for model in (FieldStrictPayload, AnnotatedStrictPayload, LiteralPayload):
+        source = model(mode=Mode.active)
+        validated = runtime_validation._validate_canonical_model(
+            model,
+            {"mode": source.mode},
+        )
+
+        assert validated.mode == "active"
+        assert type(validated.mode) is str
+
+    class NativeLiteralPayload(BaseModel):
+        mode: Literal[Mode.active]
+
+    with pytest.raises(ValidationError):
+        runtime_validation._validate_canonical_model(
+            NativeLiteralPayload,
+            {"mode": "active"},
+        )
+
+    nan = float("nan")
+
+    class NonReflexive(Enum):
+        value = nan
+
+    class NonReflexivePayload(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
+
+        value: NonReflexive
+
+    source = NonReflexivePayload(value=NonReflexive.value)
     assert (
-        tuple(runtime_payload._jsonable_declared_scalar(value, config={}) for value in values)
-        == values
+        runtime_validation._validate_canonical_model(
+            NonReflexivePayload,
+            {"value": source.value},
+        ).value
+        is nan
     )
 
 
-def test_non_exact_json_scalars_retain_general_conversion_paths(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Text(str):
-        pass
+def test_model_unions_keep_native_smart_and_tagged_arm_selection() -> None:
+    events: list[str] = []
 
     class Mode(Enum):
-        READY = "ready"
+        active = "active"
 
-    class Opaque:
-        pass
+    def enum_after(value: Mode) -> Mode:
+        events.append("enum")
+        return value
 
-    calls: list[Any] = []
+    def string_after(value: str) -> str:
+        events.append("string")
+        return value
 
-    def tracking_conversion(value: Any, **kwargs: Any) -> Any:
-        calls.append(value)
-        return core_to_jsonable_python(value, **kwargs)
+    class EnumArm(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
 
-    monkeypatch.setattr(runtime_payload, "to_jsonable_python", tracking_conversion)
+        value: Annotated[Mode, AfterValidator(enum_after)]
 
-    opaque = Opaque()
-    values = (
-        Text("text"),
-        b"bytes",
-        dt.datetime(2020, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
-        dt.date(2020, 1, 2),
-        dt.time(3, 4, 5),
-        dt.timedelta(seconds=1.5),
-        Mode.READY,
-        UUID("12345678-1234-5678-1234-567812345678"),
-        opaque,
-    )
-    converted = tuple(
-        runtime_payload._jsonable_declared_scalar(value, config={}) for value in values
+    class StringArm(BaseModel):
+        value: Annotated[str, AfterValidator(string_after)]
+
+    class Payload(BaseModel):
+        item: EnumArm | StringArm
+
+    validated = runtime_validation._validate_canonical_model(
+        Payload,
+        {"item": {"value": "active"}},
     )
 
-    assert calls == list(values)
-    assert converted == (
-        "text",
-        "bytes",
-        "2020-01-02T03:04:05Z",
-        "2020-01-02",
-        "03:04:05",
-        "PT1.5S",
-        "ready",
-        "12345678-1234-5678-1234-567812345678",
-        opaque,
+    assert isinstance(validated.item, StringArm)
+    assert events == ["string"]
+
+    class Cat(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
+
+        kind: Literal["cat"] = "cat"
+        mode: Mode
+
+    class Dog(BaseModel):
+        kind: Literal["dog"] = "dog"
+
+    class TaggedPayload(BaseModel):
+        item: Annotated[Cat | Dog, Field(discriminator="kind")]
+
+    source = TaggedPayload(item=Cat(mode=Mode.active))
+    assert isinstance(source.item, Cat)
+    tagged = runtime_validation._validate_canonical_model(
+        TaggedPayload,
+        {"item": {"kind": "cat", "mode": source.item.mode}},
     )
+    assert type(tagged.item) is Cat
+    assert tagged.item.mode == "active"
+
+
+def test_shared_enum_refs_and_noncarrier_values_keep_custom_init_native() -> None:
+    events: list[dict[str, Any]] = []
+
+    class Mode(Enum):
+        active = "active"
+
+    type SharedModes = list[Mode]
+
+    class CustomPayload(BaseModel):
+        model_config = ConfigDict(use_enum_values=True)
+
+        modes: SharedModes
+        values: set[int]
+
+        def __init__(self, **data: Any) -> None:
+            events.append(dict(data))
+            super().__init__(**data)
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
+
+        modes: SharedModes
+        custom: CustomPayload
+
+    validated = runtime_validation._validate_canonical_model(
+        Payload,
+        {
+            "modes": ["active"],
+            "custom": {"modes": ["active"], "values": {1, 2}},
+        },
+    )
+
+    assert validated.modes == ["active"]
+    assert validated.custom.modes == ["active"]
+    assert validated.custom.values == {1, 2}
+    assert events == [{"modes": ["active"], "values": {1, 2}}]
+
+
+def test_collection_guard_preserves_native_strict_errors_and_after_validators() -> None:
+    class Child(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+
+    class ValidatedPayload(BaseModel):
+        children: Annotated[set[Child], AfterValidator(lambda value: {next(iter(value))})]
+
+    class BeforePayload(BaseModel):
+        children: Annotated[set[Child], BeforeValidator(list)]
+
+    source = ValidatedPayload.model_construct(
+        children={Child(value=1), Child(value=2)},
+    )
+    canonical = runtime_payload._extract_declared_fields(source, declared_model=ValidatedPayload)
+    assert (
+        len(runtime_validation._validate_canonical_model(ValidatedPayload, canonical).children) == 1
+    )
+
+    for model, container in ((BeforePayload, set), (ValidatedPayload, list)):
+        source = model.model_construct(children={Child(value=1), Child(value=2)})
+        canonical = runtime_payload._extract_declared_fields(source, declared_model=model)
+        canonical["children"] = container(canonical["children"])
+        for child in canonical["children"]:
+            child["value"] = 0
+        with pytest.raises(InvalidMigrationError, match="set cardinality"):
+            runtime_validation._validate_canonical_model(model, canonical)
+
+
+def test_recursive_schema_refs_keep_canonical_guards() -> None:
+    class ModelNode(BaseModel):
+        model_config = ConfigDict(frozen=True)
+
+        value: int
+        children: frozenset[ModelNode] = frozenset()
+
+    ModelNode.model_rebuild()
+    source = ModelNode(
+        value=0,
+        children=frozenset({ModelNode(value=1), ModelNode(value=2)}),
+    )
+    canonical = runtime_payload._extract_declared_fields(
+        source,
+        declared_model=ModelNode,
+    )
+
+    assert runtime_validation._validate_canonical_model(ModelNode, canonical) == source
+    for child in canonical["children"]:
+        child["value"] = 0
+    with pytest.raises(InvalidMigrationError, match="set cardinality"):
+        runtime_validation._validate_canonical_model(ModelNode, canonical)
 
 
 def test_duplicate_payload_detection_does_not_slice() -> None:

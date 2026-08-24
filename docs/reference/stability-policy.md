@@ -43,6 +43,9 @@ documented behavior of:
 - historical defaults, removals, and renames;
 - upgrade and downgrade ordering;
 - nested-family conversion;
+- transition callbacks receiving detached, declared, already-validated Python
+  values, including exact built-in container kinds, without invoking source
+  serializers or admitting excluded, extra, or subclass-only fields;
 - exact, lossy, and unavailable rendering semantics; and
 - validation into the authoritative current Pydantic model.
 

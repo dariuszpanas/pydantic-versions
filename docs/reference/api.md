@@ -582,12 +582,19 @@ class VersionedValidation[T: BaseModel]:
   - `DuplicateSchemaVersionError`
   - `InvalidMigrationError`
 
-`UnsupportedWireModelError` reports that automatic projection cannot safely
-produce the required object-shaped Pydantic v2 wire contract. It is raised
-during compilation and includes safe family, model, and unsupported-reason
-context, plus the version for projection-specific failures. Direct validation
-of a successfully generated wire model still raises Pydantic's native
-`ValidationError`.
+`UnsupportedWireModelError` reports that automatic projection or canonical
+validation cannot preserve the required Pydantic behavior safely. Most
+declaration and projection failures are raised during compilation with safe
+family, model, unsupported-reason, and, when applicable, version context.
+`validate()` or `dump()` can also raise it when a required canonical adapter
+would bypass an overridden `model_validate`, a wrapped
+`__pydantic_validator__`, or a nonstandard construction boundary.
+
+Ordinary Pydantic input failures remain native `ValidationError` instances.
+Loss of canonical set or mapping-key cardinality, a stored enum value's Python
+shape, or a private hash-required mapping representation raises
+`InvalidMigrationError`. Direct validation of a successfully generated wire
+model also retains Pydantic's native `ValidationError` behavior.
 
 See the [stability and compatibility policy](stability-policy.md) for the exact
 public/private boundary and the Semantic Versioning rules applied to this API.

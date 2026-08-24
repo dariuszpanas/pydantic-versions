@@ -216,17 +216,39 @@ do. It contains safe schema paths and conditional templates, never actual list
 indices, mapping keys, values, exception messages, or timing data. Creating or
 serializing a plan does not emit logs.
 
-An execution trace records what actually happened for one payload. Structured
-per-step traces are separate later work. Until then,
-`VersionedValidation.migrations_applied` remains the compatibility view of
-top-level custom upgrades that completed; it intentionally excludes implicit
-identity steps.
+An execution trace would record what happened for one payload, but structured
+per-step traces are not part of this API. `VersionedValidation.migrations_applied`
+is the compatibility view of top-level custom upgrades that completed; it
+intentionally excludes implicit identity steps.
 
-## Return values
+## Transition payload contract
 
-Migration functions receive a fresh dictionary using current field names and
-must return a dictionary. Returning any other type raises
+Upgrade and downgrade functions receive the same private canonical payload: a
+fresh dictionary using current field names, built from declared values that
+have already crossed the source model's Pydantic validation boundary. This is a
+Python-value contract rather than a serialized JSON shape:
+
+- validated scalars and mapping keys retain their Python values;
+- exact built-in `list`, `tuple`, `set`, and `frozenset` values retain their
+  container kinds;
+- source model and field serializers are not invoked, so values such as
+  secrets are not replaced by their display or wire representation;
+- caller-owned built-in mappings and containers are detached recursively before
+  a callback can mutate them; and
+- fields omitted by `Field(exclude=True)` or `exclude_if`, historical removals,
+  allowed extras, and subclass-only fields are not transition input.
+
+The same rules apply while validating old input forward and while rendering
+current data backward. JSON conversion occurs only after the selected target
+model has validated the completed transition payload. Pydantic's selected
+application validators keep their native results, while a conversion that
+cannot preserve set or mapping-key cardinality, a stored enum value's Python
+shape, or a private hash-required mapping representation fails with
 `InvalidMigrationError`.
+
+Migration functions must return a dictionary. Returning any other type raises
+`InvalidMigrationError`; exceptions raised by the callback itself propagate
+unchanged.
 
 Downgrade declarations and historical rendering across value-changing upgrades
 are executed natively by the active conversion contract. A missing downgrade

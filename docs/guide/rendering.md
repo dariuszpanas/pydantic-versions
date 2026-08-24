@@ -86,12 +86,60 @@ validators, alias priority, defaults, and constraints apply before any
 downgrade. An already-constructed instance of the authoritative model is
 handled according to that model's Pydantic `revalidate_instances` policy, so
 the default avoids duplicate validation while an opt-in revalidation policy is
-still enforced.
+still enforced. Revalidation receives a detached copy of the complete
+top-level instance state, including excluded declared values and allowed
+extras, while nested model and dataclass instances retain their native
+Pydantic instance semantics. Only the later transition projection omits those
+private values. A model whose canonical bridge would bypass an overridden
+`model_validate` or wrapped `__pydantic_validator__` fails closed.
 
-Rendering extracts declared fields into a private JSON-shaped payload without
-flattening allowed extras, accepting subclass-only fields, or invoking model
-and field serializers. Mutations made by a downgrade therefore cannot reach
-caller-owned nested mappings or collections.
+### Transition payload during rendering
+
+Downgrades use the shared [transition payload
+contract](migrations.md#transition-payload-contract). Rendering extracts
+declared fields into a private Python-value canonical
+mapping without flattening allowed extras, accepting subclass-only fields, or
+invoking model and field serializers. Validated scalars and mapping keys retain
+their Python values, and exact built-in `list`, `tuple`, `set`, and `frozenset`
+containers retain their kinds. Caller-owned mappings and containers are copied
+recursively, so mutations made by a downgrade cannot reach them. Pydantic
+converts values to JSON only when the validated target wire model is finally
+serialized. Cycles encountered while extracting caller-owned models cannot
+form this detached tree and fail through the authoritative validation boundary
+instead of recursing; a migration may still deliberately create a cycle for a
+native target arm such as `Any`.
+
+### Enums and application validators
+
+With `use_enum_values=True`, callbacks receive the raw value stored by
+Pydantic. A direct enum or enum-valued Literal retries its declared member only
+after native validation rejects that raw value. Ordinary unions do not repair
+individual arms: Pydantic keeps its native arm and validator selection (so
+`Mode | str` retains the raw string arm), and canonical validation fails closed
+if a successful selection would instead change an erased enum's Python type or
+container shape. A selected application-owned `BeforeValidator`,
+`PlainValidator`, `AfterValidator`, or `WrapValidator` keeps its native result,
+including deliberate nested value or container edits, and executes once.
+Failed and unselected application arms cannot authorize another arm's result.
+Ordinary Literal coercion remains Pydantic-owned.
+
+### Sets and mapping keys
+
+Private identity-based mapping carriers keep projected models distinct inside
+sets and mapping-key positions while callbacks run. Canonical guards reject a
+carrier-backed cardinality collapse in a field before-validator or in the
+declared set, frozenset, or mapping-key parser; another non-lossy union arm may
+still succeed. An application wrap validator cannot swallow that core-loss
+invariant, but its output remains native when no guarded parse loses a carrier.
+Callback-supplied iterables and coercive scalar collection edits without
+private carriers retain Pydantic's native behavior. Dataclass construction and
+collection semantics likewise remain Pydantic-owned rather than gaining a
+separate canonical reconstruction contract. A carrier that reaches a non-hash
+`Any` position becomes an ordinary `dict` before it can enter a public model.
+Opaque hash positions such as `set[Any]` and `dict[Any, ...]` fail closed when
+only the private carrier could keep a projected mapping hashable.
+
+### Target validation boundaries
 
 An unrelated `BaseModel` is accepted only when its declared structure validates
 as current input. Otherwise Pydantic raises a validation error for the
@@ -99,10 +147,12 @@ authoritative current model. Package-generated current wire instances also
 remain renderable, including hashable set projections that the original model
 annotation cannot construct directly.
 
-If that set bridge is required, an enclosing model with a custom `__init__`
-fails closed with `UnsupportedWireModelError`. Pydantic validators and
-`model_post_init` retain their exact model type and once-only lifecycle; a
-custom initializer cannot be replayed without re-entering field validation.
+If that bridge is required, an enclosing model with a custom `__init__`, a
+nonstandard `__new__`, an overridden `model_validate`, or a wrapped
+`__pydantic_validator__` fails closed with `UnsupportedWireModelError`.
+Pydantic validators and `model_post_init` retain their exact model type and
+once-only lifecycle; custom construction and validation entry points cannot be
+replayed without bypassing or re-entering field validation.
 
 Fields removed in the target version are dropped before historical validation.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Self, cast
 
 import pytest
@@ -253,11 +254,22 @@ def test_model_owned_metadata_rejects_conflicts_at_any_accepted_name() -> None:
 
 
 def test_unrelated_models_are_structurally_validated_as_current_input() -> None:
+    class Mode(Enum):
+        active = "active"
+
     class CurrentPayload(BaseModel):
+        model_config = ConfigDict(use_enum_values=True)
+
         value: int
+        mode: Mode = Field(strict=True)
 
     class CompatiblePayload(BaseModel):
         value: str
+        mode: Mode
+
+    class RawEnumPayload(BaseModel):
+        value: int
+        mode: str
 
     class IncompatiblePayload(BaseModel):
         other: str
@@ -269,8 +281,12 @@ def test_unrelated_models_are_structurally_validated_as_current_input() -> None:
         version_metadata=None,
     )
 
-    assert family.dump(version="1", data=cast(Any, CompatiblePayload(value="8"))) == {
+    assert family.dump(
+        version="1",
+        data=cast(Any, CompatiblePayload(value="8", mode=Mode.active)),
+    ) == {
         "value": 8,
+        "mode": "active",
     }
     with pytest.raises(ValidationError, match="CurrentPayload"):
         family.dump(
@@ -279,6 +295,11 @@ def test_unrelated_models_are_structurally_validated_as_current_input() -> None:
         )
     with pytest.raises(TypeError, match="current model instance or mapping"):
         family.dump(version="1", data=cast(Any, ["not", "render", "data"]))
+    with pytest.raises(ValidationError, match="instance of .*Mode"):
+        family.dump(
+            version="1",
+            data=cast(Any, RawEnumPayload(value=8, mode="active")),
+        )
 
 
 def test_generated_current_wire_does_not_bypass_unrelated_current_errors() -> None:
@@ -717,11 +738,59 @@ def test_generated_set_projection_rejects_parent_custom_init_before_execution() 
     assert init_types == []
 
 
+def test_generated_set_projection_rejects_inherited_custom_new_before_execution() -> None:
+    new_types: list[type[BaseModel]] = []
+
+    class CustomNewBase(BaseModel):
+        def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+            new_types.append(cls)
+            return super().__new__(cls)
+
+    @versioned_schema(name="custom_new_set_child", versions=("1",), current="1")
+    class CustomNewChild(BaseModel):
+        value: int
+
+    @versioned_schema(name="custom_new_set_parent", versions=("1",), current="1")
+    class CustomNewParent(CustomNewBase):
+        children: set[CustomNewChild]
+
+    generated_current = model_for_version(CustomNewParent, "1").model_validate(
+        {"children": [{"value": 1}]},
+    )
+
+    with pytest.raises(
+        UnsupportedWireModelError,
+        match="custom __new__.*CustomNewParent",
+    ):
+        dump_versioned(
+            CustomNewParent,
+            version="1",
+            data=cast(Any, generated_current),
+        )
+    assert new_types == []
+
+
 def test_current_model_instances_follow_configured_revalidation_policy() -> None:
+    class Mode(Enum):
+        active = "active"
+
+    events: list[Any] = []
+
     class RevalidatedPayload(BaseModel):
-        model_config = ConfigDict(revalidate_instances="always")
+        model_config = ConfigDict(
+            strict=True,
+            use_enum_values=True,
+            revalidate_instances="always",
+        )
 
         value: int = Field(gt=0)
+        mode: Mode
+
+        @field_validator("mode", mode="before")
+        @classmethod
+        def track(cls, value: Any) -> Any:
+            events.append(value)
+            return value
 
     family = SchemaFamily(
         model=RevalidatedPayload,
@@ -729,11 +798,128 @@ def test_current_model_instances_follow_configured_revalidation_policy() -> None
         versions=(SchemaVersion("1"),),
         version_metadata=None,
     )
-    current = RevalidatedPayload(value=1)
+    current = RevalidatedPayload(value=1, mode=Mode.active)
     current.value = -1
+    events.clear()
 
     with pytest.raises(ValidationError, match="greater than 0"):
         family.dump(version="1", data=current)
+    assert events == ["active"]
+
+    current.value = 1
+    events.clear()
+    assert family.dump(version="1", data=current) == {"value": 1, "mode": "active"}
+    assert events == ["active"]
+    with pytest.raises(ValidationError, match="instance of .*Mode"):
+        family.dump(version="1", data={"value": 1, "mode": "active"})
+
+    historical_family = SchemaFamily(
+        model=RevalidatedPayload,
+        name="revalidated_historical_enum_instance",
+        versions=(
+            SchemaVersion("1", wire_model=RevalidatedPayload),
+            SchemaVersion("2"),
+        ),
+        transitions=(VersionTransition("1", "2", upgrade=lambda data: data),),
+        version_metadata=None,
+    )
+    events.clear()
+    assert historical_family.validate(current, version="1").current_model.mode == "active"
+    assert events == ["active", "active"]
+    with pytest.raises(ValidationError, match="instance of .*Mode"):
+        historical_family.validate({"value": 1, "mode": "active"}, version="1")
+
+
+def test_adapted_current_revalidation_preserves_excluded_state_for_model_before() -> None:
+    class Mode(Enum):
+        active = "active"
+
+    events: list[dict[str, Any]] = []
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(
+            revalidate_instances="always",
+            strict=True,
+            use_enum_values=True,
+        )
+
+        public: int
+        mode: Mode
+        internal: int = Field(0, exclude=True)
+
+        @model_validator(mode="before")
+        @classmethod
+        def include_internal(cls, value: Any) -> Any:
+            if isinstance(value, dict):
+                events.append(dict(value))
+                value = dict(value)
+                value["public"] += value.get("internal", 0)
+            return value
+
+    family = SchemaFamily(
+        model=Payload,
+        name="adapted_render_full_state",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    source = Payload.model_construct(public=1, mode="active", internal=2)
+
+    assert family.dump(version="1", data=source) == {"public": 3, "mode": "active"}
+    assert events == [{"public": 1, "mode": "active", "internal": 2}]
+    assert source.public == 1
+    assert source.internal == 2
+
+
+def test_unadapted_instance_revalidation_keeps_native_alias_policy() -> None:
+    class Payload(BaseModel):
+        model_config = ConfigDict(revalidate_instances="always", validate_by_name=False)
+
+        value: int = Field(validation_alias="input")
+
+    family = SchemaFamily(
+        model=Payload,
+        name="native_revalidation_alias_policy",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    source = Payload.model_validate({"input": 1})
+
+    with pytest.raises(ValidationError) as native_error:
+        Payload.model_validate(source)
+    with pytest.raises(ValidationError) as family_error:
+        family.dump(version="1", data=source)
+
+    assert native_error.value.errors()[0]["loc"] == ("input",)
+    assert family_error.value.errors()[0]["loc"] == ("input",)
+
+
+def test_unadapted_instance_revalidation_uses_overridden_model_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[Any] = []
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(revalidate_instances="always")
+
+        value: int
+
+    original = Payload.model_validate
+
+    def tracked(_cls: type[Payload], value: Any, **kwargs: Any) -> Any:
+        events.append(value)
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(Payload, "model_validate", classmethod(tracked))
+    family = SchemaFamily(
+        model=Payload,
+        name="native_overridden_model_validate",
+        versions=(SchemaVersion("1"),),
+        version_metadata=None,
+    )
+    source = Payload(value=1)
+
+    assert family.dump(version="1", data=source) == {"value": 1}
+    assert events == [source]
 
 
 def test_current_model_subclass_fields_stay_outside_canonical_payload() -> None:
@@ -771,7 +957,7 @@ def test_current_model_subclass_fields_stay_outside_canonical_payload() -> None:
     assert seen_payloads == [{"value": 1}]
 
 
-def test_declared_model_config_controls_top_level_canonical_scalars() -> None:
+def test_declared_model_config_only_controls_top_level_target_serialization() -> None:
     seen_payloads: list[dict[str, Any]] = []
 
     class CurrentPayload(BaseModel):
@@ -805,7 +991,7 @@ def test_declared_model_config_controls_top_level_canonical_scalars() -> None:
     assert family.dump(version="1", data=ExtendedPayload(value=b"abc")) == {
         "value": "abc",
     }
-    assert seen_payloads == [{"value": "abc"}, {"value": "abc"}]
+    assert seen_payloads == [{"value": b"abc"}, {"value": b"abc"}]
 
 
 def test_nested_subclass_fields_stay_outside_canonical_payload() -> None:
@@ -855,7 +1041,7 @@ def test_nested_subclass_fields_stay_outside_canonical_payload() -> None:
     assert seen_payloads == [rendered]
 
 
-def test_declared_model_config_controls_nested_canonical_scalars() -> None:
+def test_declared_model_config_only_controls_nested_target_serialization() -> None:
     seen_payloads: list[dict[str, Any]] = []
 
     class ChildPayload(BaseModel):
@@ -911,7 +1097,11 @@ def test_declared_model_config_controls_nested_canonical_scalars() -> None:
         )
         == expected
     )
-    assert seen_payloads == [expected, expected]
+    canonical = {
+        "child": {"value": b"abc"},
+        "items": [{"value": b"abc"}],
+    }
+    assert seen_payloads == [canonical, canonical]
 
 
 @pytest.mark.parametrize("subclass_first", [False, True])

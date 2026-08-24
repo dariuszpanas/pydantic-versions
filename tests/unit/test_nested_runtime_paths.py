@@ -1,4 +1,6 @@
-from typing import Annotated, Any, Self, cast
+from enum import Enum
+from typing import Annotated, Any, Self, TypedDict, cast, get_args
+from uuid import UUID
 
 import pytest
 from pydantic import (
@@ -65,6 +67,68 @@ def test_nested_runtime_does_not_search_unrelated_mapping_values(
 
     assert result.current_model.child is None
     assert result.current_model.opaque == opaque
+
+
+def test_generated_nested_enum_values_are_trusted_but_explicit_structures_are_not() -> None:
+    class Mode(Enum):
+        active = "active"
+
+    class Child(BaseModel):
+        model_config = ConfigDict(strict=True, use_enum_values=True)
+
+        mode: Mode
+
+    child_family = SchemaFamily(
+        model=Child,
+        name="nested_enum_trust_child",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(VersionTransition("1", "2", upgrade=lambda data: data),),
+        version_metadata=None,
+    )
+
+    class Parent(BaseModel):
+        child: Child
+
+    generated_parent = SchemaFamily(
+        model=Parent,
+        name="generated_nested_enum_trust_parent",
+        versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(VersionTransition("1", "2", upgrade=lambda data: data),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+        version_metadata=None,
+    )
+
+    assert (
+        generated_parent.validate(
+            {"child": {"mode": Mode.active}},
+            version="1",
+        ).current_model.child.mode
+        == "active"
+    )
+
+    class HistoricalChild(TypedDict):
+        mode: str
+
+    class HistoricalParent(BaseModel):
+        child: HistoricalChild
+
+    explicit_parent = SchemaFamily(
+        model=Parent,
+        name="explicit_nested_enum_trust_parent",
+        versions=(
+            SchemaVersion("1", wire_model=HistoricalParent),
+            SchemaVersion("2"),
+        ),
+        transitions=(VersionTransition("1", "2", upgrade=lambda data: data),),
+        nested=(NestedFamily("child", child_family, matching_labels()),),
+        version_metadata=None,
+    )
+
+    with pytest.raises(ValidationError, match="instance of .*Mode"):
+        explicit_parent.validate(
+            {"child": {"mode": "active"}},
+            version="1",
+        )
 
 
 def test_nested_projection_and_pruning_ignore_an_opaque_sibling() -> None:
@@ -559,51 +623,119 @@ def test_alias_path_does_not_overwrite_a_scalar_intermediate_field() -> None:
     assert raw == {"envelope": "preserve-me", "value": 7}
 
 
-def test_nested_validation_preserves_python_set_container_types() -> None:
-    class Child(BaseModel):
-        model_config = ConfigDict(frozen=True)
+@pytest.mark.parametrize("exclusion", ["exclude", "exclude_if"])
+def test_nested_families_preserve_strict_container_kinds_and_exclusions(
+    exclusion: str,
+) -> None:
+    identifier = UUID("12345678-1234-5678-1234-567812345678")
+    omitted = (
+        Field("private", exclude=True)
+        if exclusion == "exclude"
+        else Field("private", exclude_if=lambda _value: True)
+    )
 
-        value: int
+    class Child(BaseModel):
+        model_config = ConfigDict(strict=True, frozen=True)
+
+        value: UUID
+        secret: str = omitted
 
     child_family = SchemaFamily(
         model=Child,
-        name="python_collection_child",
+        name=f"strict_python_collection_child_{exclusion}",
         versions=(SchemaVersion("1"), SchemaVersion("2")),
         transitions=(
             VersionTransition(
                 "1",
                 "2",
-                upgrade=lambda data: {"value": data["value"] + 10},
+                upgrade=lambda data: data,
+                downgrade=lambda data: data,
+                downgrade_semantics="exact",
             ),
         ),
+        version_metadata=None,
     )
 
     class Parent(BaseModel):
-        values: set[Child]
+        model_config = ConfigDict(strict=True)
+
+        tupled: tuple[Child, ...]
+        set_values: set[Child]
         frozen_values: frozenset[Child]
 
-    parent_family = SchemaFamily(
+    seen_payloads: list[dict[str, Any]] = []
+
+    def inspect_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        seen_payloads.append(dict(payload))
+        return payload
+
+    family = SchemaFamily(
         model=Parent,
-        name="python_collection_parent",
+        name=f"strict_python_collection_parent_{exclusion}",
         versions=(SchemaVersion("1"), SchemaVersion("2")),
+        transitions=(
+            VersionTransition(
+                "1",
+                "2",
+                upgrade=inspect_payload,
+                downgrade=inspect_payload,
+                downgrade_semantics="exact",
+            ),
+        ),
         nested=(
-            NestedFamily("values", child_family, matching_labels()),
+            NestedFamily("tupled", child_family, matching_labels()),
+            NestedFamily("set_values", child_family, matching_labels()),
             NestedFamily("frozen_values", child_family, matching_labels()),
         ),
+        version_metadata=None,
     )
 
-    result = parent_family.validate(
-        {
-            "schema_version": "1",
-            "values": [{"schema_version": "1", "value": 1}],
-            "frozen_values": [{"schema_version": "1", "value": 2}],
-        },
+    historical_parent = family.model_for("1")
+    tuple_child = get_args(historical_parent.model_fields["tupled"].annotation)[0]
+    set_child = get_args(historical_parent.model_fields["set_values"].annotation)[0]
+    frozen_child = get_args(historical_parent.model_fields["frozen_values"].annotation)[0]
+    historical = cast(Any, historical_parent)(
+        tupled=(tuple_child(value=identifier),),
+        set_values={set_child(value=identifier)},
+        frozen_values=frozenset({frozen_child(value=identifier)}),
+    )
+    current = Parent(
+        tupled=(Child(value=identifier),),
+        set_values={Child(value=identifier)},
+        frozen_values=frozenset({Child(value=identifier)}),
     )
 
-    assert type(result.current_model.values) is set
-    assert type(result.current_model.frozen_values) is frozenset
-    assert {child.value for child in result.current_model.values} == {11}
-    assert {child.value for child in result.current_model.frozen_values} == {12}
+    validated = family.validate(historical, version="1")
+    rendered = family.dump(version="1", data=current)
+
+    assert validated.current_model == current
+    assert rendered == {
+        "tupled": [{"value": str(identifier)}],
+        "set_values": [{"value": str(identifier)}],
+        "frozen_values": [{"value": str(identifier)}],
+    }
+    assert len(seen_payloads) == 2
+    for payload in seen_payloads:
+        assert type(payload["tupled"]) is tuple
+        assert type(payload["set_values"]) is set
+        assert type(payload["frozen_values"]) is frozenset
+        for field_name in ("tupled", "set_values", "frozen_values"):
+            item = next(iter(payload[field_name]))
+            assert dict(item) == {"value": identifier}
+            assert "secret" not in item
+
+    with pytest.raises(InvalidMigrationError, match="cardinality"):
+        family.dump(
+            version="1",
+            data=Parent(
+                tupled=current.tupled,
+                set_values={
+                    Child(value=identifier, secret="first"),
+                    Child(value=identifier, secret="second"),
+                },
+                frozen_values=current.frozen_values,
+            ),
+        )
 
 
 @pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
