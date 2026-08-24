@@ -37,7 +37,18 @@ _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _MARKDOWN_TABLE_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
 _HEADING_RE = re.compile(r"^#{1,6}\s+(?P<name>\S.*?)(?:\s+#+)?$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
-_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
+_SETEXT_H2_UNDERLINE_RE = re.compile(r"^ {0,3}-+[ \t]*$")
+_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?=$|[ \t])(?:[ \t]+.*)?$")
+_ATX_H2_RE = re.compile(r"^ {0,3}##(?=$|[ \t])(?:[ \t]+.*)?$")
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<rest>.*)$")
+_THEMATIC_BREAK_RE = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_LINK_REFERENCE_DEFINITION_RE = re.compile(r"^ {0,3}\[[^]\r\n]+\]:[ \t]*\S.*$")
+_HTML_ENTITY_RE = re.compile(r"&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);", re.IGNORECASE)
+_RAW_HTML_RE = re.compile(
+    r"<!--|--!?>|</?[A-Za-z][A-Za-z0-9-]*(?:[ \t/>]|$)|"
+    r"<![A-Za-z][A-Za-z0-9-]*(?:[ \t>]|$)|<!\[CDATA\[|<\?",
+    re.IGNORECASE,
+)
 _BLOCK_STRUCTURE_RE = re.compile(
     r"^(?: {4}|\t| {0,3}(?:>|#{1,6}\s|[-+*]\s+|\d+[.)]\s+|`{3,}|~{3,}))"
 )
@@ -68,6 +79,12 @@ _VALIDATION_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 _VALIDATION_SECTION_NAMES = frozenset({"checks", "testing", "tests", "validation", "verification"})
+_REQUIRED_SECTION_HEADINGS = (
+    "## Summary",
+    "## Boundaries and compatibility",
+    "## Investigation",
+    "## Validation",
+)
 _VALIDATION_OUTCOME_TRAIL_RE = re.compile(
     r"(?:\b(?:clean|completed|failed|green|ok|passed|succeeded|"
     r"successful(?:ly)?)\b|"
@@ -160,10 +177,6 @@ _DEPENDABOT_METADATA_PREFIXES = tuple(
     ["- dependency-name:"] + [f"  {field}:" for field in sorted(_DEPENDABOT_ALLOWED_FIELDS)]
 )
 _DEPENDABOT_SIGNOFF = "Signed-off-by: dependabot[bot] <support@github.com>"
-_DEPENDABOT_BUMP_RE = re.compile(
-    r"^Bumps (?P<dependency>\S+) from (?P<old>\S+) to (?P<new>\S+?)\.?$",
-    re.IGNORECASE,
-)
 _DEPENDABOT_SINGLE_SUMMARY_RE = re.compile(
     r"^bump (?P<dependency>\S+) from (?P<old>\S+) to (?P<new>\S+)$",
     re.IGNORECASE,
@@ -258,25 +271,70 @@ def _strip_markup(line: str) -> str:
     return re.sub(r"[`*_~]+", "", stripped).strip()
 
 
+def _markdown_structure(
+    lines: Sequence[str],
+) -> tuple[set[int], set[int], set[int], set[int]]:
+    """Return visible, top-level, code-content, and raw-HTML indexes."""
+    visible_indexes: set[int] = set()
+    top_level_indexes: set[int] = set()
+    code_content_indexes: set[int] = set()
+    raw_html_indexes: set[int] = set()
+    fence_character: str | None = None
+    fence_length = 0
+
+    for index, line in enumerate(lines):
+        fence_match = _FENCE_RE.match(line)
+        if fence_character is not None:
+            if fence_match is not None:
+                marker = fence_match.group("marker")
+                rest = fence_match.group("rest")
+                if (
+                    marker[0] == fence_character
+                    and len(marker) >= fence_length
+                    and not rest.strip(" \t")
+                ):
+                    fence_character = None
+                    fence_length = 0
+                    continue
+            visible_indexes.add(index)
+            code_content_indexes.add(index)
+            continue
+
+        if fence_match is not None:
+            marker = fence_match.group("marker")
+            rest = fence_match.group("rest")
+            if marker[0] != "`" or "`" not in rest:
+                fence_character = marker[0]
+                fence_length = len(marker)
+                continue
+
+        indented_code = line.startswith("    ") or re.match(r"^ {0,3}\t", line)
+        if indented_code:
+            visible_indexes.add(index)
+            code_content_indexes.add(index)
+            continue
+
+        if _RAW_HTML_RE.search(line):
+            raw_html_indexes.add(index)
+            continue
+
+        visible_indexes.add(index)
+        if re.match(r"^ {0,3}>", line):
+            continue
+        top_level_indexes.add(index)
+
+    return visible_indexes, top_level_indexes, code_content_indexes, raw_html_indexes
+
+
 def _validation_list_item_owners(lines: Sequence[str]) -> dict[int, int]:
     """Map canonical top-level validation items and their continuations."""
     owners: dict[int, int] = {}
     active_owner: int | None = None
-    in_html_comment = False
     setext_lines = _setext_heading_lines(lines)
     top_level_indexes = _top_level_line_indexes(lines)
 
     for index, line in enumerate(lines):
         raw = line.strip()
-        if in_html_comment:
-            if "-->" in raw:
-                in_html_comment = False
-            active_owner = None
-            continue
-        if raw.startswith("<!--"):
-            in_html_comment = "-->" not in raw
-            active_owner = None
-            continue
         if (
             index not in top_level_indexes
             or not raw
@@ -312,28 +370,32 @@ def _is_trailer(line: str) -> bool:
 
 
 def _meaningful_lines(lines: Sequence[str]) -> list[str]:
-    """Return visible body lines, excluding headings, comments, and trailers."""
+    """Return rendered body content, excluding structure-only constructs."""
     meaningful: list[str] = []
-    in_html_comment = False
+    visible_indexes, _, code_content_indexes, _ = _markdown_structure(lines)
     setext_lines = _setext_heading_lines(lines)
     for index, line in enumerate(lines):
+        if index not in visible_indexes:
+            continue
+        if index in code_content_indexes:
+            if code := line.strip():
+                meaningful.append(code)
+            continue
+
         stripped = _strip_markup(line)
-        if in_html_comment:
-            if "-->" in stripped:
-                in_html_comment = False
-            continue
-        if stripped.startswith("<!--"):
-            in_html_comment = "-->" not in stripped
-            continue
         if (
             not stripped
             or index in setext_lines
             or stripped.startswith(";")
             or _HEADING_RE.fullmatch(stripped)
             or _is_trailer(stripped)
+            or _THEMATIC_BREAK_RE.fullmatch(line)
+            or _LINK_REFERENCE_DEFINITION_RE.fullmatch(line)
         ):
             continue
-        meaningful.append(stripped)
+        rendered = _RAW_HTML_RE.sub("", _HTML_ENTITY_RE.sub("", stripped))
+        if re.search(r"[A-Za-z0-9]", rendered):
+            meaningful.append(stripped)
     return meaningful
 
 
@@ -341,22 +403,17 @@ def _context_lines(lines: Sequence[str]) -> list[str]:
     """Return change-context prose, excluding mechanical validation evidence."""
     context: list[str] = []
     validation_section = False
-    in_html_comment = False
+    visible_indexes, top_level_indexes, _, _ = _markdown_structure(lines)
     setext_lines = _setext_heading_lines(lines)
     for index, line in enumerate(lines):
+        if index not in visible_indexes:
+            continue
         raw = line.strip()
-        if in_html_comment:
-            if "-->" in raw:
-                in_html_comment = False
-            continue
-        if raw.startswith("<!--"):
-            in_html_comment = "-->" not in raw
-            continue
         if index in setext_lines:
             if index + 1 < len(lines) and _SETEXT_UNDERLINE_RE.fullmatch(lines[index + 1]):
                 validation_section = _strip_markup(raw).casefold() in _VALIDATION_SECTION_NAMES
             continue
-        if heading := _HEADING_RE.fullmatch(raw):
+        if index in top_level_indexes and (heading := _HEADING_RE.fullmatch(raw)):
             section_name = _strip_markup(heading.group("name")).casefold()
             validation_section = section_name in _VALIDATION_SECTION_NAMES
             continue
@@ -401,7 +458,6 @@ def _validation_blocks(
     part_indexes: list[int] = []
     parts_are_validation = False
     validation_section = False
-    in_html_comment = False
     setext_lines = _setext_heading_lines(lines)
     top_level_indexes = _top_level_line_indexes(lines)
     body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
@@ -416,14 +472,6 @@ def _validation_blocks(
     for index, line in enumerate(lines):
         raw = line.strip()
         if index < body_start:
-            continue
-        if in_html_comment:
-            if "-->" in raw:
-                in_html_comment = False
-            continue
-        if raw.startswith("<!--"):
-            flush()
-            in_html_comment = "-->" not in raw
             continue
         if index not in top_level_indexes or (
             metadata_candidate_bounds is not None
@@ -721,11 +769,23 @@ def _normalized_prose(lines: Sequence[str]) -> str:
 def _setext_heading_lines(lines: Sequence[str]) -> set[int]:
     """Return text and underline indexes for Setext-style headings."""
     headings: set[int] = set()
+    _, top_level_indexes, _, _ = _markdown_structure(lines)
     for index in range(1, len(lines)):
-        if not _SETEXT_UNDERLINE_RE.fullmatch(lines[index]):
+        if (
+            index not in top_level_indexes
+            or index - 1 not in top_level_indexes
+            or not _SETEXT_UNDERLINE_RE.fullmatch(lines[index])
+        ):
             continue
-        heading = lines[index - 1].strip()
-        if heading and not heading.startswith(("- ", "* ", "+ ", ">", "    ")):
+        heading_line = lines[index - 1]
+        heading = heading_line.strip()
+        if (
+            heading
+            and not _ATX_HEADING_RE.fullmatch(heading_line)
+            and not _BLOCK_STRUCTURE_RE.match(heading_line)
+            and not _THEMATIC_BREAK_RE.fullmatch(heading_line)
+            and not _LINK_REFERENCE_DEFINITION_RE.fullmatch(heading_line)
+        ):
             headings.update({index - 1, index})
     return headings
 
@@ -824,28 +884,66 @@ def _generated_metadata_bounds(lines: Sequence[str]) -> tuple[int, int] | None:
     if _generated_metadata_records(lines, bounds) is None:
         return None
     assert bounds is not None
-    trailers = [line.strip() for line in lines[bounds[1] + 1 :] if line.strip()]
+    trailers = [line for line in lines[bounds[1] + 1 :] if line.strip()]
     return bounds if trailers == [_DEPENDABOT_SIGNOFF] else None
 
 
 def _top_level_line_indexes(lines: Sequence[str]) -> set[int]:
     """Return lines outside fenced, quoted, and indented code examples."""
-    indexes: set[int] = set()
-    fence_marker: str | None = None
-    for index, line in enumerate(lines):
-        if fence_match := _FENCE_RE.match(line):
-            marker = fence_match.group("marker")[0]
-            if fence_marker is None:
-                fence_marker = marker
-            elif marker == fence_marker:
-                fence_marker = None
+    return _markdown_structure(lines)[1]
+
+
+def _raw_html_errors(lines: Sequence[str], *, label: str) -> list[str]:
+    """Reject ambiguous raw HTML in the body except inside code blocks."""
+    body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
+    *_, raw_html_indexes = _markdown_structure(lines)
+    body_html_indexes = raw_html_indexes & set(range(body_start, len(lines)))
+    if not body_html_indexes:
+        return []
+    line_number = min(body_html_indexes) + 1
+    return [
+        f"{label} line {line_number} contains raw HTML outside a fenced or "
+        "indented code block. Put literal HTML examples in fenced code."
+    ]
+
+
+def _required_section_errors(lines: Sequence[str], *, label: str) -> list[str]:
+    """Require the repository's durable four-section commit record."""
+    body_start = 2 if len(lines) >= 2 and lines[1] == "" else 1
+    _, top_level_indexes, _, _ = _markdown_structure(lines)
+    setext_lines = _setext_heading_lines(lines)
+    headings: list[tuple[int, str]] = []
+    for index in range(body_start, len(lines)):
+        if index not in top_level_indexes:
             continue
-        if fence_marker is not None or line.startswith(("    ", "\t")):
-            continue
-        if re.match(r"^ {0,3}>", line):
-            continue
-        indexes.add(index)
-    return indexes
+        if _ATX_H2_RE.fullmatch(lines[index]):
+            headings.append((index, lines[index]))
+        elif (
+            index in setext_lines
+            and index + 1 in setext_lines
+            and _SETEXT_H2_UNDERLINE_RE.fullmatch(lines[index + 1])
+        ):
+            headings.append((index, f"{lines[index].strip()}\n{lines[index + 1].strip()}"))
+    heading_text = tuple(heading for _, heading in headings)
+    if heading_text != _REQUIRED_SECTION_HEADINGS:
+        expected = ", ".join(repr(heading) for heading in _REQUIRED_SECTION_HEADINGS)
+        found = ", ".join(repr(heading) for heading in heading_text) or "none"
+        return [
+            f"{label} must contain exactly these second-level headings once each "
+            f"and in order: {expected}. Found: {found}."
+        ]
+
+    errors: list[str] = []
+    if any(line.strip() for line in lines[body_start : headings[0][0]]):
+        errors.append(f"{label} body must begin with '## Summary'; remove the nonblank preamble.")
+    for position, (start, heading) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        if not _meaningful_lines(lines[start + 1 : end]):
+            errors.append(
+                f"{label} section {heading!r} must contain rendered alphanumeric "
+                "prose or nonempty fenced or indented code."
+            )
+    return errors
 
 
 def _contains_generated_metadata_shape(lines: Sequence[str]) -> bool:
@@ -916,32 +1014,17 @@ def _markdown_table_lines(lines: Sequence[str]) -> set[int]:
     return table_lines
 
 
-def _has_generated_dependency_context(
-    context: Sequence[str], records: Sequence[dict[str, str]] | None
-) -> bool:
-    """Recognize Dependabot's complete short-name prose and links."""
-    if records is None or len(records) != 1 or not context:
-        return False
-    bump = _DEPENDABOT_BUMP_RE.fullmatch(context[0])
-    if bump is None:
-        return False
-    record = records[0]
-    if (
-        _normalized_prose([bump.group("dependency")])
-        != _normalized_prose([record["dependency-name"]])
-        or bump.group("new").casefold() != record["dependency-version"].casefold()
-    ):
-        return False
-    labels = {line.casefold().rstrip(":") for line in context[1:]}
-    return "commits" in labels and ("release notes" in labels or "changelog" in labels)
-
-
 def _has_generated_dependency_header(header: str, records: Sequence[dict[str, str]] | None) -> bool:
     """Recognize a canonical Dependabot header backed by validated metadata."""
     if records is None or not records:
         return False
     header_match = _HEADER_RE.fullmatch(header.strip())
-    if header_match is None:
+    if (
+        header_match is None
+        or header_match.group("type") != "chore"
+        or header_match.group("scope") not in {"actions", "deps"}
+        or header_match.group("breaking") is not None
+    ):
         return False
     summary = header_match.group("summary")
 
@@ -969,8 +1052,6 @@ def _validate_descriptive_body(
     label: str,
     summary: str | None,
     metadata_candidate_bounds: tuple[int, int] | None,
-    metadata_bounds: tuple[int, int] | None,
-    metadata_records: Sequence[dict[str, str]] | None,
     validation_indexes: set[int],
     validation_context_prefixes: Sequence[str],
 ) -> list[str]:
@@ -1026,9 +1107,7 @@ def _validate_descriptive_body(
             f"{label} body repeats the header summary without enough additional context. "
             "Explain enough context to understand the change without reading its diff."
         )
-    elif descriptive_word_count < _MIN_BODY_WORDS and not (
-        metadata_bounds is not None and _has_generated_dependency_context(context, metadata_records)
-    ):
+    elif descriptive_word_count < _MIN_BODY_WORDS:
         errors.append(
             f"{label} body must contain meaningful context "
             f"({_MIN_BODY_WORDS} or more prose words outside headings, validation, "
@@ -1042,20 +1121,12 @@ def _line_length_errors(
     *,
     label: str,
     metadata_bounds: tuple[int, int] | None = None,
-    generated_header: bool = False,
 ) -> list[str]:
     """Validate wrappable prose while tolerating mechanical Markdown structures."""
-    if generated_header:
-        # Dependabot's signed, metadata-backed messages are generated records;
-        # preserve their canonical summaries and release links verbatim.
-        return []
-
     errors: list[str] = []
     table_lines = _markdown_table_lines(lines)
     for index, line in enumerate(lines):
         line_number = index + 1
-        if index == 0 and generated_header:
-            continue
         if metadata_bounds is not None and metadata_bounds[0] <= index <= metadata_bounds[1]:
             continue
 
@@ -1073,7 +1144,12 @@ def _line_length_errors(
     return errors
 
 
-def validate_message(message: str, *, label: str) -> list[str]:
+def validate_message(
+    message: str,
+    *,
+    label: str,
+    allow_generated_dependency: bool = False,
+) -> list[str]:
     """Validate a full commit message, including its explanatory body."""
     lines = message.strip().splitlines()
     if not lines:
@@ -1087,14 +1163,10 @@ def validate_message(message: str, *, label: str) -> list[str]:
     metadata_candidate_bounds = _generated_metadata_candidate_bounds(lines)
     metadata_bounds = _generated_metadata_bounds(lines)
     metadata_records = _generated_metadata_records(lines, metadata_bounds)
-    (
-        validation_evidence,
-        validation_indexes,
-        validation_context_prefixes,
-        validation_list_item_records,
-    ) = _analyze_validation(lines, metadata_candidate_bounds=metadata_candidate_bounds)
-    generated_dependency_message = metadata_bounds is not None and _has_generated_dependency_header(
-        lines[0], metadata_records
+    generated_dependency_message = (
+        allow_generated_dependency
+        and metadata_bounds is not None
+        and _has_generated_dependency_header(lines[0], metadata_records)
     )
     if (metadata_candidate_bounds is not None and metadata_bounds is None) or (
         metadata_candidate_bounds is None and _contains_generated_metadata_shape(lines)
@@ -1103,40 +1175,45 @@ def validate_message(message: str, *, label: str) -> list[str]:
             f"{label} contains an unrecognized generated dependency metadata block. "
             "Use complete Dependabot fields with single-token values and its signed-off trailer."
         )
+    if generated_dependency_message:
+        return errors
+
+    (
+        validation_evidence,
+        validation_indexes,
+        validation_context_prefixes,
+        validation_list_item_records,
+    ) = _analyze_validation(lines, metadata_candidate_bounds=metadata_candidate_bounds)
+    errors.extend(_raw_html_errors(lines, label=label))
+    errors.extend(_required_section_errors(lines, label=label))
     errors.extend(
         _validate_descriptive_body(
             lines,
             label=label,
             summary=summary,
             metadata_candidate_bounds=metadata_candidate_bounds,
-            metadata_bounds=metadata_bounds,
-            metadata_records=metadata_records,
             validation_indexes=validation_indexes,
             validation_context_prefixes=validation_context_prefixes,
         )
     )
-    if not generated_dependency_message and not validation_evidence:
+    if not validation_evidence:
         errors.append(
             f"{label} must record validation evidence or a specific reason validation "
             "was not run. Include a result such as `uv run make ci: passed` or "
             "`Validation: not run because this changes documentation only`."
         )
-    if (
-        not generated_dependency_message
-        and len(validation_list_item_records) > 1
-        and not all(validation_list_item_records)
-    ):
+    if len(validation_list_item_records) > 1 and not all(validation_list_item_records):
         errors.append(
-            f"{label} records multiple validation results outside separate top-level "
-            "`- ` list items. Put each result in its own item under a `## Validation` "
-            "heading so rendered history keeps the results separate."
+            f"{label} records multiple independent validation commands or results "
+            "outside separate top-level `- ` list items. Put each independent result "
+            "in its own item under a `## Validation` heading so rendered history "
+            "keeps the results separate."
         )
     errors.extend(
         _line_length_errors(
             lines,
             label=label,
             metadata_bounds=metadata_bounds,
-            generated_header=generated_dependency_message,
         )
     )
     return errors
@@ -1184,6 +1261,7 @@ def validate(
     commit_range: str | None,
     commit_file: str | None = None,
     commit_json_file: str | None = None,
+    allow_generated_dependency: bool = False,
 ) -> list[str]:
     """Validate a PR title and/or commit headers and return all errors."""
     messages = list(commits)
@@ -1201,7 +1279,13 @@ def validate(
     if not messages:
         errors.append("No commit headers were found to validate.")
     for index, message in enumerate(messages, start=1):
-        errors.extend(validate_message(message, label=f"Commit {index}"))
+        errors.extend(
+            validate_message(
+                message,
+                label=f"Commit {index}",
+                allow_generated_dependency=allow_generated_dependency,
+            )
+        )
     return errors
 
 
@@ -1227,6 +1311,11 @@ def _parser() -> argparse.ArgumentParser:
         "--commit-json-file",
         help="JSON file containing an array of full commit messages.",
     )
+    parser.add_argument(
+        "--allow-generated-dependency",
+        action="store_true",
+        help="Trust metadata-backed dependency messages from an authenticated bot event.",
+    )
     return parser
 
 
@@ -1239,6 +1328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit_range=args.commit_range,
             commit_file=args.commit_file,
             commit_json_file=args.commit_json_file,
+            allow_generated_dependency=args.allow_generated_dependency,
         )
     except RuntimeError as exc:
         print(f"::error::{exc}", file=sys.stderr)
