@@ -1,8 +1,10 @@
 <type>[optional scope][!]: <imperative summary>
 
 ; A retained logical commit is the portable change record for Git-only readers.
-; Headings are optional, and one large atomic commit is valid. Keep detail
-; proportional to the change.
+; Keep these four column-zero headings exactly once and in this order. One
+; large atomic commit is valid; keep detail proportional to the change.
+; Begin the body here without a nonblank preamble. Raw HTML is not accepted;
+; put literal HTML or comment examples in a fenced code block.
 ## Summary
 
 - <Describe the observable change and why it is needed.>
@@ -20,9 +22,10 @@
 
 - `<command>`: <result>
 
-; Keep multiple results as top-level `- ` list items under this heading. For
-; one result, you may use: Validation: not run because <specific reason>.
-; Delete optional sections that do not apply and remove every template token.
+; Keep multiple independent commands or results as separate top-level `- `
+; list items. One clean aggregate from one command remains one result. If it
+; was not run, give a specific reason.
+; Keep every section and remove every template token.
 ; PR metadata supplements this body. Wrap commit prose at about 72 columns;
 ; use natural Markdown without artificial hard wrapping in PR descriptions.
 ; Add `BREAKING CHANGE: <impact and migration>` below Validation when useful.

@@ -33,10 +33,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_SHA: ${{ github.sha }}
+          PUSH_ACTOR: ${{ github.actor }}
         run: |
+          generated_dependency_flag=()
           if [ "${GITHUB_EVENT_NAME}" = "pull_request_target" ]; then
+            if [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+              generated_dependency_flag+=(--allow-generated-dependency)
+            fi
             pr_ref="refs/remotes/pull/${PR_NUMBER}/head"
             git fetch --no-tags --force origin \
               "refs/pull/${PR_NUMBER}/head:${pr_ref}"
@@ -50,13 +56,19 @@ jobs:
 
             python scripts/check_conventional_commits.py \
               --title "$PR_TITLE" \
-              --range "${PR_BASE_SHA}..${pr_ref}"
+              --range "${PR_BASE_SHA}..${pr_ref}" \
+              "${generated_dependency_flag[@]}"
           else
+            if [ "$PUSH_ACTOR" = "dependabot[bot]" ]; then
+              generated_dependency_flag+=(--allow-generated-dependency)
+            fi
             if git cat-file -e "${PUSH_BEFORE_SHA}^{commit}" 2>/dev/null; then
               python scripts/check_conventional_commits.py \
-                --range "${PUSH_BEFORE_SHA}..${PUSH_SHA}"
+                --range "${PUSH_BEFORE_SHA}..${PUSH_SHA}" \
+                "${generated_dependency_flag[@]}"
             else
               python scripts/check_conventional_commits.py \
-                --commit "$(git log -1 --pretty=%B "$PUSH_SHA")"
+                --commit "$(git log -1 --pretty=%B "$PUSH_SHA")" \
+                "${generated_dependency_flag[@]}"
             fi
           fi

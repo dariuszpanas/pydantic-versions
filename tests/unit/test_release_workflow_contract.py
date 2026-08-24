@@ -188,3 +188,9 @@ def test_commit_message_checkout_does_not_persist_credentials() -> None:
     assert "persist-credentials: false" in workflow[checkout:validation_step]
     assert "github.event.repository.default_branch" in workflow[checkout:validation_step]
     assert "github.event.pull_request.head.sha" not in workflow[checkout:validation_step]
+    assert "PR_AUTHOR: ${{ github.event.pull_request.user.login }}" in workflow
+    assert "PUSH_ACTOR: ${{ github.actor }}" in workflow
+    assert 'if [ "$PR_AUTHOR" = "dependabot[bot]" ]' in workflow
+    assert 'if [ "$PUSH_ACTOR" = "dependabot[bot]" ]' in workflow
+    assert workflow.count("generated_dependency_flag+=(--allow-generated-dependency)") == 2
+    assert workflow.count('"${generated_dependency_flag[@]}"') == 3

@@ -38,8 +38,8 @@ enough to scan in `git log --oneline`. Use `!` for an intentional breaking
 change and add a `BREAKING CHANGE:` footer when the history needs migration
 detail.
 
-For a material change, treat each retained logical commit as a portable,
-PR-grade change record. Its message must stand on its own in `git log`, mirrors,
+Treat each retained human-authored logical commit as a portable, PR-grade
+change record. Its message must stand on its own in `git log`, mirrors,
 archives, and changelog tooling without relying on GitHub metadata. Record:
 
 - the observable change and why it is needed;
@@ -52,7 +52,7 @@ One large atomic commit is valid. Use proportional detail for small mechanical
 changes and keep unrelated changes in separate logical commits.
 
 The tracked [`.gitmessage`](https://github.com/dariuszpanas/pydantic-versions/blob/main/.gitmessage)
-template suggests this layout:
+template requires this layout:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
@@ -74,11 +74,20 @@ template suggests this layout:
 - `<command>`: result
 ```
 
-The headings are guidance, not a required format. Unstructured prose is equally
-valid when it provides the same durable context. A single validation result can
-use a concise `Validation: ...` sentence. Put multiple results in separate
-top-level `- ` Markdown list items under `## Validation`, so rendered history
-does not collapse them into one paragraph. Do not retain template tokens,
+Human-authored commits must contain those exact column-zero, second-level
+headings once each, in that order, and begin with `## Summary` without a
+nonblank preamble. Every section needs rendered alphanumeric prose or nonempty
+fenced or indented code; punctuation, empty links, and invisible markup are not
+content. Raw HTML tags, comments, and declarations are rejected outside code
+blocks, so put literal HTML examples in fenced code.
+
+Canonical generated Dependabot headers, metadata, and sign-off are the only
+format exception, and the protected workflow enables it only for an event
+authenticated as `dependabot[bot]`; local and ordinary human checks default to
+the four-section policy. Put multiple independent validation commands or
+results in separate top-level `- ` Markdown list items under `## Validation`,
+so rendered history does not collapse them into one paragraph. One clean
+aggregate from one command remains one result. Do not retain template tokens,
 development-only notes such as "address review feedback," a body that merely
 repeats the subject, or validation commands without their result. For work that
 cannot be run locally, state a concrete reason instead of writing a placeholder.
@@ -96,7 +105,7 @@ git config --worktree commit.template "$(git rev-parse --show-toplevel)/.gitmess
 git config --worktree core.commentChar ";"
 ```
 
-The comment-character setting preserves optional `##` headings when Git opens
+The comment-character setting preserves required `##` headings when Git opens
 the template; instructional comments begin with `;` and are removed by Git.
 Keep these settings worktree-scoped: `--local` writes shared repository config
 and can make one linked checkout use another checkout's template path.
@@ -112,6 +121,7 @@ Before pushing, fetch and inspect the exact history the PR would retain:
 ```bash
 git fetch origin
 git log --format=fuller origin/main..HEAD
+uvx --from "uv==0.12.5" uv run --no-sync python scripts/check_conventional_commits.py --range origin/main..HEAD
 ```
 
 Compare every material commit body with the PR description. Fold `fixup!` and
@@ -134,12 +144,18 @@ Example:
 ```text
 feat: add versioned schema API
 
-Register ordered schema versions and generate historical wire models from the
-current Pydantic model. Historical validation upgrades values through explicit
-migrations before the authoritative current-model validation boundary.
+## Summary
 
-Keep schema labels opaque and leave YAML parsing to callers. Document the
-legacy unversioned fallback and Django Ninja inspection boundary.
+- Register ordered schema versions and generate historical wire models from
+  the current Pydantic model.
+
+## Boundaries and compatibility
+
+- Keep schema labels opaque and leave YAML parsing to callers.
+
+## Investigation
+
+- Document the legacy fallback and Django Ninja inspection boundary.
 
 ## Validation
 
