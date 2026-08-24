@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import datetime as dt
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import fields as dataclass_fields
 from dataclasses import is_dataclass
 from types import NoneType, UnionType
@@ -11,19 +10,18 @@ from typing import (
     Annotated,
     Any,
     Literal,
-    NoReturn,
     TypeVar,
     Union,
     cast,
     get_args,
     get_origin,
     get_type_hints,
+    overload,
 )
 from typing import TypeAliasType as StdlibTypeAliasType
 from typing import is_typeddict as stdlib_is_typeddict
 
 from pydantic import BaseModel
-from pydantic_core import to_jsonable_python
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
 from typing_extensions import is_typeddict as extensions_is_typeddict
 
@@ -37,30 +35,300 @@ from pydantic_versions.exceptions import InvalidMigrationError
 _TYPE_ALIAS_TYPES = (StdlibTypeAliasType, ExtensionsTypeAliasType)
 
 
+class _HashableCanonicalMapping(MutableMapping[Any, Any]):
+    """Identity-hashable private mapping for canonical set and mapping-key positions."""
+
+    __slots__ = ("_data", "source_identities")
+    __hash__ = object.__hash__
+    __eq__ = object.__eq__
+    __ne__ = object.__ne__
+
+    def __init__(
+        self,
+        value: Mapping[Any, Any],
+        *,
+        source_identities: Iterable[int] = (),
+    ) -> None:
+        self._data = dict(value)
+        self.source_identities = frozenset(source_identities)
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._data[key]
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._data[key] = value
+
+    def __delitem__(self, key: Any) -> None:
+        del self._data[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return repr(self._data)
+
+    def copy(self) -> _HashableCanonicalMapping:
+        """Copy callback-visible data without discarding private occurrence lineage."""
+        return _HashableCanonicalMapping(
+            self._data,
+            source_identities=self.source_identities,
+        )
+
+    def __or__(self, other: Any) -> Any:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        merged = dict(self._data)
+        merged.update(other)
+        return _HashableCanonicalMapping(
+            merged,
+            source_identities=self.source_identities | _direct_canonical_source_identities(other),
+        )
+
+    def __ror__(self, other: Any) -> Any:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        merged = dict(other)
+        merged.update(self._data)
+        return _HashableCanonicalMapping(
+            merged,
+            source_identities=self.source_identities | _direct_canonical_source_identities(other),
+        )
+
+    def __ior__(self, other: Any) -> Any:
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        self._data.update(other)
+        self.source_identities |= _direct_canonical_source_identities(other)
+        return self
+
+
+def _direct_canonical_source_identities(value: Any) -> frozenset[int]:
+    if isinstance(value, _HashableCanonicalMapping):
+        return value.source_identities
+    return frozenset()
+
+
+def _preserve_canonical_mapping_copy(
+    source: Mapping[Any, Any],
+    copied: dict[Any, Any],
+) -> Mapping[Any, Any]:
+    """Keep private occurrence lineage while copying canonical mapping contents."""
+    if isinstance(source, _HashableCanonicalMapping):
+        return _HashableCanonicalMapping(
+            copied,
+            source_identities=source.source_identities,
+        )
+    return copied
+
+
+def _hashable_canonical_value(value: Any) -> Any:
+    """Keep recursively projected mappings usable in exact set containers."""
+    if isinstance(value, _HashableCanonicalMapping):
+        return value
+    if isinstance(value, Mapping):
+        return _HashableCanonicalMapping(value)
+    if isinstance(value, tuple):
+        source_items = value
+        items = tuple(_hashable_canonical_value(item) for item in source_items)
+        unchanged = all(item is source for item, source in zip(items, source_items, strict=True))
+        return value if unchanged else items
+    if isinstance(value, frozenset):
+        source_items = tuple(value)
+        items = tuple(_hashable_canonical_value(item) for item in source_items)
+        if all(item is source for item, source in zip(items, source_items, strict=True)):
+            return value
+        return frozenset(items)
+    return value
+
+
+def _canonical_source_identities(value: Any) -> frozenset[int]:
+    if isinstance(value, _HashableCanonicalMapping):
+        return value.source_identities
+    if isinstance(value, tuple | frozenset):
+        return frozenset(
+            identity for item in value for identity in _canonical_source_identities(item)
+        )
+    return frozenset()
+
+
+def _bind_canonical_source_identity(value: Any, source_identity: int) -> Any:
+    """Bind one unordered occurrence through exact hashable container layers."""
+    if isinstance(value, _HashableCanonicalMapping):
+        value.source_identities |= frozenset((source_identity,))
+    elif isinstance(value, tuple | frozenset):
+        for item in value:
+            _bind_canonical_source_identity(item, source_identity)
+    return value
+
+
+def _rebuild_canonical_set(
+    source: set[Any] | frozenset[Any],
+    items: Iterable[Any],
+    *,
+    error_message: str,
+) -> set[Any] | frozenset[Any]:
+    """Rebuild one exact set kind without hiding an equality collapse."""
+    canonical_items = [_hashable_canonical_value(item) for item in items]
+    if len(canonical_items) != len(source):
+        raise InvalidMigrationError(error_message)
+    try:
+        rebuilt = type(source)(canonical_items)
+    except (TypeError, ValueError) as exc:
+        raise InvalidMigrationError(error_message) from exc
+    if len(rebuilt) != len(source):
+        raise InvalidMigrationError(error_message)
+    return rebuilt
+
+
+def _model_revalidation_input(value: BaseModel) -> dict[str, Any]:
+    """Detach one model's full native revalidation state without projecting children."""
+    memo: dict[int, Any] = {}
+    payload = {
+        name: _detach_revalidation_value(item, memo=memo) for name, item in value.__dict__.items()
+    }
+    extras = value.__pydantic_extra__
+    if isinstance(extras, Mapping):
+        payload.update(
+            {name: _detach_revalidation_value(item, memo=memo) for name, item in extras.items()},
+        )
+    return payload
+
+
+def _detach_revalidation_value(value: Any, *, memo: dict[int, Any]) -> Any:
+    if isinstance(value, BaseModel) or is_dataclass(value):
+        return value
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
+    if type(value) is dict:
+        copied: dict[Any, Any] = {}
+        memo[identity] = copied
+        copied.update(
+            {
+                _detach_revalidation_value(key, memo=memo): _detach_revalidation_value(
+                    item,
+                    memo=memo,
+                )
+                for key, item in value.items()
+            },
+        )
+        return copied
+    if type(value) is list:
+        copied_list: list[Any] = []
+        memo[identity] = copied_list
+        copied_list.extend(_detach_revalidation_value(item, memo=memo) for item in value)
+        return copied_list
+    if type(value) is tuple:
+        memo[identity] = value
+        copied_tuple = tuple(_detach_revalidation_value(item, memo=memo) for item in value)
+        memo[identity] = copied_tuple
+        return copied_tuple
+    if type(value) in {set, frozenset}:
+        copied_items = [_detach_revalidation_value(item, memo=memo) for item in value]
+        copied_collection = type(value)(copied_items)
+        memo[identity] = copied_collection
+        return copied_collection
+    return value
+
+
+@overload
 def _extract_declared_fields(
     value: BaseModel,
     *,
     declared_model: type[BaseModel] | None = None,
-) -> dict[str, Any]:
+    hash_required: Literal[False] = False,
+    _active_ids: set[int] | None = None,
+) -> dict[str, Any]: ...
+
+
+@overload
+def _extract_declared_fields(
+    value: BaseModel,
+    *,
+    declared_model: type[BaseModel] | None = None,
+    hash_required: Literal[True],
+    _active_ids: set[int] | None = None,
+) -> _HashableCanonicalMapping: ...
+
+
+def _extract_declared_fields(
+    value: BaseModel,
+    *,
+    declared_model: type[BaseModel] | None = None,
+    hash_required: bool = False,
+    _active_ids: set[int] | None = None,
+) -> dict[str, Any] | _HashableCanonicalMapping:
     """Build a private canonical payload from validated, declared fields only."""
-    selected_model = type(value) if declared_model is None else declared_model
-    fields = selected_model.model_fields
-    return {
-        name: _extract_declared_value(
-            value.__dict__[name],
-            config=selected_model.model_config,
-            annotation=field_info.annotation,
+    active_ids = set() if _active_ids is None else _active_ids
+    identity = id(value)
+    if identity in active_ids:
+        msg = "Canonical extraction cannot preserve cyclic model or container references"
+        raise InvalidMigrationError(msg)
+    active_ids.add(identity)
+    try:
+        selected_model = type(value) if declared_model is None else declared_model
+        fields = selected_model.model_fields
+        extracted = {
+            name: _extract_declared_value(
+                value.__dict__[name],
+                annotation=field_info.annotation,
+                _active_ids=active_ids,
+            )
+            for name, field_info in fields.items()
+            if name in value.__dict__ and _field_crosses_wire_boundary(field_info)
+        }
+        return (
+            _HashableCanonicalMapping(extracted, source_identities=(identity,))
+            if hash_required
+            else extracted
         )
-        for name, field_info in fields.items()
-        if name in value.__dict__ and _field_crosses_wire_boundary(field_info)
-    }
+    finally:
+        active_ids.remove(identity)
 
 
 def _extract_declared_value(
     value: Any,
     *,
-    config: Mapping[str, Any],
     annotation: Any = None,
+    hash_required: bool = False,
+    _active_ids: set[int] | None = None,
+) -> Any:
+    guarded = not isinstance(value, BaseModel) and (
+        isinstance(value, Mapping | list | tuple | set | frozenset) or is_dataclass(value)
+    )
+    if not guarded:
+        return _extract_declared_value_unchecked(
+            value,
+            annotation=annotation,
+            hash_required=hash_required,
+            _active_ids=_active_ids,
+        )
+    active_ids = set() if _active_ids is None else _active_ids
+    identity = id(value)
+    if identity in active_ids:
+        msg = "Canonical extraction cannot preserve cyclic model or container references"
+        raise InvalidMigrationError(msg)
+    active_ids.add(identity)
+    try:
+        return _extract_declared_value_unchecked(
+            value,
+            annotation=annotation,
+            hash_required=hash_required,
+            _active_ids=active_ids,
+        )
+    finally:
+        active_ids.remove(identity)
+
+
+def _extract_declared_value_unchecked(
+    value: Any,
+    *,
+    annotation: Any,
+    hash_required: bool,
+    _active_ids: set[int] | None,
 ) -> Any:
     declared_annotation = _matching_declared_annotation(annotation, value)
     if isinstance(value, BaseModel):
@@ -71,37 +339,128 @@ def _extract_declared_value(
             and isinstance(value, declared_annotation)
             else None
         )
-        return _extract_declared_fields(value, declared_model=declared_model)
+        if hash_required:
+            return _extract_declared_fields(
+                value,
+                declared_model=declared_model,
+                hash_required=True,
+                _active_ids=_active_ids,
+            )
+        return _extract_declared_fields(
+            value,
+            declared_model=declared_model,
+            _active_ids=_active_ids,
+        )
+    structure = _runtime_structural_fields(declared_annotation)
+    if structure is None and is_dataclass(value):
+        structure = _single_declared_dataclass_structure(declared_annotation)
+    if structure is not None and structure[0] != "model":
+        kind, owner, field_annotations, _required = structure
+        assert kind in ("dataclass", "typed_dict")
+        extracted: dict[str, Any] = {}
+        for field_name, field_annotation in field_annotations.items():
+            present, field_value = _runtime_structural_field_value(
+                value,
+                kind=kind,
+                field_name=field_name,
+            )
+            if not present or not _runtime_structural_field_crosses_wire_boundary(
+                kind=kind,
+                owner=owner,
+                field_name=field_name,
+                field_annotation=field_annotation,
+            ):
+                continue
+            extracted[field_name] = _extract_declared_value(
+                field_value,
+                annotation=field_annotation,
+                _active_ids=_active_ids,
+            )
+        return (
+            _HashableCanonicalMapping(extracted, source_identities=(id(value),))
+            if hash_required
+            else extracted
+        )
     if isinstance(value, Mapping):
         arguments = get_args(declared_annotation)
+        key_annotation = arguments[0] if len(arguments) == 2 else None
         item_annotation = arguments[1] if len(arguments) == 2 else None
-        return {
-            _jsonable_declared_mapping_key(key, config=config): _extract_declared_value(
-                item,
-                config=config,
-                annotation=item_annotation,
+        extracted_items = [
+            (
+                _extract_declared_value(
+                    key,
+                    annotation=key_annotation,
+                    hash_required=True,
+                    _active_ids=_active_ids,
+                ),
+                _extract_declared_value(
+                    item,
+                    annotation=item_annotation,
+                    _active_ids=_active_ids,
+                ),
             )
             for key, item in value.items()
-        }
-    if isinstance(value, list | tuple | set | frozenset):
-        # Pydantic's JSON-shaped transition payload has historically represented
-        # every supported sequence and set container as a list.  Keep that shape
-        # while reading nested model values without invoking serializers.
+        ]
+        try:
+            extracted = dict(extracted_items)
+        except (TypeError, ValueError) as exc:
+            msg = "Canonical extraction cannot preserve hashable mapping keys"
+            raise InvalidMigrationError(msg) from exc
+        if len(extracted) != len(value):
+            msg = "Canonical extraction cannot preserve mapping key cardinality"
+            raise InvalidMigrationError(msg)
+        return _HashableCanonicalMapping(extracted) if hash_required else extracted
+    if isinstance(value, list):
         arguments = get_args(declared_annotation)
-        if isinstance(value, tuple) and len(arguments) > 1 and arguments[-1] is not Ellipsis:
-            item_annotations = arguments
-        else:
-            item_annotation = arguments[0] if arguments else None
-            item_annotations = (item_annotation,) * len(value)
+        item_annotation = arguments[0] if arguments else None
         return [
             _extract_declared_value(
                 item,
-                config=config,
                 annotation=item_annotation,
+                _active_ids=_active_ids,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        arguments = get_args(declared_annotation)
+        if len(arguments) > 1 and arguments[-1] is not Ellipsis:
+            item_annotations = arguments[: len(value)] + (None,) * max(
+                0,
+                len(value) - len(arguments),
+            )
+        else:
+            item_annotation = arguments[0] if arguments else None
+            item_annotations = (item_annotation,) * len(value)
+        return tuple(
+            _extract_declared_value(
+                item,
+                annotation=item_annotation,
+                hash_required=hash_required,
+                _active_ids=_active_ids,
             )
             for item, item_annotation in zip(value, item_annotations, strict=True)
+        )
+    if isinstance(value, set | frozenset):
+        arguments = get_args(declared_annotation)
+        item_annotation = arguments[0] if arguments else None
+        extracted_items = [
+            _bind_canonical_source_identity(
+                _extract_declared_value(
+                    item,
+                    annotation=item_annotation,
+                    hash_required=True,
+                    _active_ids=_active_ids,
+                ),
+                id(item),
+            )
+            for item in value
         ]
-    return _jsonable_declared_scalar(value, config=config)
+        return _rebuild_canonical_set(
+            value,
+            extracted_items,
+            error_message="Canonical extraction cannot preserve set cardinality",
+        )
+    return value
 
 
 def _matching_declared_annotation(annotation: Any, value: Any) -> Any:
@@ -343,7 +702,7 @@ def _runtime_value_matches_typed_dict(value: Any, annotation: Any) -> bool:
 def _runtime_typed_dict_origin(annotation: Any) -> type[Any] | None:
     normalized = _runtime_annotation_value(annotation)
     if stdlib_is_typeddict(normalized) or extensions_is_typeddict(normalized):
-        return normalized
+        return cast(type[Any], normalized)
     origin = get_origin(normalized)
     if stdlib_is_typeddict(origin) or extensions_is_typeddict(origin):
         return cast(type[Any], origin)
@@ -582,6 +941,33 @@ def _runtime_structural_fields(
     return "dataclass", dataclass_type, fields, frozenset(fields)
 
 
+def _single_declared_dataclass_structure(
+    annotation: Any,
+) -> (
+    tuple[
+        Literal["model", "dataclass", "typed_dict"],
+        type[Any],
+        dict[str, Any],
+        frozenset[str],
+    ]
+    | None
+):
+    normalized = _runtime_annotation_value(annotation)
+    if isinstance(normalized, TypeVar):
+        candidates = _runtime_type_parameter_values(normalized)
+    elif get_origin(normalized) in (Union, UnionType):
+        candidates = get_args(normalized)
+    else:
+        return None
+    matches = [
+        structure
+        for candidate in candidates
+        if (structure := _runtime_structural_fields(candidate)) is not None
+        and structure[0] == "dataclass"
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _runtime_structural_field_value(
     value: Any,
     *,
@@ -626,84 +1012,48 @@ def _runtime_undeclared_field_is_present(
 
 
 def _field_crosses_wire_boundary(field_info: Any) -> bool:
-    for value in (field_info.exclude, field_info.exclude_if):
-        if value is None or value is False:
-            continue
-        if isinstance(value, Mapping | tuple | list | set | frozenset) and not value:
-            continue
+    return not any(
+        _wire_boundary_omits_value(value) for value in (field_info.exclude, field_info.exclude_if)
+    )
+
+
+def _wire_boundary_omits_value(value: Any) -> bool:
+    if value is _MISSING or value is None or value is False:
         return False
-    return True
+    return not (isinstance(value, Mapping | tuple | list | set | frozenset) and not value)
 
 
-def _jsonable_declared_scalar(value: Any, *, config: Mapping[str, Any]) -> Any:
-    value_type = type(value)
-    if (
-        value_type is NoneType
-        or value_type is bool
-        or value_type is int
-        or value_type is float
-        or value_type is str
-    ):
-        return value
-    try:
-        if isinstance(value, bytes):
-            return to_jsonable_python(
-                value,
-                bytes_mode=config.get("ser_json_bytes", "utf8"),
-                fallback=_signal_unknown_scalar,
-            )
-        if isinstance(value, dt.timedelta):
-            temporal_mode = config.get("ser_json_temporal")
-            if temporal_mode is not None:
-                return to_jsonable_python(
-                    value,
-                    temporal_mode=temporal_mode,
-                    fallback=_signal_unknown_scalar,
-                )
-            return to_jsonable_python(
-                value,
-                timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
-                fallback=_signal_unknown_scalar,
-            )
-        if isinstance(value, dt.datetime | dt.date | dt.time):
-            return to_jsonable_python(
-                value,
-                temporal_mode=config.get("ser_json_temporal", "iso8601"),
-                fallback=_signal_unknown_scalar,
-            )
-        return to_jsonable_python(value, fallback=_signal_unknown_scalar)
-    except _UnknownScalarError:
-        return value
-
-
-def _jsonable_declared_mapping_key(value: Any, *, config: Mapping[str, Any]) -> Any:
-    temporal_mode = config.get("ser_json_temporal")
-    try:
-        if temporal_mode is not None:
-            dumped = to_jsonable_python(
-                {value: None},
-                bytes_mode=config.get("ser_json_bytes", "utf8"),
-                temporal_mode=temporal_mode,
-                fallback=_signal_unknown_scalar,
-            )
-        else:
-            dumped = to_jsonable_python(
-                {value: None},
-                bytes_mode=config.get("ser_json_bytes", "utf8"),
-                timedelta_mode=config.get("ser_json_timedelta", "iso8601"),
-                fallback=_signal_unknown_scalar,
-            )
-    except _UnknownScalarError:
-        return value
-    return next(iter(dumped))
-
-
-class _UnknownScalarError(Exception):
-    pass
-
-
-def _signal_unknown_scalar(_value: Any) -> NoReturn:
-    raise _UnknownScalarError
+def _runtime_structural_field_crosses_wire_boundary(
+    *,
+    kind: Literal["dataclass", "typed_dict"],
+    owner: type[Any],
+    field_name: str,
+    field_annotation: Any,
+) -> bool:
+    (
+        _config,
+        resolved_field_info,
+        assigned_field_info,
+        field_metadata,
+        annotated_field_infos,
+    ) = _runtime_structural_field_sources(
+        kind=kind,
+        owner=owner,
+        field_name=field_name,
+        field_annotation=field_annotation,
+    )
+    return not any(
+        _wire_boundary_omits_value(
+            _runtime_effective_structural_field_attribute(
+                attribute=attribute,
+                resolved_field_info=resolved_field_info,
+                assigned_field_info=assigned_field_info,
+                field_metadata=field_metadata,
+                annotated_field_infos=annotated_field_infos,
+            ),
+        )
+        for attribute in ("exclude", "exclude_if")
+    )
 
 
 def _extract_preflight_fields(
@@ -1267,17 +1617,11 @@ def _transform_declared_payload_through_annotation(
         return transformed_items
     if isinstance(payload, tuple):
         return tuple(transformed_items)
-    try:
-        transformed_set = type(payload)(transformed_items)
-    except TypeError:
-        # Canonical transition payloads use JSON-shaped lists for set-like
-        # fields, so an intermediate model-to-mapping conversion may cease to
-        # be hashable without losing any declared member.
-        return transformed_items
-    if len(transformed_set) != len(payload):
-        msg = "Nested migration cannot preserve set cardinality along its declared path"
-        raise InvalidMigrationError(msg)
-    return transformed_set
+    return _rebuild_canonical_set(
+        payload,
+        transformed_items,
+        error_message="Nested migration cannot preserve set cardinality along its declared path",
+    )
 
 
 def _declared_traversal_annotation(

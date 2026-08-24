@@ -18,20 +18,48 @@ from pydantic_versions._compiler import (
 )
 from pydantic_versions._runtime_nested import _normalize_validated_explicit_nested_payloads
 from pydantic_versions._runtime_payload import (
+    _bind_canonical_source_identity,
+    _canonical_source_identities,
     _extract_declared_fields,
+    _hashable_canonical_value,
     _matching_declared_annotation,
+    _rebuild_canonical_set,
     _strip_annotated,
 )
 from pydantic_versions._runtime_versioning import (
-    _current_validation_input,
     _serialized_field_name,
     _to_current_names,
 )
 from pydantic_versions.exceptions import InvalidMigrationError
 
 type _DecoratorDispatchSite = tuple[tuple[str, str], ...]
-type _DecoratorLocation = tuple[str | int, ...]
+
+
+@dataclass(eq=False)
+class _DecoratorSetLocation:
+    """Stable occurrence token for an unordered canonical set member."""
+
+    value: Any
+    ordinal: int
+    logical_identity: int
+
+    def __hash__(self) -> int:
+        return hash(self.logical_identity)
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, _DecoratorSetLocation)
+            and self.logical_identity == other.logical_identity
+        )
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+
+type _DecoratorLocationPart = str | int | _DecoratorSetLocation
+type _DecoratorLocation = tuple[_DecoratorLocationPart, ...]
 type _DecoratorCandidate = tuple[Any, _DecoratorLocation, _DecoratorLocation]
+type _DecoratorTransform = tuple[_DecoratorLocation, Callable[[Any], Any]]
 type _DecoratorUnionArmCache = dict[tuple[int, int], Any]
 type _DecoratorRouteGroups = dict[
     _DecoratorDispatchSite,
@@ -51,13 +79,27 @@ class _DecoratorRouteSelection:
     value_identity: int | None = None
 
 
+def _decorator_collection_location(
+    collection: Any,
+    item: Any,
+    ordinal: int,
+) -> int | _DecoratorSetLocation:
+    if not isinstance(collection, set | frozenset):
+        return ordinal
+    return _DecoratorSetLocation(
+        value=item,
+        ordinal=ordinal,
+        logical_identity=id(item),
+    )
+
+
 def _select_decorator_routes(
     value: BaseModel,
     *,
     compiled: _CompiledFamily,
     parent_label: str,
     source_version: _CompiledVersion | None,
-    location_prefix: tuple[str | int, ...] = (),
+    location_prefix: _DecoratorLocation = (),
     parent_selection: _DecoratorRouteSelection | None = None,
     _union_arm_cache: _DecoratorUnionArmCache | None = None,
     _route_group_cache: _DecoratorRouteGroupCache | None = None,
@@ -130,10 +172,10 @@ def _walk_authoritative_decorator_route(
     route: _CompiledDecoratorNestedFamily,
     root_names: Mapping[str, str | None],
     union_arm_cache: _DecoratorUnionArmCache,
-) -> tuple[tuple[Any, tuple[str | int, ...]], ...]:
-    states: list[tuple[Any, Any, tuple[str | int, ...]]] = [(value, annotation, ())]
+) -> tuple[tuple[Any, _DecoratorLocation], ...]:
+    states: list[tuple[Any, Any, _DecoratorLocation]] = [(value, annotation, ())]
     for step_index, step in enumerate(route.traversal):
-        next_states: list[tuple[Any, Any, tuple[str | int, ...]]] = []
+        next_states: list[tuple[Any, Any, _DecoratorLocation]] = []
         for current, current_annotation, location in states:
             normalized_annotation = _strip_annotated(current_annotation)
             if step.kind == "field":
@@ -181,7 +223,18 @@ def _walk_authoritative_decorator_route(
                     continue
                 item_annotation = arguments[0]
                 next_states.extend(
-                    (item, item_annotation, (*location, ordinal))
+                    (
+                        item,
+                        item_annotation,
+                        (
+                            *location,
+                            _decorator_collection_location(
+                                current,
+                                item,
+                                ordinal,
+                            ),
+                        ),
+                    )
                     for ordinal, item in enumerate(current)
                 )
                 continue
@@ -261,11 +314,14 @@ def _serialized_decorator_selection_location(
         if step.kind == "each":
             occurrence = next(relative)
             arguments = get_args(normalized)
-            serialized.append(occurrence)
+            serialized.append(
+                occurrence.ordinal if isinstance(occurrence, _DecoratorSetLocation) else occurrence
+            )
             annotation = arguments[0]
             continue
         if step.kind == "tuple_index":
             occurrence = next(relative)
+            assert isinstance(occurrence, int)
             ordinal = int(step.value)
             arguments = get_args(normalized)
             serialized.append(occurrence)
@@ -273,6 +329,7 @@ def _serialized_decorator_selection_location(
             continue
         if step.kind == "mapping_values":
             occurrence = next(relative)
+            assert isinstance(occurrence, str | int)
             arguments = get_args(normalized)
             serialized.append(occurrence)
             annotation = arguments[1]
@@ -286,24 +343,28 @@ def _normalize_selected_decorator_payloads(
     selections: tuple[_DecoratorRouteSelection, ...],
     parent_label: str,
 ) -> dict[str, Any]:
-    normalized = payload
     # Historical ancestor field names must become canonical before a
     # descendant's canonical location is reachable.  Conversion and final
     # projection remain child-first, but input-name normalization is the
     # inverse traversal.
-    for selection in _decorator_selections_parent_first(selections):
-        child_compiled = selection.route.family._compiled_family()
-        child_label = selection.route.child_label(parent_label)
-        normalized = _transform_payload_at_location(
-            normalized,
-            location=selection.location,
-            transform=partial(
+    transforms = tuple(
+        (
+            selection.location,
+            partial(
                 _normalize_decorator_value,
-                compiled=child_compiled,
-                child_label=child_label,
+                compiled=selection.route.family._compiled_family(),
+                child_label=selection.route.child_label(parent_label),
             ),
         )
-        _refresh_decorator_selection_identity(normalized, selection)
+        for selection in _decorator_selections_parent_first(selections)
+    )
+    normalized = _transform_payload_at_locations(
+        payload,
+        transforms=transforms,
+        order="parent_first",
+    )
+    assert isinstance(normalized, dict)
+    _refresh_decorator_selection_identities(normalized, selections)
     return normalized
 
 
@@ -329,42 +390,6 @@ def _normalize_decorator_value(
     )
 
 
-def _materialize_selected_decorator_models(
-    *,
-    payload: dict[str, Any],
-    selections: tuple[_DecoratorRouteSelection, ...],
-) -> dict[str, Any]:
-    materialized = payload
-    for selection in _decorator_selections_child_first(selections):
-        materialized = _transform_payload_at_location(
-            materialized,
-            location=selection.location,
-            transform=partial(
-                _materialize_decorator_model,
-                model=selection.route.family.model,
-            ),
-        )
-        _refresh_decorator_selection_identity(materialized, selection)
-    return materialized
-
-
-def _materialize_decorator_model(value: Any, *, model: type[BaseModel]) -> Any:
-    if type(value) is model:
-        return value
-    if not isinstance(value, Mapping):
-        return value
-    validation_input = _current_validation_input(model, dict(value))
-    if model.model_config.get("revalidate_instances") == "always":
-        # Preserve the authoritative branch as an exact instance, but let the
-        # final parent validation perform the one real validation required by
-        # the model's explicit revalidation policy.
-        return model.model_construct(**validation_input)
-    return model.model_validate(
-        validation_input,
-        by_name=True,
-    )
-
-
 def _decorator_collection_kind(
     route: _CompiledDecoratorNestedFamily,
 ) -> Literal["list", "tuple", "set", "frozenset"] | None:
@@ -373,56 +398,204 @@ def _decorator_collection_kind(
     return route.collection_kind
 
 
-def _transform_payload_at_location(
+type _DecoratorSetIndex = tuple[
+    set[Any] | frozenset[Any],
+    tuple[Any, ...],
+    dict[int, int],
+    dict[int, int | None],
+]
+type _DecoratorSetIndexCache = dict[int, _DecoratorSetIndex]
+
+
+def _decorator_set_index(
+    payload: set[Any] | frozenset[Any],
+    cache: _DecoratorSetIndexCache | None = None,
+) -> _DecoratorSetIndex:
+    if cache is not None:
+        cached = cache.get(id(payload))
+        if cached is not None and cached[0] is payload:
+            return cached
+    items = tuple(payload)
+    object_indexes = {id(item): index for index, item in enumerate(items)}
+    source_indexes: dict[int, int | None] = {}
+    for index, item in enumerate(items):
+        for identity in _canonical_source_identities(item):
+            if identity not in source_indexes:
+                source_indexes[identity] = index
+            elif source_indexes[identity] != index:
+                source_indexes[identity] = None
+    built = payload, items, object_indexes, source_indexes
+    if cache is not None:
+        cache[id(payload)] = built
+    return built
+
+
+def _resolve_decorator_set_location(
+    index: _DecoratorSetIndex,
+    location: _DecoratorSetLocation,
+    *,
+    update_location: bool = True,
+) -> int | None:
+    _payload, items, object_indexes, source_indexes = index
+    object_index = object_indexes.get(id(location.value))
+    if object_index is not None and items[object_index] is location.value:
+        if update_location:
+            location.ordinal = object_index
+            location.value = items[object_index]
+        return object_index
+    if location.logical_identity not in source_indexes:
+        return None
+    source_index = source_indexes[location.logical_identity]
+    if source_index is None:
+        msg = "Decorator nested migration has ambiguous unordered occurrence identity"
+        raise InvalidMigrationError(msg)
+    if update_location:
+        location.ordinal = source_index
+        location.value = items[source_index]
+    return source_index
+
+
+def _transform_payload_at_locations(
     payload: Any,
     *,
-    location: tuple[str | int, ...],
-    transform: Callable[[Any], Any],
+    transforms: tuple[_DecoratorTransform, ...],
+    order: Literal["parent_first", "child_first"],
 ) -> Any:
-    if not location:
-        return transform(payload)
-    head, *remaining = location
-    tail = tuple(remaining)
+    """Apply a location forest while copying each affected container at most once."""
+    terminal = tuple(transform for location, transform in transforms if not location)
+    descendants = tuple((location, transform) for location, transform in transforms if location)
+    transformed = payload
+    if order == "parent_first":
+        for transform in terminal:
+            transformed = transform(transformed)
+    if descendants:
+        transformed = _transform_payload_children(
+            transformed,
+            transforms=descendants,
+            order=order,
+        )
+    if order == "child_first":
+        for transform in terminal:
+            transformed = transform(transformed)
+    return transformed
+
+
+def _transform_payload_children(
+    payload: Any,
+    *,
+    transforms: tuple[_DecoratorTransform, ...],
+    order: Literal["parent_first", "child_first"],
+) -> Any:
     if isinstance(payload, BaseModel):
-        return _transform_payload_at_location(
+        return _transform_payload_children(
             _extract_declared_fields(payload),
-            location=location,
-            transform=transform,
+            transforms=transforms,
+            order=order,
         )
     if isinstance(payload, Mapping):
-        if head not in payload:
+        grouped: dict[Any, list[_DecoratorTransform]] = {}
+        for location, transform in transforms:
+            head, *remaining = location
+            grouped.setdefault(head, []).append((tuple(remaining), transform))
+        copied: dict[Any, Any] | None = None
+        for head, mapping_transforms in grouped.items():
+            if head not in payload:
+                continue
+            current = payload[head]
+            transformed = _transform_payload_at_locations(
+                current,
+                transforms=tuple(mapping_transforms),
+                order=order,
+            )
+            if transformed is current:
+                continue
+            if copied is None:
+                copied = dict(payload)
+            copied[head] = transformed
+        return payload if copied is None else copied
+    if isinstance(payload, list | tuple):
+        grouped_sequence: dict[int, list[_DecoratorTransform]] = {}
+        for location, transform in transforms:
+            head, *remaining = location
+            if isinstance(head, int):
+                grouped_sequence.setdefault(head, []).append((tuple(remaining), transform))
+        copied_items: list[Any] | None = None
+        for index, sequence_transforms in grouped_sequence.items():
+            if index < 0 or index >= len(payload):
+                continue
+            current = payload[index]
+            transformed = _transform_payload_at_locations(
+                current,
+                transforms=tuple(sequence_transforms),
+                order=order,
+            )
+            if transformed is current:
+                continue
+            if copied_items is None:
+                copied_items = list(payload)
+            copied_items[index] = transformed
+        if copied_items is None:
             return payload
-        current = payload[head]
-        transformed = _transform_payload_at_location(
-            current,
-            location=tail,
-            transform=transform,
-        )
-        if transformed is current:
-            return payload
-        copied = dict(payload)
-        copied[head] = transformed
-        return copied
-    if isinstance(payload, list | tuple) and isinstance(head, int):
-        if head < 0 or head >= len(payload):
-            return payload
-        current = payload[head]
-        transformed = _transform_payload_at_location(
-            current,
-            location=tail,
-            transform=transform,
-        )
-        if transformed is current:
-            return payload
-        copied_items = list(payload)
-        copied_items[head] = transformed
         return copied_items if isinstance(payload, list) else tuple(copied_items)
+    if isinstance(payload, set | frozenset):
+        set_index = _decorator_set_index(payload)
+        grouped_set: dict[
+            int,
+            list[tuple[_DecoratorSetLocation, _DecoratorLocation, Callable[[Any], Any]]],
+        ] = {}
+        for location, transform in transforms:
+            head, *remaining = location
+            if not isinstance(head, _DecoratorSetLocation):
+                continue
+            item_index = _resolve_decorator_set_location(set_index, head)
+            if item_index is not None:
+                grouped_set.setdefault(item_index, []).append((head, tuple(remaining), transform))
+        copied_items = list(set_index[1])
+        changed = False
+        for item_index, set_transforms in grouped_set.items():
+            current = copied_items[item_index]
+            transformed = _transform_payload_at_locations(
+                current,
+                transforms=tuple(
+                    (location, transform) for _head, location, transform in set_transforms
+                ),
+                order=order,
+            )
+            replacement = (
+                current if transformed is current else _hashable_canonical_value(transformed)
+            )
+            for identity in {
+                head.logical_identity for head, _location, _transform in set_transforms
+            }:
+                _bind_canonical_source_identity(replacement, identity)
+            for head, _location, _transform in set_transforms:
+                head.value = replacement
+            if replacement is not current:
+                copied_items[item_index] = replacement
+                changed = True
+        if not changed:
+            return payload
+        rebuilt = _rebuild_canonical_set(
+            payload,
+            copied_items,
+            error_message="Decorator nested migration cannot preserve set cardinality",
+        )
+        rebuilt_index = _decorator_set_index(rebuilt)
+        for set_transforms in grouped_set.values():
+            for head, _location, _transform in set_transforms:
+                if _resolve_decorator_set_location(rebuilt_index, head) is None:
+                    msg = "Decorator nested migration lost an unordered occurrence identity"
+                    raise InvalidMigrationError(msg)
+        return rebuilt
     return payload
 
 
 def _payload_at_location(
     payload: Any,
-    location: tuple[str | int, ...],
+    location: _DecoratorLocation,
+    *,
+    _set_index_cache: _DecoratorSetIndexCache | None = None,
+    _update_set_locations: bool = True,
 ) -> tuple[bool, Any]:
     current = payload
     for part in location:
@@ -436,6 +609,20 @@ def _payload_at_location(
                 return False, None
             current = current[part]
             continue
+        if isinstance(current, set | frozenset) and isinstance(
+            part,
+            _DecoratorSetLocation,
+        ):
+            set_index = _decorator_set_index(current, _set_index_cache)
+            item_index = _resolve_decorator_set_location(
+                set_index,
+                part,
+                update_location=_update_set_locations,
+            )
+            if item_index is None:
+                return False, None
+            current = set_index[1][item_index]
+            continue
         return False, None
     return True, current
 
@@ -444,18 +631,16 @@ def _refresh_decorator_selection_identities(
     payload: Any,
     selections: tuple[_DecoratorRouteSelection, ...],
 ) -> None:
+    set_index_cache: _DecoratorSetIndexCache = {}
     for selection in selections:
-        _refresh_decorator_selection_identity(payload, selection)
-
-
-def _refresh_decorator_selection_identity(
-    payload: Any,
-    selection: _DecoratorRouteSelection,
-) -> None:
-    found, value = _payload_at_location(payload, selection.location)
-    selection.value_identity = (
-        id(value) if found and isinstance(value, Mapping | BaseModel) else None
-    )
+        found, value = _payload_at_location(
+            payload,
+            selection.location,
+            _set_index_cache=set_index_cache,
+        )
+        selection.value_identity = (
+            id(value) if found and isinstance(value, Mapping | BaseModel) else None
+        )
 
 
 def _decorator_selection_depth(selection: _DecoratorRouteSelection) -> int:
@@ -520,10 +705,10 @@ def _decorator_route_groups(
 def _walk_decorator_payload_candidates(
     payload: Any,
     route: _CompiledDecoratorNestedFamily,
-) -> tuple[tuple[Any, tuple[str | int, ...]], ...]:
-    states: list[tuple[Any, tuple[str | int, ...]]] = [(payload, ())]
+) -> tuple[tuple[Any, _DecoratorLocation], ...]:
+    states: list[tuple[Any, _DecoratorLocation]] = [(payload, ())]
     for step in route.traversal:
-        next_states: list[tuple[Any, tuple[str | int, ...]]] = []
+        next_states: list[tuple[Any, _DecoratorLocation]] = []
         for current, location in states:
             if step.kind == "field":
                 if isinstance(current, BaseModel):
@@ -540,7 +725,14 @@ def _walk_decorator_payload_candidates(
                 if not isinstance(current, list | tuple | set | frozenset):
                     continue
                 next_states.extend(
-                    (item, (*location, ordinal)) for ordinal, item in enumerate(current)
+                    (
+                        item,
+                        (
+                            *location,
+                            _decorator_collection_location(current, item, ordinal),
+                        ),
+                    )
+                    for ordinal, item in enumerate(current)
                 )
                 continue
             if step.kind == "tuple_index":
@@ -613,6 +805,7 @@ def _reconcile_decorator_selections(
         if selection.value_identity is not None
     }
     replaced_owner_ids: set[int] = set()
+    set_index_cache: _DecoratorSetIndexCache = {}
     groups = tuple(
         sorted(
             selected_by_site.items(),
@@ -629,9 +822,13 @@ def _reconcile_decorator_selections(
         parent = previous[0].parent
         if parent is None:
             base_payload = payload
-            location_prefix: tuple[str | int, ...] = ()
+            location_prefix: _DecoratorLocation = ()
         else:
-            found, base_payload = _payload_at_location(payload, parent.location)
+            found, base_payload = _payload_at_location(
+                payload,
+                parent.location,
+                _set_index_cache=set_index_cache,
+            )
             if not found:
                 msg = (
                     "Parent migration removed a decorator nested owner occurrence at "
@@ -672,10 +869,10 @@ def _reconcile_decorator_selections(
         # Object identity is the authoritative occurrence token. It permits a
         # heterogeneous list to reorder without rediscovering its union branch.
         for previous_index, selection in enumerate(previous):
-            identity = selection.value_identity
-            if identity is None:
+            selection_identity = selection.value_identity
+            if selection_identity is None:
                 continue
-            candidate_indexes = candidate_indexes_by_identity.get(identity, ())
+            candidate_indexes = candidate_indexes_by_identity.get(selection_identity, ())
             if len(candidate_indexes) > 1:
                 msg = (
                     "Parent migration reused one decorator nested occurrence at "
@@ -853,7 +1050,7 @@ def _selection_has_replaced_ancestor(
 def _validate_unique_decorator_selection_identities(
     selections: tuple[_DecoratorRouteSelection, ...],
 ) -> None:
-    locations_by_identity: dict[int, tuple[str | int, ...]] = {}
+    locations_by_identity: dict[int, _DecoratorLocation] = {}
     for selection in selections:
         identity = selection.value_identity
         if identity is None:
@@ -876,7 +1073,7 @@ def _discover_typed_decorator_selections(
 ) -> tuple[_DecoratorRouteSelection, ...]:
     discovered = list(selections)
     occupied_locations = {(id(selection.parent), selection.location) for selection in selections}
-    locations_by_identity: dict[int, set[tuple[str | int, ...]]] = {}
+    locations_by_identity: dict[int, set[_DecoratorLocation]] = {}
     children_by_parent: dict[int, list[_DecoratorRouteSelection]] = {}
     for selection in selections:
         children_by_parent.setdefault(id(selection.parent), []).append(selection)
@@ -885,12 +1082,13 @@ def _discover_typed_decorator_selections(
                 selection.location
             )
     route_group_cache: _DecoratorRouteGroupCache = {}
+    set_index_cache: _DecoratorSetIndexCache = {}
 
     def visit_owner(
         owner_payload: Any,
         owner_compiled: _CompiledFamily,
         *,
-        location_prefix: tuple[str | int, ...],
+        location_prefix: _DecoratorLocation,
         parent: _DecoratorRouteSelection | None,
     ) -> None:
         parent_identity = id(parent)
@@ -955,12 +1153,19 @@ def _discover_typed_decorator_selections(
 
         children = tuple(children_by_parent.get(parent_identity, ()))
         for child in children:
-            found, child_payload = _payload_at_location(payload, child.location)
+            child_compiled = child.route.family._compiled_family()
+            if not child_compiled.decorator_nested:
+                continue
+            found, child_payload = _payload_at_location(
+                payload,
+                child.location,
+                _set_index_cache=set_index_cache,
+            )
             if not found:
                 continue
             visit_owner(
                 child_payload,
-                child.route.family._compiled_family(),
+                child_compiled,
                 location_prefix=child.location,
                 parent=child,
             )
@@ -1014,43 +1219,3 @@ def _annotation_accepts_raw_mapping(annotation: Any) -> bool:
         return issubclass(dict, runtime_type)
     except TypeError:
         return False
-
-
-def _decorator_set_cardinalities(
-    payload: Any,
-    route: _CompiledDecoratorNestedFamily,
-) -> dict[int, tuple[int, ...]]:
-    states: list[Any] = [payload]
-    cardinalities: dict[int, list[int]] = {}
-    for step_index, step in enumerate(route.traversal):
-        next_states: list[Any] = []
-        for current in states:
-            if step.kind == "field":
-                if isinstance(current, BaseModel) and step.value in current.__dict__:
-                    next_states.append(current.__dict__[step.value])
-                elif isinstance(current, Mapping) and step.value in current:
-                    next_states.append(current[step.value])
-                continue
-            if step.kind == "union_arm":
-                next_states.append(current)
-                continue
-            if step.kind == "each":
-                if not isinstance(current, list | tuple | set | frozenset):
-                    continue
-                if step.value in ("set", "frozenset"):
-                    cardinalities.setdefault(step_index, []).append(len(current))
-                next_states.extend(current)
-                continue
-            if step.kind == "tuple_index":
-                if not isinstance(current, list | tuple):
-                    continue
-                ordinal = int(step.value)
-                if ordinal < len(current):
-                    next_states.append(current[ordinal])
-                continue
-            if step.kind == "mapping_values" and isinstance(current, Mapping):
-                next_states.extend(current.values())
-        states = next_states
-        if not states:
-            break
-    return {index: tuple(values) for index, values in cardinalities.items()}

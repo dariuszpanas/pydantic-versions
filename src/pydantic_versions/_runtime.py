@@ -6,34 +6,32 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    get_args,
 )
 
 from pydantic import BaseModel
 
-from pydantic_versions._compiler import _CompiledFamily
+from pydantic_versions._compiler import _CompiledFamily, _CompiledFamilyRuntimeCache
 from pydantic_versions._runtime_decorators import (
     _decorator_collection_kind,
     _decorator_selections_child_first,
     _decorator_selections_parent_first,
-    _decorator_set_cardinalities,
     _DecoratorRouteSelection,
-    _materialize_selected_decorator_models,
     _normalize_decorator_value,
     _normalize_selected_decorator_payloads,
     _payload_at_location,
     _reconcile_decorator_selections,
     _refresh_decorator_selection_identities,
-    _refresh_decorator_selection_identity,
+    _route_has_non_child_mapping_arm,
     _select_decorator_routes,
     _serialized_decorator_selection_location,
-    _transform_payload_at_location,
-    _walk_decorator_payload_candidates,
+    _transform_payload_at_locations,
 )
 from pydantic_versions._runtime_nested import (
     _apply_nested_family_migrations,
     _convert_nested_family_payload,
     _declared_nested_version_metadata,
-    _nested_family_collection_kind,
+    _normalize_validated_explicit_nested_payloads,
     _preflight_nested_version_metadata,
     _preflight_validation_route,
     _project_nested_family_payload,
@@ -45,11 +43,10 @@ from pydantic_versions._runtime_nested import (
     _verify_validated_family_version_metadata,
 )
 from pydantic_versions._runtime_payload import (
-    _declared_payload_occurrences_at_path,
-    _explicit_runtime_body_model,
     _extract_declared_fields,
     _extract_preflight_fields,
-    _runtime_nested_structural_occurrences,
+    _preserve_canonical_mapping_copy,
+    _strip_annotated,
 )
 from pydantic_versions._runtime_render import (
     _copy_render_input,
@@ -57,6 +54,12 @@ from pydantic_versions._runtime_render import (
     _validate_base_model_render_metadata,
     _validate_current_render_metadata,
     _without_family_render_metadata,
+)
+from pydantic_versions._runtime_validation import (
+    _contains_hashable_canonical_mapping,
+    _revalidate_canonical_model_instance,
+    _validate_canonical_adapter_payload,
+    _validate_canonical_model,
 )
 from pydantic_versions._runtime_versioning import (
     _apply_serialized_version_metadata,
@@ -123,7 +126,17 @@ def _validate_family[T: BaseModel](
         parent_label=source_version,
     )
     source = compiled.version(source_version)
-    source_model = source.model.model_validate(data)
+    if isinstance(data, source.model) and _model_instance_requires_revalidation(
+        source.model,
+        data,
+    ):
+        source_model = _revalidate_canonical_model_instance(
+            source.model,
+            data,
+            cache=compiled._runtime_cache,
+        )
+    else:
+        source_model = source.model.model_validate(data)
     _validate_explicit_nested_runtime_shapes(
         source_model,
         compiled=compiled,
@@ -156,8 +169,15 @@ def _validate_family[T: BaseModel](
     payload = _to_current_names(
         compiled,
         source,
-        _extract_declared_fields(source_model),
+        _extract_declared_fields(source_model, declared_model=source.model),
     )
+    nested_payload_is_canonical = source.wire_model_kind != "explicit"
+    if nested_payload_is_canonical:
+        payload = _normalize_validated_explicit_nested_payloads(
+            payload=payload,
+            compiled=compiled,
+            parent_label=source_version,
+        )
     payload = _normalize_selected_decorator_payloads(
         payload=payload,
         selections=decorator_selections,
@@ -166,7 +186,6 @@ def _validate_family[T: BaseModel](
 
     migrations_applied: list[tuple[str, str]] = []
     source_index = compiled.index(source_version)
-    nested_payload_is_canonical = False
     for transition in compiled.transitions[source_index:]:
         payload = _apply_nested_family_migrations(
             payload=payload,
@@ -213,11 +232,13 @@ def _validate_family[T: BaseModel](
         compiled=compiled,
         discover_new=False,
     )
+    nested_container_ids: set[int] = set()
     payload = _project_nested_family_payloads(
         payload=payload,
         compiled=compiled,
         parent_label=compiled.current_version,
         wire_boundary=False,
+        guarded_container_ids=nested_container_ids,
     )
     payload = _project_selected_decorator_payloads(
         payload=payload,
@@ -225,13 +246,25 @@ def _validate_family[T: BaseModel](
         parent_label=compiled.current_version,
         wire_boundary=False,
     )
-    payload = _materialize_selected_decorator_models(
+    payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
         payload=payload,
         selections=decorator_selections,
+        compiled=compiled,
+        parent_label=compiled.current_version,
+        wire_boundary=False,
     )
-    current_model = family.model.model_validate(
-        _current_validation_input(family.model, payload),
-        by_name=True,
+    current_model = _validate_canonical_model(
+        family.model,
+        _current_validation_input(
+            family.model,
+            payload,
+            tracked_container_ids=nested_container_ids,
+            mapping_copy=_preserve_canonical_mapping_copy,
+        ),
+        cache=compiled._runtime_cache,
+        materialized_model_ids=materialized_model_ids,
+        materialized_container_ids=frozenset(nested_container_ids)
+        | _materialized_hash_container_ids(payload, materialized_model_ids),
     )
     return VersionedValidation(
         source_version=source_version,
@@ -334,15 +367,24 @@ def _dump_family[T: BaseModel](
         compiled=compiled,
         discover_new=False,
     )
+    nested_container_ids: set[int] = set()
     payload = _project_nested_family_payloads(
         payload=payload,
         compiled=compiled,
         parent_label=requested,
         wire_boundary=True,
+        guarded_container_ids=nested_container_ids,
     )
     payload = _project_selected_decorator_payloads(
         payload=payload,
         selections=decorator_selections,
+        parent_label=requested,
+        wire_boundary=True,
+    )
+    payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
+        payload=payload,
+        selections=decorator_selections,
+        compiled=compiled,
         parent_label=requested,
         wire_boundary=True,
     )
@@ -356,20 +398,26 @@ def _dump_family[T: BaseModel](
         else:
             payload[_model_metadata_field_name(compiled)] = requested
 
-    target_payload = _to_version_names(target, payload)
-    target_model = target.model.model_validate(target_payload, by_name=True)
+    target_payload = _to_version_names(
+        target,
+        payload,
+        tracked_container_ids=nested_container_ids,
+        mapping_copy=_preserve_canonical_mapping_copy,
+    )
+    target_model = _validate_canonical_model(
+        target.model,
+        target_payload,
+        cache=compiled._runtime_cache,
+        materialized_model_ids=materialized_model_ids,
+        materialized_container_ids=frozenset(nested_container_ids)
+        | _materialized_hash_container_ids(target_payload, materialized_model_ids),
+    )
     _validate_explicit_nested_runtime_shapes(
         target_model,
         compiled=compiled,
         version=target,
         label=requested,
         recurse_nested_targets=True,
-    )
-    _validate_nested_collection_cardinality(
-        input_payload=target_payload,
-        validated_model=target_model,
-        compiled=compiled,
-        parent_label=requested,
     )
     return _serialize_target_model(
         compiled=compiled,
@@ -574,6 +622,7 @@ def _prune_serialized_decorator_metadata(
     if not selections:
         return
     source_payload = _extract_declared_fields(source_model)
+    source_set_index_cache = {}
     for selection in _decorator_selections_child_first(selections):
         location = _serialized_decorator_selection_location(
             compiled=compiled,
@@ -585,10 +634,19 @@ def _prune_serialized_decorator_metadata(
             continue
         found, payload = _payload_at_location(dumped, location)
         if not found:
-            continue
+            msg = (
+                f"Target serialization for family {compiled.name!r} and version "
+                f"{parent_label!r} omitted managed decorator route "
+                f"{selection.route.path!r}"
+            )
+            raise ValueError(msg)
         source_found, source_value = _payload_at_location(
             source_payload,
             selection.location,
+            _set_index_cache=source_set_index_cache,
+            # Detached identity-hashed sets may iterate differently; keep the
+            # target-model ordinals that address the already serialized payload.
+            _update_set_locations=False,
         )
         if not source_found:
             source_value = selection
@@ -611,7 +669,14 @@ def _validated_current_render_payload[T: BaseModel](
     current_wire = current_version.model
     if isinstance(data, family.model):
         _validate_base_model_render_metadata(compiled, data)
-        current_model = family.model.model_validate(data)
+        if _model_instance_requires_revalidation(family.model, data):
+            current_model = _revalidate_canonical_model_instance(
+                family.model,
+                data,
+                cache=compiled._runtime_cache,
+            )
+        else:
+            current_model = family.model.model_validate(data)
         raw_payload = _extract_declared_fields(
             current_model,
             declared_model=family.model,
@@ -627,17 +692,15 @@ def _validated_current_render_payload[T: BaseModel](
             else _without_family_render_metadata(compiled, raw_payload)
         )
         if isinstance(data, current_wire):
-            current_model = _current_wire_validation_adapter(
-                compiled,
-            ).validate_python(
+            current_model = _validate_canonical_adapter_payload(
+                _current_wire_validation_adapter(
+                    compiled,
+                    guard_collections=_contains_hashable_canonical_mapping(validation_payload),
+                ),
                 validation_payload,
-                by_name=True,
             )
         else:
-            current_model = family.model.model_validate(
-                validation_payload,
-                by_name=True,
-            )
+            current_model = family.model.model_validate(validation_payload)
     elif isinstance(data, Mapping):
         raw_payload = _copy_render_input(data)
         _validate_current_render_metadata(compiled, raw_payload)
@@ -676,32 +739,48 @@ def _validated_current_render_payload[T: BaseModel](
     return payload, selections
 
 
+def _model_instance_requires_revalidation(
+    model: type[BaseModel],
+    value: BaseModel,
+) -> bool:
+    policy = model.model_config.get("revalidate_instances", "never")
+    return policy == "always" or (policy == "subclass-instances" and type(value) is not model)
+
+
 def _apply_selected_decorator_migrations(
     *,
     payload: dict[str, Any],
     selections: tuple[_DecoratorRouteSelection, ...],
     target_label: str,
 ) -> dict[str, Any]:
-    converted = payload
+    pending: list[tuple[_DecoratorRouteSelection, str]] = []
+    transforms = []
     for selection in _decorator_selections_child_first(selections):
         nested_source = selection.label
         nested_target = selection.route.child_label(target_label)
         if nested_source == nested_target:
             continue
-
-        converted = _transform_payload_at_location(
-            converted,
-            location=selection.location,
-            transform=partial(
-                _convert_decorator_value,
-                family=selection.route.family,
-                source_label=nested_source,
-                target_label=nested_target,
-                collection_kind=_decorator_collection_kind(selection.route),
+        pending.append((selection, nested_target))
+        transforms.append(
+            (
+                selection.location,
+                partial(
+                    _convert_decorator_value,
+                    family=selection.route.family,
+                    source_label=nested_source,
+                    target_label=nested_target,
+                    collection_kind=_decorator_collection_kind(selection.route),
+                ),
             ),
         )
+    converted = _transform_payload_at_locations(
+        payload,
+        transforms=tuple(transforms),
+        order="child_first",
+    )
+    for selection, nested_target in pending:
         selection.label = nested_target
-        _refresh_decorator_selection_identity(converted, selection)
+    _refresh_decorator_selection_identities(converted, selections)
     return converted
 
 
@@ -730,23 +809,191 @@ def _project_selected_decorator_payloads(
     parent_label: str,
     wire_boundary: bool,
 ) -> dict[str, Any]:
-    projected = payload
+    transforms = []
     for selection in _decorator_selections_child_first(selections):
         target_label = selection.route.child_label(parent_label)
-
-        projected = _transform_payload_at_location(
-            projected,
-            location=selection.location,
-            transform=partial(
-                _project_decorator_value,
-                family=selection.route.family,
-                target_label=target_label,
-                wire_boundary=wire_boundary,
-                collection_kind=_decorator_collection_kind(selection.route),
+        transforms.append(
+            (
+                selection.location,
+                partial(
+                    _project_decorator_value,
+                    family=selection.route.family,
+                    target_label=target_label,
+                    wire_boundary=wire_boundary,
+                    collection_kind=_decorator_collection_kind(selection.route),
+                ),
             ),
         )
-        _refresh_decorator_selection_identity(projected, selection)
+    projected = _transform_payload_at_locations(
+        payload,
+        transforms=tuple(transforms),
+        order="child_first",
+    )
+    _refresh_decorator_selection_identities(projected, selections)
     return projected
+
+
+def _materialize_selected_decorator_wire_models(
+    *,
+    payload: dict[str, Any],
+    selections: tuple[_DecoratorRouteSelection, ...],
+    compiled: _CompiledFamily,
+    parent_label: str,
+    wire_boundary: bool,
+) -> tuple[dict[str, Any], frozenset[int]]:
+    transforms = []
+    materialized_model_ids: set[int] = set()
+    for selection in _decorator_selections_child_first(selections):
+        if not any(step.kind == "union_arm" for step in selection.route.traversal):
+            continue
+        owner_model = (
+            compiled.model if selection.parent is None else selection.parent.route.family.model
+        )
+        if len(selection.site_routes) == 1 and not _route_has_non_child_mapping_arm(
+            owner_model,
+            selection.route,
+        ):
+            continue
+        child_compiled = selection.route.family._compiled_family()
+        transforms.append(
+            (
+                selection.location,
+                partial(
+                    _materialize_selected_decorator_wire_model,
+                    model=_selected_decorator_wire_model(
+                        compiled=compiled,
+                        parent_label=parent_label,
+                        selection=selection,
+                        wire_boundary=wire_boundary,
+                    ),
+                    cache=child_compiled._runtime_cache,
+                    materialized_model_ids=materialized_model_ids,
+                ),
+            )
+        )
+    materialized = _transform_payload_at_locations(
+        payload,
+        transforms=tuple(transforms),
+        order="child_first",
+    )
+    assert isinstance(materialized, dict)
+    _refresh_decorator_selection_identities(materialized, selections)
+    return materialized, frozenset(materialized_model_ids)
+
+
+def _materialize_selected_decorator_wire_model(
+    value: Any,
+    *,
+    model: type[BaseModel],
+    cache: _CompiledFamilyRuntimeCache,
+    materialized_model_ids: set[int],
+) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    existing_ids = frozenset(materialized_model_ids)
+    validated = _validate_canonical_model(
+        model,
+        dict(value),
+        cache=cache,
+        materialized_model_ids=existing_ids,
+        materialized_container_ids=_materialized_hash_container_ids(value, existing_ids),
+    )
+    materialized_model_ids.add(id(validated))
+    return validated
+
+
+def _materialized_hash_container_ids(
+    value: Any,
+    materialized_model_ids: frozenset[int],
+) -> frozenset[int]:
+    if not materialized_model_ids:
+        return frozenset()
+    found: set[int] = set()
+    seen: set[int] = set()
+
+    def contains_materialized_hash_value(item: Any) -> bool:
+        if id(item) in materialized_model_ids:
+            return True
+        if isinstance(item, tuple | frozenset):
+            return any(contains_materialized_hash_value(child) for child in item)
+        return False
+
+    def visit(current: Any) -> None:
+        if not isinstance(current, Mapping | list | tuple | set | frozenset):
+            return
+        identity = id(current)
+        if identity in seen:
+            return
+        seen.add(identity)
+        if isinstance(current, set | frozenset):
+            if any(contains_materialized_hash_value(item) for item in current):
+                found.add(identity)
+            for item in current:
+                visit(item)
+            return
+        if isinstance(current, Mapping):
+            if any(contains_materialized_hash_value(key) for key in current):
+                found.add(identity)
+            for key, item in current.items():
+                visit(key)
+                visit(item)
+            return
+        for item in current:
+            visit(item)
+
+    visit(value)
+    return frozenset(found)
+
+
+def _selected_decorator_wire_model(
+    *,
+    compiled: _CompiledFamily,
+    parent_label: str,
+    selection: _DecoratorRouteSelection,
+    wire_boundary: bool,
+) -> type[BaseModel]:
+    if selection.parent is None:
+        owner_compiled = compiled
+        owner_label = parent_label
+        owner_model = (
+            owner_compiled.version(owner_label).model if wire_boundary else owner_compiled.model
+        )
+    else:
+        owner_compiled = selection.parent.route.family._compiled_family()
+        owner_label = selection.parent.label
+        owner_model = _selected_decorator_wire_model(
+            compiled=compiled,
+            parent_label=parent_label,
+            selection=selection.parent,
+            wire_boundary=wire_boundary,
+        )
+
+    owner_target = owner_compiled.version(owner_label)
+    annotation: Any = owner_model
+    for step_index, step in enumerate(selection.route.traversal):
+        normalized = _strip_annotated(annotation)
+        if step.kind == "field":
+            field_name = step.value
+            if wire_boundary and step_index == 0:
+                projected_name = owner_target.projection.field(field_name).version_name
+                assert projected_name is not None
+                field_name = projected_name
+            annotation = normalized.model_fields[field_name].annotation
+            continue
+        arguments = get_args(normalized)
+        if step.kind == "union_arm":
+            annotation = arguments[int(step.value)]
+        elif step.kind == "mapping_values":
+            annotation = arguments[1]
+        elif step.kind == "tuple_index":
+            annotation = arguments[int(step.value)]
+        else:
+            assert step.kind == "each"
+            annotation = arguments[0]
+
+    target_model = _strip_annotated(annotation)
+    assert isinstance(target_model, type) and issubclass(target_model, BaseModel)
+    return target_model
 
 
 def _project_decorator_value(
@@ -781,239 +1028,65 @@ def _preflight_selected_decorator_version_metadata(
     if not isinstance(payload, Mapping):
         return
     canonical = _to_current_names(compiled, parent_version, dict(payload))
+    transforms = []
     for selection in _decorator_selections_parent_first(selections):
         route = selection.route
-        found_raw, raw = _payload_at_location(canonical, selection.location)
-        if not found_raw:
-            continue
-        if isinstance(raw, BaseModel):
-            raw = _extract_preflight_fields(raw)
-        if not isinstance(raw, Mapping):
-            continue
         expected = route.child_label(parent_label)
         child_compiled = route.family._compiled_family()
-        found, declared = _declared_nested_version_metadata(
-            payload=raw,
-            compiled=child_compiled,
-            source_label=expected,
-        )
-        if found and not _matches_version_label(declared, expected):
-            declared_display = _safe_nested_version_display(
-                declared,
-                compiled=child_compiled,
-            )
-            msg = (
-                f"Decorator nested family {route.family.name!r} at path {route.path!r} "
-                f"expects version {expected!r} for parent label {parent_label!r}, "
-                f"but the payload declares {declared_display}"
-            )
-            raise SchemaVersionError(msg)
-        _preflight_nested_version_metadata(
-            payload=raw,
-            compiled=child_compiled,
-            parent_label=expected,
-        )
-        canonical = _transform_payload_at_location(
-            canonical,
-            location=selection.location,
-            transform=partial(
-                _normalize_decorator_value,
-                compiled=child_compiled,
-                child_label=expected,
+        transforms.append(
+            (
+                selection.location,
+                partial(
+                    _preflight_decorator_value,
+                    route=route,
+                    child_compiled=child_compiled,
+                    expected=expected,
+                    parent_label=parent_label,
+                ),
             ),
         )
+    _transform_payload_at_locations(
+        canonical,
+        transforms=tuple(transforms),
+        order="parent_first",
+    )
 
 
-def _validate_nested_collection_cardinality(
+def _preflight_decorator_value(
+    raw: Any,
     *,
-    input_payload: dict[str, Any],
-    validated_model: BaseModel,
-    compiled: _CompiledFamily,
+    route: Any,
+    child_compiled: _CompiledFamily,
+    expected: str,
     parent_label: str,
-) -> None:
-    if not compiled.nested and not compiled.decorator_nested:
-        return
-    target = compiled.version(parent_label)
-    validated_payload = _extract_declared_fields(validated_model)
-    _validate_nested_collection_cardinality_payloads(
-        input_payloads=(input_payload,),
-        validated_payloads=(validated_payload,),
-        input_annotations=(target.model,),
-        validated_annotations=(target.model,),
-        compiled=compiled,
-        parent_label=parent_label,
+) -> Any:
+    if isinstance(raw, BaseModel):
+        raw = _extract_preflight_fields(raw)
+    if not isinstance(raw, Mapping):
+        return raw
+    found, declared = _declared_nested_version_metadata(
+        payload=raw,
+        compiled=child_compiled,
+        source_label=expected,
     )
-
-
-def _validate_nested_collection_cardinality_payloads(
-    *,
-    input_payloads: tuple[Any, ...],
-    validated_payloads: tuple[Any, ...],
-    input_annotations: tuple[Any, ...] | None = None,
-    validated_annotations: tuple[Any, ...] | None = None,
-    compiled: _CompiledFamily,
-    parent_label: str,
-) -> None:
-    target = compiled.version(parent_label)
-    resolved_input_annotations = (
-        (target.model,) * len(input_payloads) if input_annotations is None else input_annotations
-    )
-    resolved_validated_annotations = (
-        (target.model,) * len(validated_payloads)
-        if validated_annotations is None
-        else validated_annotations
-    )
-    for nested in compiled.nested:
-        target_path = _target_nested_path(target, nested.path)
-        input_occurrences = tuple(
-            occurrence
-            for payload, annotation in zip(
-                input_payloads,
-                resolved_input_annotations,
-                strict=True,
-            )
-            for occurrence in _declared_payload_occurrences_at_path(
-                payload,
-                annotation=annotation,
-                path=target_path,
-            )
-        )
-        validated_occurrences = tuple(
-            occurrence
-            for payload, annotation in zip(
-                validated_payloads,
-                resolved_validated_annotations,
-                strict=True,
-            )
-            for occurrence in _declared_payload_occurrences_at_path(
-                payload,
-                annotation=annotation,
-                path=target_path,
-            )
-        )
-        input_values = tuple(value for value, _annotation in input_occurrences)
-        validated_values = tuple(value for value, _annotation in validated_occurrences)
-        collection_kind = _nested_family_collection_kind(
-            model=compiled.model,
-            path=nested.path,
-        )
-        if collection_kind in ("set", "frozenset"):
-            before = sorted(
-                len(value)
-                for value in input_values
-                if isinstance(value, list | tuple | set | frozenset)
-            )
-            after = sorted(
-                len(value)
-                for value in validated_values
-                if isinstance(value, list | tuple | set | frozenset)
-            )
-            collapsed = len(after) < len(before) or any(
-                actual < expected for expected, actual in zip(before, after, strict=False)
-            )
-            if collapsed:
-                msg = (
-                    f"Nested migration for family {nested.family.name!r} cannot "
-                    "preserve set cardinality after target wire validation at path "
-                    f"{nested.path!r}"
-                )
-                raise InvalidMigrationError(msg)
-
-        child_compiled = nested.family._compiled_family()
-        if child_compiled.nested or child_compiled.decorator_nested:
-            child_label = nested.child_label(parent_label)
-            child_model = _explicit_runtime_body_model(
-                child_compiled.version(child_label).model,
-            )
-            child_input_occurrences = tuple(
-                child_occurrence
-                for value, annotation in input_occurrences
-                for child_occurrence in _runtime_nested_structural_occurrences(
-                    value,
-                    annotation=annotation,
-                    model=child_model,
-                )
-            )
-            child_validated_occurrences = tuple(
-                child_occurrence
-                for value, annotation in validated_occurrences
-                for child_occurrence in _runtime_nested_structural_occurrences(
-                    value,
-                    annotation=annotation,
-                    model=child_model,
-                )
-            )
-            _validate_nested_collection_cardinality_payloads(
-                input_payloads=tuple(value for value, _annotation in child_input_occurrences),
-                validated_payloads=tuple(
-                    value for value, _annotation in child_validated_occurrences
-                ),
-                input_annotations=tuple(
-                    annotation for _value, annotation in child_input_occurrences
-                ),
-                validated_annotations=tuple(
-                    annotation for _value, annotation in child_validated_occurrences
-                ),
-                compiled=child_compiled,
-                parent_label=child_label,
-            )
-
-    canonical_input = tuple(
-        _to_current_names(compiled, target, payload) if isinstance(payload, Mapping) else payload
-        for payload in input_payloads
-    )
-    canonical_validated = tuple(
-        _to_current_names(compiled, target, payload) if isinstance(payload, Mapping) else payload
-        for payload in validated_payloads
-    )
-    for route in compiled.decorator_nested:
-        set_steps = tuple(
-            index
-            for index, step in enumerate(route.traversal)
-            if step.kind == "each" and step.value in ("set", "frozenset")
-        )
-        before_maps = tuple(
-            _decorator_set_cardinalities(payload, route) for payload in canonical_input
-        )
-        after_maps = tuple(
-            _decorator_set_cardinalities(payload, route) for payload in canonical_validated
-        )
-        for step_index in set_steps:
-            expected = sorted(
-                value
-                for cardinalities in before_maps
-                for value in cardinalities.get(step_index, ())
-            )
-            actual = sorted(
-                value for cardinalities in after_maps for value in cardinalities.get(step_index, ())
-            )
-            collapsed = len(actual) < len(expected) or any(
-                observed < original for original, observed in zip(expected, actual, strict=False)
-            )
-            if collapsed:
-                msg = (
-                    f"Nested migration for family {route.family.name!r} cannot preserve "
-                    "set cardinality after target wire validation at path "
-                    f"{route.path!r}"
-                )
-                raise InvalidMigrationError(msg)
-
-        child_compiled = route.family._compiled_family()
-        if not child_compiled.nested and not child_compiled.decorator_nested:
-            continue
-        child_input = tuple(
-            value
-            for payload in canonical_input
-            for value, _ in _walk_decorator_payload_candidates(payload, route)
-        )
-        child_validated = tuple(
-            value
-            for payload in canonical_validated
-            for value, _ in _walk_decorator_payload_candidates(payload, route)
-        )
-        _validate_nested_collection_cardinality_payloads(
-            input_payloads=child_input,
-            validated_payloads=child_validated,
+    if found and not _matches_version_label(declared, expected):
+        declared_display = _safe_nested_version_display(
+            declared,
             compiled=child_compiled,
-            parent_label=route.child_label(parent_label),
         )
+        msg = (
+            f"Decorator nested family {route.family.name!r} at path {route.path!r} "
+            f"expects version {expected!r} for parent label {parent_label!r}, "
+            f"but the payload declares {declared_display}"
+        )
+        raise SchemaVersionError(msg)
+    _preflight_nested_version_metadata(
+        payload=raw,
+        compiled=child_compiled,
+        parent_label=expected,
+    )
+    return _normalize_decorator_value(
+        raw,
+        compiled=child_compiled,
+        child_label=expected,
+    )

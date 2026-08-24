@@ -59,6 +59,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collectable, subclasses do not inherit defaults, and a rebuilt replacement
   can atomically take over only after the selected family graph contains an
   invalid compiled component.
+- Corrected the pre-1.0 canonical callback seam so migrations receive detached,
+  validated Python scalars, mapping keys, and exact built-in container kinds;
+  secrets no longer become display masks before a transition, strict models
+  can validate their own values, and JSON conversion occurs only at final
+  target serialization. `use_enum_values=True` repair runs only when the
+  stored raw value cannot validate unchanged; enum-bearing unions preserve an
+  exact raw-compatible arm or fail closed rather than changing Python type.
+  Carrier-backed set and mapping-key equality collapses are rejected at the
+  exact canonical before/core collection branch that loses data, even when an
+  application wrap validator catches the underlying validation error; valid
+  alternate union arms and deliberate application before, plain, after, and
+  wrap validator outputs remain Pydantic-owned. Exact-instance revalidation
+  now preserves excluded state, allowed extras, nested instance policy, and
+  `model_fields_set` before the declared transition projection. Schema-only
+  serializer, computed-field, and JSON Schema subtrees cannot activate runtime
+  bridges, private hash carriers cannot escape through `Any`, and adapted
+  validation fails closed for overridden or wrapped authoritative validation
+  entry points. Historical rendering now removes child version metadata
+  reliably from decorator-discovered families nested through unordered
+  containers, regardless of set iteration order.
 - Scoped generated set-element models and cached render validators to their
   owning compiled family, preventing temporary families from accumulating in
   process-global caches while preserving stable identities and thread-safe

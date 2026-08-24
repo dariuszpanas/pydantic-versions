@@ -126,10 +126,15 @@ class _CompiledDecoratorNestedFamily:
 
 
 class _CompiledFamilyRuntimeCache:
-    __slots__ = ("adapter", "lock")
+    __slots__ = ("adapter", "canonical_adapters", "guarded_adapter", "lock")
 
     def __init__(self) -> None:
         self.adapter: object | None = None
+        self.guarded_adapter: object | None = None
+        self.canonical_adapters: dict[
+            tuple[type[BaseModel], bool, bool],
+            tuple[object, object | None],
+        ] = {}
         self.lock = Lock()
 
 

@@ -35,9 +35,12 @@ from pydantic_versions._runtime_payload import (
     _explicit_runtime_body_model,
     _extract_declared_fields,
     _extract_preflight_fields,
+    _HashableCanonicalMapping,
     _is_concrete_runtime_scalar_annotation,
     _is_runtime_base_model_type,
     _matching_declared_annotation,
+    _preserve_canonical_mapping_copy,
+    _rebuild_canonical_set,
     _runtime_annotation_value,
     _runtime_nested_structural_occurrences,
     _runtime_structural_field_value,
@@ -271,10 +274,9 @@ def _normalize_validated_nested_family_value(
     if isinstance(value, BaseModel):
         value = _extract_declared_fields(value)
     if isinstance(value, list | tuple | set | frozenset):
-        # Transition payloads intentionally use JSON-shaped lists for every
-        # supported collection.  The source wire model already validated each
-        # item, so normalizing here must not invoke child validators again.
-        return [
+        # The source wire model already validated each item, so normalizing
+        # here must not invoke child validators again.
+        normalized_items = [
             _normalize_validated_nested_family_value(
                 item,
                 family=family,
@@ -282,19 +284,33 @@ def _normalize_validated_nested_family_value(
             )
             for item in value
         ]
+        if isinstance(value, list):
+            return normalized_items
+        if isinstance(value, tuple):
+            return tuple(normalized_items)
+        return _rebuild_canonical_set(
+            value,
+            normalized_items,
+            error_message=(
+                f"Nested migration for family {family.name!r} cannot preserve "
+                "set cardinality while normalizing validated values"
+            ),
+        )
     if not isinstance(value, Mapping):
         return value
+    source_mapping = value
     child_compiled = family._compiled_family()
     normalized = _to_current_names(
         child_compiled,
         child_compiled.version(child_label),
         dict(value),
     )
-    return _normalize_validated_explicit_nested_payloads(
+    normalized = _normalize_validated_explicit_nested_payloads(
         payload=normalized,
         compiled=child_compiled,
         parent_label=child_label,
     )
+    return _preserve_canonical_mapping_copy(source_mapping, normalized)
 
 
 def _apply_nested_family_migrations(
@@ -1358,18 +1374,29 @@ def _convert_nested_family_payload(
             )
             for item in payload
         ]
-        if _has_duplicate_payload(converted_items):
-            msg = (
+        return _rebuild_canonical_set(
+            payload,
+            converted_items,
+            error_message=(
                 f"Nested migration for family {family.name!r} "
                 "cannot preserve set cardinality while converting mixed payload values"
-            )
-            raise InvalidMigrationError(msg)
-        try:
-            return type(payload)(converted_items)
-        except TypeError:
-            return converted_items
+            ),
+        )
     if not isinstance(payload, Mapping):
         return payload
+    source_identities = (
+        payload.source_identities if isinstance(payload, _HashableCanonicalMapping) else frozenset()
+    )
+
+    def preserve_source_identity(
+        value: dict[str, Any],
+    ) -> dict[str, Any] | _HashableCanonicalMapping:
+        return (
+            _HashableCanonicalMapping(value, source_identities=source_identities)
+            if source_identities
+            else value
+        )
+
     if source_payload_is_canonical:
         current_payload = dict(payload)
     else:
@@ -1413,7 +1440,7 @@ def _convert_nested_family_payload(
             compiled=compiled,
             target_label=target_label,
         )
-        return current_payload
+        return preserve_source_identity(current_payload)
     if source_index < target_index:
         for edge_index in range(source_index, target_index):
             transition = compiled.transitions[edge_index]
@@ -1461,7 +1488,7 @@ def _convert_nested_family_payload(
         compiled=compiled,
         target_label=target_label,
     )
-    return current_payload
+    return preserve_source_identity(current_payload)
 
 
 def _rebase_canonical_version_metadata(
@@ -1485,6 +1512,7 @@ def _project_nested_family_payloads(
     compiled: _CompiledFamily,
     parent_label: str,
     wire_boundary: bool,
+    guarded_container_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     if not compiled.nested:
         return payload
@@ -1501,6 +1529,7 @@ def _project_nested_family_payloads(
                 model=compiled.model,
                 path=nested.path,
             ),
+            guarded_container_ids=guarded_container_ids,
         )
     return projected
 
@@ -1514,15 +1543,24 @@ def _project_nested_child_family(
     target_label: str,
     wire_boundary: bool,
     collection_kind: Literal["list", "tuple", "set", "frozenset"] | None,
+    guarded_container_ids: set[int] | None,
 ) -> Any:
     def project(nested_payload: Any) -> Any:
-        return _project_nested_family_payload(
+        projected = _project_nested_family_payload(
             family=family,
             payload=nested_payload,
             target_label=target_label,
             wire_boundary=wire_boundary,
             collection_kind=collection_kind,
+            guarded_container_ids=guarded_container_ids,
         )
+        if (
+            guarded_container_ids is not None
+            and collection_kind in {"set", "frozenset"}
+            and isinstance(projected, list | tuple | set | frozenset)
+        ):
+            guarded_container_ids.add(id(projected))
+        return projected
 
     return _transform_declared_payload_at_path(
         payload,
@@ -1539,6 +1577,7 @@ def _project_nested_family_payload(
     target_label: str,
     wire_boundary: bool,
     collection_kind: Literal["list", "tuple", "set", "frozenset"] | None,
+    guarded_container_ids: set[int] | None = None,
 ) -> Any:
     if payload is None:
         return payload
@@ -1550,6 +1589,7 @@ def _project_nested_family_payload(
                 target_label=target_label,
                 wire_boundary=wire_boundary,
                 collection_kind=collection_kind,
+                guarded_container_ids=guarded_container_ids,
             )
             for item in payload
         ]
@@ -1561,24 +1601,37 @@ def _project_nested_family_payload(
                 target_label=target_label,
                 wire_boundary=wire_boundary,
                 collection_kind=collection_kind,
+                guarded_container_ids=guarded_container_ids,
             )
             for item in payload
         )
     if isinstance(payload, set | frozenset):
-        return [
+        projected_items = [
             _project_nested_family_payload(
                 family=family,
                 payload=item,
                 target_label=target_label,
                 wire_boundary=wire_boundary,
                 collection_kind=collection_kind,
+                guarded_container_ids=guarded_container_ids,
             )
             for item in payload
         ]
+        return _rebuild_canonical_set(
+            payload,
+            projected_items,
+            error_message=(
+                f"Nested rendering for family {family.name!r} cannot preserve "
+                "set cardinality while projecting canonical values"
+            ),
+        )
     if isinstance(payload, BaseModel):
         payload = _extract_declared_fields(payload)
     if not isinstance(payload, Mapping):
         return payload
+    source_identities = (
+        payload.source_identities if isinstance(payload, _HashableCanonicalMapping) else frozenset()
+    )
 
     compiled = family._compiled_family()
     metadata = compiled.version_metadata
@@ -1594,6 +1647,7 @@ def _project_nested_family_payload(
         compiled=compiled,
         parent_label=target_label,
         wire_boundary=wire_boundary,
+        guarded_container_ids=guarded_container_ids,
     )
     _rebase_canonical_version_metadata(
         payload=projected,
@@ -1601,15 +1655,28 @@ def _project_nested_family_payload(
         target_label=target_label,
     )
     if not wire_boundary:
-        return projected
+        return (
+            _HashableCanonicalMapping(projected, source_identities=source_identities)
+            if source_identities
+            else projected
+        )
 
-    target_payload = _to_version_names(compiled.version(target_label), projected)
+    target_payload = _to_version_names(
+        compiled.version(target_label),
+        projected,
+        tracked_container_ids=guarded_container_ids,
+        mapping_copy=_preserve_canonical_mapping_copy,
+    )
     if metadata is not None and metadata.owner == "family":
         if collection_kind in ("set", "tuple", "frozenset"):
             _set_version_field(target_payload, metadata.path, target_label)
         else:
             _remove_version_field(target_payload, metadata.path)
-    return target_payload
+    return (
+        _HashableCanonicalMapping(target_payload, source_identities=source_identities)
+        if source_identities
+        else target_payload
+    )
 
 
 def _target_nested_path(

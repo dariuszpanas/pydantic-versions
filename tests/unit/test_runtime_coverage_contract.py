@@ -108,7 +108,7 @@ def test_mapping_render_copies_builtin_containers_and_preserves_canonical_scalar
         {"elapsed": dt.timedelta(seconds=2.5)},
         version="1",
     )
-    assert seen_elapsed == [2.5]
+    assert seen_elapsed == [dt.timedelta(seconds=2.5)]
 
 
 def test_historical_removed_nested_routes_are_conditionally_absent() -> None:

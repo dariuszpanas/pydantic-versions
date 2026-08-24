@@ -282,5 +282,5 @@ The same primitives support several deployments:
   version shared during the rollout.
 
 The integration suite exercises the independent producer/consumer file exchange
-as executable documentation. A future capability or negotiation API should be
-based on repeated real application code rather than required for this workflow.
+as executable documentation. Capability advertisement and negotiation remain
+application-owned; this workflow requires no library transport API.

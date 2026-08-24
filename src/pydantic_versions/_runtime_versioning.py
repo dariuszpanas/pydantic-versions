@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from pydantic import AliasChoices, AliasPath, BaseModel
@@ -17,6 +17,10 @@ from pydantic_versions.exceptions import (
 )
 
 _MISSING = object()
+type _CanonicalMappingCopy = Callable[
+    [Mapping[Any, Any], dict[Any, Any]],
+    Mapping[Any, Any],
+]
 
 
 def _runtime_label(value: object, *, family_name: str) -> str:
@@ -324,12 +328,22 @@ def _to_current_names(
 
 
 def _current_validation_input(
-    model_cls: type[BaseModel], payload: dict[str, Any]
+    model_cls: type[BaseModel],
+    payload: dict[str, Any],
+    *,
+    tracked_container_ids: set[int] | None = None,
+    mapping_copy: _CanonicalMappingCopy | None = None,
 ) -> dict[str, Any]:
     current_payload = dict(payload)
     if model_cls.model_config.get("validate_by_alias", True) is False:
         return current_payload
-    return _normalize_payload_field_aliases(model_cls, current_payload, prefer_aliases=True)
+    return _normalize_payload_field_aliases(
+        model_cls,
+        current_payload,
+        prefer_aliases=True,
+        tracked_container_ids=tracked_container_ids,
+        mapping_copy=mapping_copy,
+    )
 
 
 def _normalize_payload_field_aliases(
@@ -337,8 +351,19 @@ def _normalize_payload_field_aliases(
     payload: Mapping[str, Any],
     *,
     prefer_aliases: bool = False,
+    tracked_container_ids: set[int] | None = None,
+    mapping_copy: _CanonicalMappingCopy | None = None,
 ) -> dict[str, Any]:
-    normalized = {key: _copy_alias_payload_value(value) for key, value in payload.items()}
+    memo: dict[int, Any] = {}
+    normalized = {
+        key: _copy_alias_payload_value(
+            value,
+            tracked_container_ids=tracked_container_ids,
+            mapping_copy=mapping_copy,
+            memo=memo,
+        )
+        for key, value in payload.items()
+    }
     for name, field_info in model_cls.model_fields.items():
         alias_paths = _alias_paths(
             field_info.validation_alias,
@@ -371,14 +396,65 @@ def _normalize_payload_field_aliases(
     return normalized
 
 
-def _copy_alias_payload_value(value: Any) -> Any:
+def _copy_alias_payload_value(
+    value: Any,
+    *,
+    tracked_container_ids: set[int] | None = None,
+    mapping_copy: _CanonicalMappingCopy | None = None,
+    memo: dict[int, Any] | None = None,
+) -> Any:
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
     if isinstance(value, Mapping):
-        return {key: _copy_alias_payload_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_copy_alias_payload_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_copy_alias_payload_value(item) for item in value)
-    return value
+        copied_items: dict[Any, Any] = {}
+        memo[identity] = copied_items
+        copied_items.update(
+            {
+                key: _copy_alias_payload_value(
+                    item,
+                    tracked_container_ids=tracked_container_ids,
+                    mapping_copy=mapping_copy,
+                    memo=memo,
+                )
+                for key, item in value.items()
+            },
+        )
+        copied = copied_items if mapping_copy is None else mapping_copy(value, copied_items)
+        memo[identity] = copied
+    elif isinstance(value, list):
+        copied = []
+        memo[identity] = copied
+        copied.extend(
+            _copy_alias_payload_value(
+                item,
+                tracked_container_ids=tracked_container_ids,
+                mapping_copy=mapping_copy,
+                memo=memo,
+            )
+            for item in value
+        )
+    elif isinstance(value, tuple):
+        # A tuple can participate in a cycle only through a mutable child. Keep
+        # that back-edge authoritative while detaching the ordinary contents.
+        memo[identity] = value
+        copied = tuple(
+            _copy_alias_payload_value(
+                item,
+                tracked_container_ids=tracked_container_ids,
+                mapping_copy=mapping_copy,
+                memo=memo,
+            )
+            for item in value
+        )
+        memo[identity] = copied
+    else:
+        return value
+    if tracked_container_ids is not None and id(value) in tracked_container_ids:
+        tracked_container_ids.add(id(copied))
+    return copied
 
 
 def _alias_paths(
@@ -477,8 +553,16 @@ def _model_metadata_field_name(compiled: _CompiledFamily) -> str:
 def _to_version_names(
     version: _CompiledVersion,
     payload: dict[str, Any],
+    *,
+    tracked_container_ids: set[int] | None = None,
+    mapping_copy: _CanonicalMappingCopy | None = None,
 ) -> dict[str, Any]:
-    normalized = _normalize_payload_field_aliases(version.model, payload)
+    normalized = _normalize_payload_field_aliases(
+        version.model,
+        payload,
+        tracked_container_ids=tracked_container_ids,
+        mapping_copy=mapping_copy,
+    )
     original = dict(normalized)
     versioned = dict(normalized)
     renamed = tuple(
