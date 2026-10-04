@@ -40,7 +40,7 @@ from pydantic.functional_validators import (
     WrapValidator,
 )
 from pydantic_core import PydanticUndefined
-from typing_extensions import NoExtraItems
+from typing_extensions import Format, NoExtraItems, get_annotations
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
 from typing_extensions import is_typeddict as extensions_is_typeddict
 
@@ -308,14 +308,19 @@ def _validate_model_config(family: SchemaFamily[Any]) -> None:
             )
 
 
+def _declares_typed_extras(owner: type[Any]) -> bool:
+    # Deferred annotations may not be cached in the class dictionary. Only their
+    # names matter here, so avoid evaluating unrelated annotation expressions.
+    return "__pydantic_extra__" in get_annotations(owner, format=Format.STRING)
+
+
 def _validate_typed_extras(family: SchemaFamily[Any]) -> None:
     if family.model.model_config.get("extra") != "allow":
         return
     for owner in family.model.__mro__:
         if owner is BaseModel:
             continue
-        annotations = owner.__dict__.get("__annotations__", {})
-        if "__pydantic_extra__" in annotations:
+        if _declares_typed_extras(owner):
             _raise_unsupported(
                 family,
                 "typed extra values cannot be projected automatically",
