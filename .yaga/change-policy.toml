@@ -1,0 +1,6 @@
+change-policy-version = 1
+
+[[rules]]
+name = "python-source-needs-tests"
+when-any = ["src/**/*.py"]
+require-any = ["tests/**/*.py"]

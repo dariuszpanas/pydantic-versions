@@ -24,7 +24,6 @@ concurrency:
 
 env:
   EXPECTED_RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-  UV_VERSION: "0.12.5"
 
 jobs:
   build:
@@ -32,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       prerelease: ${{ steps.release-metadata.outputs.prerelease }}
+      uv-version: ${{ steps.setup-uv.outputs.uv-version }}
     permissions:
       contents: read
     steps:
@@ -48,9 +48,10 @@ jobs:
         run: git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        id: setup-uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: ${{ env.UV_VERSION }}
+          version-file: pyproject.toml
           enable-cache: false
 
       - name: Set up Python
@@ -85,6 +86,8 @@ jobs:
           uv run --no-sync vulture
           uv run --no-sync ty check
           uv run --no-sync mypy --strict tests/typing/schema_family_contract.py
+          uv run --no-sync yaga repo check --plan .yaga/checks/repository.toml --revision HEAD
+          uv run --no-sync yaga workflow lint .github/workflows
           uv run --no-sync pytest --cov=pydantic_versions --cov-report=term
           uv run --no-sync zensical build --strict
 
@@ -112,9 +115,9 @@ jobs:
         package-format: [wheel, sdist]
     steps:
       - name: Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: ${{ env.UV_VERSION }}
+          version: ${{ needs.build.outputs.uv-version }}
           enable-cache: false
 
       - name: Set up Python ${{ matrix.python-version }}

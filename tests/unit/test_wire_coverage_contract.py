@@ -232,7 +232,7 @@ def test_family_document_adapter_rejects_late_malformed_properties_schema() -> N
 
 
 def test_nested_wrapper_schema_metadata_is_snapshotted() -> None:
-    schema_extra = {"x-contract": {"state": "before"}}
+    schema_extra: dict[str, Any] = {"x-contract": {"state": "before"}}
 
     class Child(BaseModel):
         value: int = 1

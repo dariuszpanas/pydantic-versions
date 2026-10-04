@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Adopted YAGA for commit policy, workflow validation, and committed repository
+  checks, replacing the repository-specific commit parser. Authenticated
+  Dependabot PRs skip commit-message rules while retaining all other CI checks.
+- Refreshed locked dependencies and the uv toolchain while preserving the
+  supported Python and Pydantic lower bounds. Corrected adapter return types
+  for current type checkers.
+
 ## [1.0.0] - 2026-08-23
 
 ### Added

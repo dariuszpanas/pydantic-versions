@@ -1,10 +1,10 @@
 <type>[optional scope][!]: <imperative summary>
 
 ; A retained logical commit is the portable change record for Git-only readers.
-; Keep these four column-zero headings exactly once and in this order. One
-; large atomic commit is valid; keep detail proportional to the change.
-; Begin the body here without a nonblank preamble. Raw HTML is not accepted;
-; put literal HTML or comment examples in a fenced code block.
+; These headings are recommended for detailed changes. Small changes may use
+; a short explanatory body instead. YAGA enforces .yaga.toml: an allowed
+; lowercase type, optional lowercase scope, a header up to 100 characters,
+; and at least eight words of prose. Keep detail proportional to the change.
 ## Summary
 
 - <Describe the observable change and why it is needed.>
@@ -25,7 +25,7 @@
 ; Keep multiple independent commands or results as separate top-level `- `
 ; list items. One clean aggregate from one command remains one result. If it
 ; was not run, give a specific reason.
-; Keep every section and remove every template token.
+; Remove unused sections and every template token.
 ; PR metadata supplements this body. Wrap commit prose at about 72 columns;
 ; use natural Markdown without artificial hard wrapping in PR descriptions.
 ; Add `BREAKING CHANGE: <impact and migration>` below Validation when useful.
