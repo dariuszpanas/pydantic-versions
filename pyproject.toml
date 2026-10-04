@@ -56,9 +56,13 @@ dev = [
     "ruff>=0.14.13",
     "ty>=0.0.12",
     "vulture>=2.16",
+    "yaga-cli>=0.2,<0.3",
     "zensical>=0.0.42",
     "twine>=7.0.0",
 ]
+
+[tool.uv]
+required-version = ">=0.12.23"
 
 [tool.ruff]
 line-length = 100

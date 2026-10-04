@@ -1,15 +1,19 @@
 # pydantic-versions Makefile
 # Core development commands for local work and CI parity.
 
+REVISION ?= HEAD
+RANGE ?= origin/main...HEAD
+
 .PHONY: all install format lint typecheck dead-code test test-cov check ci build clean help
 .PHONY: docs-build docs-build-strict docs-serve
+.PHONY: policy-check commit-check change-check workflow-lint
 
 # Default target - run all checks
 all: format lint typecheck dead-code test
 
 # Install dependencies
 install:
-	uv sync
+	uv sync --frozen
 
 # Format code with Ruff
 format:
@@ -36,15 +40,29 @@ test:
 test-cov:
 	uv run pytest --cov=src --cov-report=html --cov-report=term
 
-# Run lint, typecheck, and dead-code analysis (no formatting)
-check:
+# YAGA snapshot policies inspect committed objects; commit edits first.
+policy-check:
+	uv run --frozen yaga repo check --plan .yaga/checks/repository.toml --revision "$(REVISION)"
+
+commit-check:
+	uv run --frozen yaga commit check --commit "$(REVISION)"
+
+change-check:
+	uv run --frozen yaga change check --policy .yaga/change-policy.toml --range "$(RANGE)"
+
+# Requires Docker with Linux containers.
+workflow-lint:
+	uv run --frozen yaga workflow lint .github/workflows
+
+# Run lint, typecheck, dead-code, and repository analysis (no formatting)
+check: policy-check
 	uv run ruff check .
 	uv run ty check
 	uv run mypy --strict tests/typing/schema_family_contract.py
 	uv run vulture
 
 # CI check - all validations without modifications
-ci:
+ci: policy-check workflow-lint
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run ty check
@@ -86,6 +104,10 @@ help:
 	@echo "  typecheck         - Run ty and the external mypy consumer contract"
 	@echo "  dead-code         - Scan production code with Vulture"
 	@echo "  check             - Run lint, typecheck, and dead-code analysis"
+	@echo "  policy-check      - Check workflows and committed repository policies"
+	@echo "  commit-check      - Check one commit message (REVISION=HEAD)"
+	@echo "  change-check      - Require tests with source changes (RANGE=origin/main...HEAD)"
+	@echo "  workflow-lint     - Lint workflows with YAGA (requires Docker)"
 	@echo ""
 	@echo "Testing:"
 	@echo "  test              - Run all tests"

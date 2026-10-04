@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from types import MemberDescriptorType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 from pydantic import (
     BaseModel,
@@ -138,7 +138,7 @@ def _build_family_document_adapter(
             )
 
         @classmethod
-        def _from_document_body(cls, body: BaseModel) -> BaseModel:
+        def _from_document_body(cls, body: BaseModel) -> Self:
             if not isinstance(body, body_model):
                 msg = (
                     f"Explicit wire body validator for family {family.name!r} must "
@@ -177,7 +177,7 @@ def _build_family_document_adapter(
             cls,
             _fields_set: set[str] | None = None,
             **values: Any,
-        ) -> BaseModel:
+        ) -> Self:
             body_values = _copy_without_document_metadata(
                 values,
                 metadata_path=metadata_path,
@@ -392,7 +392,7 @@ def _build_family_document_adapter(
             *,
             update: Mapping[str, Any] | None = None,
             deep: bool = False,
-        ) -> BaseModel:
+        ) -> Self:
             body = object.__getattribute__(
                 self,
                 "_FamilyDocumentAdapterBase__document_body",
@@ -415,7 +415,7 @@ def _build_family_document_adapter(
                     adapter.__dict__[metadata_root] = self.__dict__[metadata_root]
             return adapter
 
-        def __copy__(self) -> BaseModel:
+        def __copy__(self) -> Self:
             return self.model_copy()
 
         def __iter__(self) -> Any:
@@ -432,7 +432,7 @@ def _build_family_document_adapter(
                     synchronize_adapter(value)
             return super().__eq__(other)
 
-        def __deepcopy__(self, memo: dict[int, Any] | None = None) -> BaseModel:
+        def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
             if memo is None:
                 memo = {}
             existing = memo.get(id(self))

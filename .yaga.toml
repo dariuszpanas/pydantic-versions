@@ -1,0 +1,18 @@
+config-version = 1
+
+[commit]
+allowed-types = [
+  "build", "chore", "ci", "docs", "feat", "fix", "perf",
+  "refactor", "release", "revert", "style", "test",
+]
+type-case = "lower"
+scope-policy = "optional"
+scope-case = "lower"
+header-max-length = 100
+description-min-length = 3
+description-ending = "forbid"
+body-policy = "required"
+body-min-words = 8
+dependabot-pull-requests = "skip"
+merge-commits = "reject"
+max-commits = 64

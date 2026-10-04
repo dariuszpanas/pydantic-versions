@@ -175,22 +175,28 @@ def test_production_publish_remains_tag_only_and_precedes_the_github_release() -
     assert "needs: [build, publish-pypi]" in github_release_job
 
 
-def test_commit_message_checkout_does_not_persist_credentials() -> None:
+def test_commit_policy_uses_trusted_base_without_executing_pr_code() -> None:
     workflow = (PROJECT_ROOT / ".github/workflows/commit-messages.yml").read_text(
         encoding="utf-8",
     )
     checkout = workflow.index("uses: actions/checkout@")
-    validation_step = workflow.index("- name: Validate PR title and commits")
+    fetch_step = workflow.index("- name: Fetch and verify PR commits")
+    validation_step = workflow.index("- name: Validate PR title and commits with YAGA")
+    checkout_config = workflow[checkout:fetch_step]
 
     assert (
-        "group: commit-messages-${{ github.event.pull_request.number || github.ref }}" in workflow
+        "group: commit-messages-${{ github.event.pull_request.number }}-"
+        "${{ github.event.pull_request.head.sha }}" in workflow
     )
-    assert "persist-credentials: false" in workflow[checkout:validation_step]
-    assert "github.event.repository.default_branch" in workflow[checkout:validation_step]
-    assert "github.event.pull_request.head.sha" not in workflow[checkout:validation_step]
-    assert "PR_AUTHOR: ${{ github.event.pull_request.user.login }}" in workflow
-    assert "PUSH_ACTOR: ${{ github.actor }}" in workflow
-    assert 'if [ "$PR_AUTHOR" = "dependabot[bot]" ]' in workflow
-    assert 'if [ "$PUSH_ACTOR" = "dependabot[bot]" ]' in workflow
-    assert workflow.count("generated_dependency_flag+=(--allow-generated-dependency)") == 2
-    assert workflow.count('"${generated_dependency_flag[@]}"') == 3
+    assert "pull_request_target:" in workflow
+    assert "  push:" not in workflow
+    assert "contents: read" in workflow
+    assert "persist-credentials: false" in checkout_config
+    assert "fetch-depth: 0" in checkout_config
+    assert "ref:" not in checkout_config
+    assert "repository:" not in checkout_config
+    assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in workflow
+    assert 'git cat-file -e "${PR_BASE_SHA}^{commit}"' in workflow
+    assert "trusted-config: .yaga.toml" in workflow[validation_step:]
+    assert "dariuszpanas/yaga/actions/commit-check@" in workflow[validation_step:]
+    assert "uv sync" not in workflow

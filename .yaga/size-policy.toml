@@ -1,0 +1,11 @@
+size-policy-version = 1
+default-max-blob-bytes = 131072
+max-total-blob-bytes = 8388608
+
+[[path-limits]]
+pattern = "uv.lock"
+max-blob-bytes = 1048576
+
+[[path-limits]]
+pattern = "docs/assets/images/pydantic-versions-hero-transparent.png"
+max-blob-bytes = 1048576

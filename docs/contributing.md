@@ -2,17 +2,24 @@
 
 ## Local setup
 
-Install dependencies:
+Use uv 0.12.23 or newer, as specified by `tool.uv.required-version` in
+`pyproject.toml`.
+Install dependencies from the lockfile:
 
 ```bash
-uv sync
+uv sync --frozen
 ```
 
-Run checks:
+Run checks after committing the candidate changes. `make ci` includes YAGA's
+committed-tree checks and workflow lint, which requires Docker with Linux
+containers:
 
 ```bash
 make ci
 ```
+
+To use a compatible uv without changing a global installation, run
+`uv tool run --from "uv>=0.12.23" uv run make ci`.
 
 ## Development commands
 
@@ -22,6 +29,19 @@ make ci
 - `make dead-code`: scan production code with Vulture and reviewed local exceptions.
 - `make test`: run the test suite.
 - `make docs-build`: build the documentation site.
+- `make policy-check`: run YAGA workflow and committed repository policies;
+  set `REVISION` to inspect a different commit (default: `HEAD`).
+- `make workflow-lint`: lint workflows with YAGA's pinned actionlint image.
+- `make commit-check`: validate one commit with YAGA (`REVISION=HEAD`).
+- `make change-check`: require changed tests alongside changed Python source
+  (`RANGE=origin/main...HEAD`). This checks paths, not test effectiveness.
+
+Repository policy lives in `.yaga/checks/repository.toml` and the referenced
+`.yaga/*-policy.toml` files. Snapshot providers inspect committed modes, paths,
+blob sizes, and required or forbidden files; uncommitted edits are not included.
+Workflow providers inspect the working files for immutable action references,
+permissions, and checkout safety. CI runs these checks against the exact PR head
+alongside the existing tests, typing, docs, security audit, and package build.
 
 ## Commits and pull requests
 
@@ -52,7 +72,7 @@ One large atomic commit is valid. Use proportional detail for small mechanical
 changes and keep unrelated changes in separate logical commits.
 
 The tracked [`.gitmessage`](https://github.com/dariuszpanas/pydantic-versions/blob/main/.gitmessage)
-template requires this layout:
+template recommends this layout for changes needing detailed context:
 
 ```text
 <type>[optional scope][!]: <imperative summary>
@@ -74,23 +94,21 @@ template requires this layout:
 - `<command>`: result
 ```
 
-Human-authored commits must contain those exact column-zero, second-level
-headings once each, in that order, and begin with `## Summary` without a
-nonblank preamble. Every section needs rendered alphanumeric prose or nonempty
-fenced or indented code; punctuation, empty links, and invisible markup are not
-content. Raw HTML tags, comments, and declarations are rejected outside code
-blocks, so put literal HTML examples in fenced code.
+YAGA enforces the shared policy in `.yaga.toml`: an allowed lowercase
+Conventional Commit type, an optional lowercase scope, a header of at most
+100 characters without ending punctuation, and a prose body of at least eight
+words. Merge commits are rejected. The four-section template is authoring
+guidance; YAGA does not enforce section names or interpret validation claims.
+Small changes may use a short explanatory body. Record actual results and keep
+multiple independent validation commands in separate Markdown list items.
 
-Canonical generated Dependabot headers, metadata, and sign-off are the only
-format exception, and the protected workflow enables it only for an event
-authenticated as `dependabot[bot]`; local and ordinary human checks default to
-the four-section policy. Put multiple independent validation commands or
-results in separate top-level `- ` Markdown list items under `## Validation`,
-so rendered history does not collapse them into one paragraph. One clean
-aggregate from one command remains one result. Do not retain template tokens,
-development-only notes such as "address review feedback," a body that merely
-repeats the subject, or validation commands without their result. For work that
-cannot be run locally, state a concrete reason instead of writing a placeholder.
+The required `Commit Messages` workflow reads committed default-branch policy
+and validates the PR title plus every commit in the exact PR range. It fetches
+PR objects without executing PR code. YAGA skips message validation for
+authenticated Dependabot PR events, including security updates, after checking
+event identity and complete Git history. All other CI checks still run. Local
+`yaga commit check` never infers a bot exemption from author names, branches,
+or generated message text.
 
 Wrap ordinary commit prose at about 72 characters so terminal history stays
 readable. This wrapping guidance does not apply to PR descriptions, which should
@@ -105,7 +123,7 @@ git config --worktree commit.template "$(git rev-parse --show-toplevel)/.gitmess
 git config --worktree core.commentChar ";"
 ```
 
-The comment-character setting preserves required `##` headings when Git opens
+The comment-character setting preserves the `##` headings when Git opens
 the template; instructional comments begin with `;` and are removed by Git.
 Keep these settings worktree-scoped: `--local` writes shared repository config
 and can make one linked checkout use another checkout's template path.
@@ -121,7 +139,8 @@ Before pushing, fetch and inspect the exact history the PR would retain:
 ```bash
 git fetch origin
 git log --format=fuller origin/main..HEAD
-uvx --from "uv==0.12.5" uv run --no-sync python scripts/check_conventional_commits.py --range origin/main..HEAD
+uv run --frozen yaga commit check --range origin/main..HEAD
+make change-check
 ```
 
 Compare every material commit body with the PR description. Fold `fixup!` and
