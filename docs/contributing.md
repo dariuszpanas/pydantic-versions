@@ -43,6 +43,16 @@ Workflow providers inspect the working files for immutable action references,
 permissions, and checkout safety. CI runs these checks against the exact PR head
 alongside the existing tests, typing, docs, security audit, and package build.
 
+## Documentation publishing
+
+GitHub's documentation jobs, including the manual **Docs Validation** workflow,
+only validate the site build. Read the Docs publishes the site separately using
+`.readthedocs.yaml`: `latest` follows `main`, while `stable` follows the latest
+release. A failed Read the Docs build leaves the previously published site in
+place, even when GitHub's documentation checks pass. Check the
+[Read the Docs build history](https://app.readthedocs.org/projects/pydantic-versions/builds/)
+when a merged documentation change is not visible.
+
 ## Commits and pull requests
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
