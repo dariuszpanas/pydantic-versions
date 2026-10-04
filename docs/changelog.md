@@ -7,13 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-04
+
+### Fixed
+- Corrected generated document-adapter return annotations to use `Self`,
+  matching Pydantic's model construction and copy contracts in current type
+  checkers. Runtime behavior and the public API are unchanged.
+- Restored Read the Docs publishing with a direct uv bootstrap command and
+  clarified the separate GitHub validation and Read the Docs publishing paths.
+
 ### Changed
 - Adopted YAGA for commit policy, workflow validation, and committed repository
   checks, replacing the repository-specific commit parser. Authenticated
   Dependabot PRs skip commit-message rules while retaining all other CI checks.
-- Refreshed locked dependencies and the uv toolchain while preserving the
-  supported Python and Pydantic lower bounds. Corrected adapter return types
-  for current type checkers.
+- Refreshed the development lockfile, including patched Django and urllib3
+  versions, and updated GitHub Actions dependencies. Python 3.12+ and Pydantic
+  `>=2.12.3,<3.0` remain supported with no migration required.
+- Set the development uv requirement to `>=0.12.23`, allowing newer versions.
+- Updated the pinned development Python runtime from 3.12.14 to 3.12.15.
 
 ## [1.0.0] - 2026-08-23
 
@@ -269,7 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Django Ninja compatibility tests and documentation for versioned API schemas.
 - Added install and getting-started documentation.
 
-[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.1.0...v0.2.0
