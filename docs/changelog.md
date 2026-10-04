@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.1] - 2026-10-04
 
 ### Fixed
+- Preserved typed-extra rejection with Python 3.14+ deferred annotations,
+  including declarations inherited from mixins and nested wrapper models.
 - Corrected generated document-adapter return annotations to use `Self`,
   matching Pydantic's model construction and copy contracts in current type
   checkers. Runtime behavior and the public API are unchanged.

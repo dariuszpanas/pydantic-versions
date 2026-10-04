@@ -38,6 +38,7 @@ from pydantic_versions._wire_contract import (
     _REJECTED_CONFIG_KEYS,
     _TYPE_ALIAS_TYPES,
     _WIRE_CONFIG_KEYS,
+    _declares_typed_extras,
     _first_defining_class,
     _has_effect,
     _is_typed_dict,
@@ -609,7 +610,7 @@ def _validate_ordinary_wrapper_model(
         for base in model.__mro__:
             if base is BaseModel:
                 continue
-            if "__pydantic_extra__" in base.__dict__.get("__annotations__", {}):
+            if _declares_typed_extras(base):
                 _raise_unsupported(owner, f"{context} declares typed extra values")
 
 
