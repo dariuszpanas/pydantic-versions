@@ -15,6 +15,7 @@ from typing import (
     NotRequired,
     TypedDict,
     TypeVar,
+    cast,
 )
 
 import pytest
@@ -184,7 +185,7 @@ class _HistoricalGenericChild[item](BaseModel):
 
 _IncompleteHistoricalChild = create_model(
     "_IncompleteHistoricalChild",
-    value=("_NeverDefinedHistoricalChild", ...),
+    value=(cast(Any, "_NeverDefinedHistoricalChild"), ...),
 )
 
 

@@ -4,7 +4,7 @@
 
 Schema version labels are application wire contracts independent of package releases. Treat names exported from the `pydantic_versions` package root and their documented behavior as the supported API; internal modules and implementation details are not public contracts.
 
-The current supported runtime is Python 3.12 through 3.14 with Pydantic 2.12.3 or newer, but below Pydantic 3. Consult the package metadata and compatibility matrix for the authoritative current range. The documentation URLs below can be requested as Markdown with the `Accept: text/markdown` HTTP header.
+The current supported runtime is Python 3.12 through 3.15. Python 3.12–3.14 requires Pydantic 2.12.3 or newer; Python 3.15 requires Pydantic 2.14.0 or newer. Both ranges stay below Pydantic 3. Consult the package metadata and compatibility matrix for the authoritative current range. The documentation URLs below can be requested as Markdown with the `Accept: text/markdown` HTTP header.
 
 ## Start here
 

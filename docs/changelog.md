@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added Python 3.15 support with CI coverage for locked, minimum, and latest
+  Pydantic versions, plus wheel and source-distribution release checks.
+
+### Changed
+- Require Pydantic `>=2.14.0,<3.0` on Python 3.15, where Pydantic added support
+  for the new interpreter. Python 3.12–3.14 retain `>=2.12.3,<3.0`.
+- Updated the locked Pydantic version to 2.14.0 and its required dependencies.
+
 ## [1.0.1] - 2026-10-04
 
 ### Fixed

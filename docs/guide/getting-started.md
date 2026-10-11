@@ -16,10 +16,10 @@ With `uv`:
 uv add pydantic-versions
 ```
 
-`pydantic-versions` supports Python 3.12 through 3.14 and requires Pydantic
-2.12.3 or newer in the Pydantic v2 release line. Pydantic v1 models, including
-models imported from the `pydantic.v1` compatibility namespace, are not
-supported.
+`pydantic-versions` supports Python 3.12 through 3.15. Python 3.12–3.14
+requires Pydantic 2.12.3 or newer; Python 3.15 requires Pydantic 2.14.0 or
+newer. Both ranges stay below Pydantic 3. Pydantic v1 models, including models
+imported from the `pydantic.v1` compatibility namespace, are not supported.
 
 ## Define the current schema
 

@@ -31,7 +31,9 @@ from pathlib import Path
 from statistics import median
 from time import perf_counter_ns
 from types import GenericAlias
-from typing import Any
+from typing import Any, cast
+
+from typing_extensions import TypeForm
 
 DEFAULT_COUNTS = (100, 500, 1_000)
 DEFAULT_UNION_ROUTES = 16
@@ -107,7 +109,7 @@ def _build_occurrence_case(count: int) -> _BenchmarkCase:
 
     parent = create_model(
         "BenchmarkOccurrenceParent",
-        items=(GenericAlias(list, child), ...),
+        items=(cast(TypeForm[Any], GenericAlias(list, child)), ...),
     )
     parent = versioned_schema(
         name="benchmark_occurrence_parent",
@@ -201,7 +203,7 @@ def _build_union_case(route_count: int, values_per_route: int) -> _BenchmarkCase
     union_annotation = reduce(or_, children)
     parent = create_model(
         "BenchmarkUnionParent",
-        items=(GenericAlias(list, union_annotation), ...),
+        items=(cast(TypeForm[Any], GenericAlias(list, union_annotation)), ...),
     )
     parent = versioned_schema(
         name="benchmark_union_parent",

@@ -166,12 +166,18 @@ jobs:
           - python-version: "3.14"
             pydantic-profile: locked
             pydantic-spec: ""
+          - python-version: "3.15"
+            pydantic-profile: locked
+            pydantic-spec: ""
           - python-version: "3.12"
             pydantic-profile: "2.12.3"
             pydantic-spec: "pydantic==2.12.3"
-          - python-version: "3.14"
+          - python-version: "3.15"
+            pydantic-profile: "2.14.0"
+            pydantic-spec: "pydantic==2.14.0"
+          - python-version: "3.15"
             pydantic-profile: latest
-            pydantic-spec: "pydantic>=2.12.3,<3.0"
+            pydantic-spec: "pydantic>=2.14.0,<3.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -201,6 +207,8 @@ jobs:
           PACKAGES=("$PYDANTIC_SPEC")
           if [ "$PYDANTIC_PROFILE" = "2.12.3" ]; then
             PACKAGES+=("annotated-types==0.6.0" "typing-extensions==4.14.1")
+          elif [ "$PYDANTIC_PROFILE" = "2.14.0" ]; then
+            PACKAGES+=("annotated-types==0.6.0" "typing-extensions==4.16.0")
           fi
           uv pip install \
             --python .venv/bin/python \
@@ -225,6 +233,7 @@ jobs:
 
           expected_python = tuple(map(int, os.environ["EXPECTED_PYTHON"].split(".")))
           assert sys.version_info[:2] == expected_python, sys.version
+          assert sys.version_info.releaselevel == "final", sys.version
 
           actual_pydantic = version("pydantic")
           profile = os.environ["PYDANTIC_PROFILE"]
@@ -243,9 +252,13 @@ jobs:
               assert actual_pydantic == "2.12.3", actual_pydantic
               assert version("annotated-types") == "0.6.0"
               assert version("typing-extensions") == "4.14.1"
+          elif profile == "2.14.0":
+              assert actual_pydantic == "2.14.0", actual_pydantic
+              assert version("annotated-types") == "0.6.0"
+              assert version("typing-extensions") == "4.16.0"
           else:
               release = tuple(map(int, actual_pydantic.split(".")[:3]))
-              assert (2, 12, 3) <= release < (3, 0, 0), actual_pydantic
+              assert (2, 14, 0) <= release < (3, 0, 0), actual_pydantic
 
           print(f"Python {sys.version.split()[0]}, Pydantic {actual_pydantic} ({profile})")
           PY
