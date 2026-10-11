@@ -1,17 +1,32 @@
 from __future__ import annotations
 
-from typing import Any, ForwardRef, cast
+from typing import Any, ForwardRef, cast, get_args
 
 import pytest
 from pydantic import BaseModel
 
 from pydantic_versions import SchemaFamily, SchemaVersion, UnsupportedWireModelError
 from pydantic_versions._wire_contract import (
+    _evaluate_owner_forward_ref,
     _is_exact_module_member,
     _is_typing_reflection_owner,
     _validate_type_alias,
     _wire_field_attributes,
 )
+
+
+def test_forward_reference_resolution_uses_both_annotation_namespaces() -> None:
+    class LocalPayload(BaseModel):
+        value: int
+
+    resolved = _evaluate_owner_forward_ref(
+        "MappingType[str, LocalPayload]",
+        globals_dict={"MappingType": dict},
+        localns={"LocalPayload": LocalPayload},
+    )
+
+    assert resolved == dict[str, LocalPayload]
+    assert get_args(resolved) == (str, LocalPayload)
 
 
 def _family() -> SchemaFamily[BaseModel]:

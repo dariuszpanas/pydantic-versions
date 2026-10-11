@@ -23,7 +23,7 @@ from pydantic import (
 )
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic.json_schema import DEFAULT_REF_TEMPLATE, GenerateJsonSchema, JsonSchemaMode
-from typing_extensions import TypeVar
+from typing_extensions import TypeForm, TypeVar
 
 from pydantic_versions import (
     NestedFamily,
@@ -768,7 +768,7 @@ def test_explicit_wire_model_may_replace_a_nested_leaf_with_a_scalar(
     historical_annotation = historical_child | str if union_arm else str
     historical_parent = create_model(
         f"Explicit{case.title()}LeafHistoricalParent",
-        child=(historical_annotation, ...),
+        child=(cast(TypeForm[Any], historical_annotation), ...),
     )
 
     def upgrade(data: dict[str, Any]) -> dict[str, Any]:
@@ -1157,7 +1157,7 @@ def test_explicit_union_wrapper_prunes_nested_family_metadata() -> None:
     )
     historical_parent = create_model(
         "ExplicitUnionMetadataHistoricalParent",
-        wrapper=(historical_wrapper | str, ...),
+        wrapper=(cast(TypeForm[Any], historical_wrapper | str), ...),
     )
     family = SchemaFamily(
         model=Parent,
@@ -1201,7 +1201,7 @@ def test_explicit_union_wrapper_uses_its_validated_scalar_arm() -> None:
     )
     historical_parent = create_model(
         "ExplicitScalarUnionHistoricalParent",
-        wrapper=(historical_wrapper | str, ...),
+        wrapper=(cast(TypeForm[Any], historical_wrapper | str), ...),
     )
 
     def upgrade(data: dict[str, Any]) -> dict[str, Any]:
@@ -1528,6 +1528,7 @@ def test_projected_wrapper_default_omits_non_wire_fields() -> None:
     historical = family.model_for("1")
 
     wrapper_wire = historical.model_fields["wrapper"].annotation
+    assert isinstance(wrapper_wire, type) and issubclass(wrapper_wire, BaseModel)
     assert set(wrapper_wire.model_fields) == {"child"}
     assert historical().model_dump() == {"wrapper": {"child": {"legacy_value": 5}}}
 
@@ -1560,7 +1561,7 @@ def test_projected_wrapper_subtype_does_not_execute_a_missing_base_factory() -> 
     wrapper_without_generated = create_model(
         "WrapperWithoutGenerated",
         __base__=Wrapper,
-        generated=(ClassVar[list[int]], []),
+        generated=(cast(Any, ClassVar[list[int]]), []),
     )
 
     class Parent(BaseModel):

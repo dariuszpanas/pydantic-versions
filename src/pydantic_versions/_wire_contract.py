@@ -672,9 +672,8 @@ def _evaluate_owner_forward_ref(
     localns: dict[str, Any],
 ) -> Any:
     reference = ForwardRef(value)
-    evaluate = getattr(reference, "evaluate", None)
-    if evaluate is not None:
-        return evaluate(globals=globals_dict, locals=localns)
+    if sys.version_info >= (3, 14):
+        return reference.evaluate(globals=globals_dict, locals=localns)
     return reference._evaluate(
         globalns=globals_dict,
         localns=localns,

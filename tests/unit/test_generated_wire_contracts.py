@@ -1365,7 +1365,9 @@ def test_nested_family_owned_discriminator_is_an_exact_literal_document_wrapper(
     for label in ("1", "2"):
         wire = family.model_for(label)
         meta_model = wire.model_fields["meta"].annotation
+        assert isinstance(meta_model, type) and issubclass(meta_model, BaseModel)
         details_model = meta_model.model_fields["details"].annotation
+        assert isinstance(details_model, type) and issubclass(details_model, BaseModel)
 
         _assert_exact_version_field(details_model, field_name="version", label=label)
         assert wire.model_validate({}).model_dump()["meta"] == {"details": {"version": label}}
@@ -1709,6 +1711,7 @@ def test_nested_projection_omits_excluded_application_fields() -> None:
     wire = family.model_for("1")
     nested_wire = wire.model_fields["inner"].annotation
 
+    assert isinstance(nested_wire, type) and issubclass(nested_wire, BaseModel)
     assert set(nested_wire.model_fields) == {"value", "child"}
     assert wire.model_validate({"inner": {"value": 3, "child": {"label": 4}}}).model_dump() == {
         "inner": {"value": 3, "child": {"label": 4}},

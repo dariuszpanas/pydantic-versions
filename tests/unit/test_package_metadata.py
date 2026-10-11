@@ -2,6 +2,9 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+from packaging.requirements import Requirement
+
 ROOT = Path(__file__).parents[2]
 README = ROOT / "README.md"
 LLMS_TXT = ROOT / "docs" / "llms.txt"
@@ -19,9 +22,41 @@ def test_runtime_dependencies_match_direct_production_requirements() -> None:
 
     assert pyproject["project"]["dependencies"] == [
         "annotated-types>=0.6.0",
-        "pydantic>=2.12.3,<3.0",
+        "pydantic>=2.12.3,<3.0; python_version < '3.15'",
+        "pydantic>=2.14.0,<3.0; python_version >= '3.15'",
         "typing-extensions>=4.14.1",
     ]
+
+
+@pytest.mark.parametrize(
+    ("python_version", "minimum", "older"),
+    [
+        ("3.12", "2.12.3", "2.12.2"),
+        ("3.13", "2.12.3", "2.12.2"),
+        ("3.14", "2.12.3", "2.12.2"),
+        ("3.15", "2.14.0", "2.13.5"),
+    ],
+)
+def test_pydantic_requirement_selects_the_supported_python_floor(
+    python_version: str, minimum: str, older: str
+) -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requirements = [Requirement(value) for value in pyproject["project"]["dependencies"]]
+    active = [
+        requirement
+        for requirement in requirements
+        if requirement.name == "pydantic"
+        and (
+            requirement.marker is None
+            or requirement.marker.evaluate({"python_version": python_version})
+        )
+    ]
+
+    assert len(active) == 1
+    assert minimum in active[0].specifier
+    assert older not in active[0].specifier
+    assert "2.14.0" in active[0].specifier
+    assert "3.0.0" not in active[0].specifier
 
 
 def test_readme_uses_a_non_redirecting_documentation_badge_for_pypi() -> None:

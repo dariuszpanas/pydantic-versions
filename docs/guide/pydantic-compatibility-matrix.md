@@ -1,9 +1,23 @@
 # Pydantic Compatibility Matrix
 
-This matrix is the generated-wire policy for the supported Pydantic range
-`>=2.12.3,<3.0`. It classifies settings by whether they can be copied into an
+This matrix describes supported runtime combinations and the generated-wire
+policy. It classifies settings by whether they can be copied into an
 object-shaped document contract without running application behavior or
 silently changing validation and serialization semantics.
+
+## Supported runtimes
+
+| Python | Pydantic |
+| --- | --- |
+| 3.12, 3.13, 3.14 | `>=2.12.3,<3.0` |
+| 3.15 | `>=2.14.0,<3.0` |
+
+Pydantic 2.14 adds Python 3.15 support. The higher floor applies only to
+Python 3.15; existing Python versions retain their Pydantic 2.12.3 floor.
+CI runs the locked dependencies on each Python minor, both minimum Pydantic
+combinations, and the latest allowed Pydantic release on Python 3.15. Release
+validation installs and tests both the wheel and source distribution on each
+supported Python minor.
 
 ## Field declarations
 
