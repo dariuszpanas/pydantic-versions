@@ -38,6 +38,6 @@ jobs:
           git cat-file -e "${PR_BASE_SHA}^{commit}"
 
       - name: Validate PR title and commits with YAGA
-        uses: dariuszpanas/yaga/actions/commit-check@f61bbfa878447157239bb92ff67977bd64400afd # v0.2.0
+        uses: dariuszpanas/yaga/actions/commit-check@8deb981c3af0b0f9f3ffd5be3d08184e9d2a9491 # v0.2.1
         with:
           trusted-config: .yaga.toml
