@@ -19,6 +19,7 @@ from pydantic_core import (
 )
 
 from pydantic_versions._runtime_payload import (
+    _ATOMIC_SCALAR_TYPES,
     _canonical_source_identities,
     _extract_declared_fields,
     _HashableCanonicalMapping,
@@ -124,16 +125,19 @@ def _validate_canonical_model[T: BaseModel](
         guard_collections=guard_collections,
         materialized_models=bool(materialized_model_ids),
     )
-    if adapter is not None:
-        _ensure_canonical_validation_supported(model)
+    if adapter is None:
+        try:
+            return model.model_validate(validation_payload, by_name=by_name)
+        except ValidationError as exc:
+            _raise_canonical_migration_error(exc)
+            raise
+    _ensure_canonical_validation_supported(model)
     union_token = _CANONICAL_UNION_FRAMES.set(())
     choice_token = _CANONICAL_CHOICE_FRAMES.set(())
     application_token = _CANONICAL_APPLICATION_FRAMES.set(())
     model_token = _MATERIALIZED_MODEL_IDS.set(materialized_model_ids)
     container_token = _MATERIALIZED_CONTAINER_IDS.set(materialized_container_ids)
     try:
-        if adapter is None:
-            return model.model_validate(validation_payload, by_name=by_name)
         return cast(
             T,
             adapter.validate_python(validation_payload, by_name=by_name),
@@ -213,6 +217,9 @@ def _canonical_validation_adapter(
     core_schema_identity = model.__pydantic_core_schema__
     cache_key = (model, guard_collections, materialized_models)
     if cache is not None:
+        cached = cache.canonical_adapters.get(cache_key)
+        if cached is not None and cached[0] is core_schema_identity:
+            return cast(SchemaValidator | None, cached[1])
         with cache.lock:
             cached = cache.canonical_adapters.get(cache_key)
             if cached is not None and cached[0] is core_schema_identity:
@@ -636,23 +643,47 @@ def _validate_canonical_union(value: Any, handler: Any) -> Any:
 
 
 def _contains_hashable_canonical_mapping(value: Any) -> bool:
+    value_type = type(value)
+    if value_type in _ATOMIC_SCALAR_TYPES:
+        return False
+    if value_type is _HashableCanonicalMapping or isinstance(value, _HashableCanonicalMapping):
+        return True
+    if value_type not in (dict, list, tuple, set, frozenset) and not isinstance(
+        value,
+        Mapping | list | tuple | set | frozenset,
+    ):
+        return False
     pending = [value]
     seen: set[int] = set()
     while pending:
         current = pending.pop()
-        if isinstance(current, _HashableCanonicalMapping):
+        current_type = type(current)
+        if current_type in _ATOMIC_SCALAR_TYPES:
+            continue
+        if current_type is _HashableCanonicalMapping or isinstance(
+            current,
+            _HashableCanonicalMapping,
+        ):
             return True
-        if not isinstance(current, Mapping | list | tuple | set | frozenset):
+        if current_type not in (dict, list, tuple, set, frozenset) and not isinstance(
+            current,
+            Mapping | list | tuple | set | frozenset,
+        ):
             continue
         identity = id(current)
         if identity in seen:
             continue
         seen.add(identity)
-        if isinstance(current, Mapping):
-            pending.extend(current.keys())
-            pending.extend(current.values())
+        if current_type is dict or isinstance(current, Mapping):
+            for key, item in current.items():
+                if type(key) not in _ATOMIC_SCALAR_TYPES:
+                    pending.append(key)
+                if type(item) not in _ATOMIC_SCALAR_TYPES:
+                    pending.append(item)
         else:
-            pending.extend(current)
+            for item in current:
+                if type(item) not in _ATOMIC_SCALAR_TYPES:
+                    pending.append(item)
     return False
 
 

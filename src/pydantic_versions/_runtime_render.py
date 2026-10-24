@@ -66,6 +66,9 @@ def _current_wire_validation_adapter(
 
     _ensure_canonical_validation_supported(compiled.model)
     cache = compiled._runtime_cache
+    cached = cache.guarded_adapter if guard_collections else cache.adapter
+    if cached is not None:
+        return cast(SchemaValidator, cached)
     with cache.lock:
         adapter = cache.guarded_adapter if guard_collections else cache.adapter
         if adapter is None:

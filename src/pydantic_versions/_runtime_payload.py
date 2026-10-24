@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+from dataclasses import dataclass, is_dataclass
 from dataclasses import fields as dataclass_fields
-from dataclasses import is_dataclass
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
 from types import NoneType, UnionType
 from typing import (
     Annotated,
@@ -20,6 +24,8 @@ from typing import (
 )
 from typing import TypeAliasType as StdlibTypeAliasType
 from typing import is_typeddict as stdlib_is_typeddict
+from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
@@ -33,6 +39,38 @@ from pydantic_versions._runtime_versioning import (
 from pydantic_versions.exceptions import InvalidMigrationError
 
 _TYPE_ALIAS_TYPES = (StdlibTypeAliasType, ExtensionsTypeAliasType)
+_ATOMIC_SCALAR_TYPES = {str, int, float, bool, bytes, NoneType}
+_FAST_SCALAR_TYPES = {
+    str,
+    int,
+    float,
+    bool,
+    bytes,
+    NoneType,
+    dt.datetime,
+    dt.date,
+    dt.time,
+    dt.timedelta,
+    Decimal,
+    Path,
+    UUID,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _CompiledFieldExtractionPlan:
+    name: str
+    annotation: Any
+    fast_scalar_type: type[Any] | None = None
+    allows_none: bool = False
+    model_type: type[BaseModel] | None = None
+    list_model_type: type[BaseModel] | None = None
+
+
+_MODEL_EXTRACTION_PLANS: WeakKeyDictionary[
+    type[BaseModel],
+    tuple[int, tuple[_CompiledFieldExtractionPlan, ...]],
+] = WeakKeyDictionary()
 
 
 class _HashableCanonicalMapping(MutableMapping[Any, Any]):
@@ -234,6 +272,83 @@ def _detach_revalidation_value(value: Any, *, memo: dict[int, Any]) -> Any:
     return value
 
 
+def _model_extraction_plans(
+    model: type[BaseModel],
+) -> tuple[_CompiledFieldExtractionPlan, ...]:
+    schema_id = id(model.__pydantic_core_schema__)
+    cached = _MODEL_EXTRACTION_PLANS.get(model)
+    if cached is not None and cached[0] == schema_id:
+        return cached[1]
+    plans: list[_CompiledFieldExtractionPlan] = []
+    for name, field_info in model.model_fields.items():
+        if not _field_crosses_wire_boundary(field_info):
+            continue
+        plans.append(_build_field_extraction_plan(name, field_info.annotation))
+    compiled_plans = tuple(plans)
+    _MODEL_EXTRACTION_PLANS[model] = (schema_id, compiled_plans)
+    return compiled_plans
+
+
+def _build_field_extraction_plan(
+    name: str,
+    annotation: Any,
+) -> _CompiledFieldExtractionPlan:
+    normalized = _runtime_annotation_value(annotation)
+    origin = get_origin(normalized)
+    allows_none = False
+    candidate = normalized
+    candidate_origin = origin
+    if origin in (Union, UnionType):
+        arguments = get_args(normalized)
+        non_none = tuple(
+            _runtime_annotation_value(argument)
+            for argument in arguments
+            if argument is not NoneType
+        )
+        if len(non_none) == 1 and NoneType in arguments:
+            allows_none = True
+            candidate = non_none[0]
+            candidate_origin = get_origin(candidate)
+    if candidate_origin is None and isinstance(candidate, type):
+        if candidate in _FAST_SCALAR_TYPES or (
+            issubclass(candidate, Enum)
+            and not issubclass(
+                candidate,
+                BaseModel | Mapping | list | tuple | set | frozenset,
+            )
+            and not is_dataclass(candidate)
+            and not _is_typed_dict(candidate)
+        ):
+            return _CompiledFieldExtractionPlan(
+                name=name,
+                annotation=annotation,
+                fast_scalar_type=candidate,
+                allows_none=allows_none,
+            )
+        if _is_runtime_base_model_type(candidate):
+            return _CompiledFieldExtractionPlan(
+                name=name,
+                annotation=annotation,
+                allows_none=allows_none,
+                model_type=candidate,
+            )
+    if candidate_origin is list:
+        arguments = get_args(candidate)
+        if len(arguments) == 1:
+            item_annotation = _runtime_annotation_value(arguments[0])
+            if get_origin(item_annotation) is None and _is_runtime_base_model_type(item_annotation):
+                return _CompiledFieldExtractionPlan(
+                    name=name,
+                    annotation=annotation,
+                    allows_none=allows_none,
+                    list_model_type=item_annotation,
+                )
+    return _CompiledFieldExtractionPlan(
+        name=name,
+        annotation=annotation,
+    )
+
+
 @overload
 def _extract_declared_fields(
     value: BaseModel,
@@ -270,16 +385,62 @@ def _extract_declared_fields(
     active_ids.add(identity)
     try:
         selected_model = type(value) if declared_model is None else declared_model
-        fields = selected_model.model_fields
-        extracted = {
-            name: _extract_declared_value(
-                value.__dict__[name],
-                annotation=field_info.annotation,
+        instance_dict = value.__dict__
+        extracted: dict[str, Any] = {}
+        for plan in _model_extraction_plans(selected_model):
+            if plan.name not in instance_dict:
+                continue
+            field_value = instance_dict[plan.name]
+            if plan.fast_scalar_type is not None and (
+                type(field_value) is plan.fast_scalar_type
+                or (plan.allows_none and field_value is None)
+                or type(field_value) in _ATOMIC_SCALAR_TYPES
+            ):
+                extracted[plan.name] = field_value
+                continue
+            if plan.model_type is not None:
+                if plan.allows_none and field_value is None:
+                    extracted[plan.name] = None
+                    continue
+                if isinstance(field_value, plan.model_type):
+                    extracted[plan.name] = _extract_declared_fields(
+                        field_value,
+                        declared_model=plan.model_type,
+                        _active_ids=active_ids,
+                    )
+                    continue
+            if plan.list_model_type is not None:
+                if plan.allows_none and field_value is None:
+                    extracted[plan.name] = None
+                    continue
+                if type(field_value) is list and all(
+                    isinstance(item, plan.list_model_type) for item in field_value
+                ):
+                    list_identity = id(field_value)
+                    if list_identity in active_ids:
+                        msg = (
+                            "Canonical extraction cannot preserve cyclic model "
+                            "or container references"
+                        )
+                        raise InvalidMigrationError(msg)
+                    active_ids.add(list_identity)
+                    try:
+                        extracted[plan.name] = [
+                            _extract_declared_fields(
+                                item,
+                                declared_model=plan.list_model_type,
+                                _active_ids=active_ids,
+                            )
+                            for item in field_value
+                        ]
+                    finally:
+                        active_ids.remove(list_identity)
+                    continue
+            extracted[plan.name] = _extract_declared_value(
+                field_value,
+                annotation=plan.annotation,
                 _active_ids=active_ids,
             )
-            for name, field_info in fields.items()
-            if name in value.__dict__ and _field_crosses_wire_boundary(field_info)
-        }
         return (
             _HashableCanonicalMapping(extracted, source_identities=(identity,))
             if hash_required
@@ -296,9 +457,17 @@ def _extract_declared_value(
     hash_required: bool = False,
     _active_ids: set[int] | None = None,
 ) -> Any:
-    guarded = not isinstance(value, BaseModel) and (
-        isinstance(value, Mapping | list | tuple | set | frozenset) or is_dataclass(value)
-    )
+    value_type = type(value)
+    if value_type in _ATOMIC_SCALAR_TYPES and (
+        annotation is None or value_type is annotation or annotation in _FAST_SCALAR_TYPES
+    ):
+        return value
+    if value_type in (dict, list, tuple, set, frozenset):
+        guarded = True
+    elif isinstance(value, BaseModel) or value_type in _FAST_SCALAR_TYPES:
+        guarded = False
+    else:
+        guarded = isinstance(value, Mapping | list | tuple | set | frozenset) or is_dataclass(value)
     if not guarded:
         return _extract_declared_value_unchecked(
             value,
@@ -351,8 +520,14 @@ def _extract_declared_value_unchecked(
             declared_model=declared_model,
             _active_ids=_active_ids,
         )
+    value_type = type(value)
     structure = _runtime_structural_fields(declared_annotation)
-    if structure is None and is_dataclass(value):
+    if (
+        structure is None
+        and value_type not in (dict, list, tuple, set, frozenset)
+        and value_type not in _FAST_SCALAR_TYPES
+        and is_dataclass(value)
+    ):
         structure = _single_declared_dataclass_structure(declared_annotation)
     if structure is not None and structure[0] != "model":
         kind, owner, field_annotations, _required = structure
@@ -381,7 +556,7 @@ def _extract_declared_value_unchecked(
             if hash_required
             else extracted
         )
-    if isinstance(value, Mapping):
+    if value_type is dict or isinstance(value, Mapping):
         arguments = get_args(declared_annotation)
         key_annotation = arguments[0] if len(arguments) == 2 else None
         item_annotation = arguments[1] if len(arguments) == 2 else None
@@ -410,7 +585,7 @@ def _extract_declared_value_unchecked(
             msg = "Canonical extraction cannot preserve mapping key cardinality"
             raise InvalidMigrationError(msg)
         return _HashableCanonicalMapping(extracted) if hash_required else extracted
-    if isinstance(value, list):
+    if value_type is list or isinstance(value, list):
         arguments = get_args(declared_annotation)
         item_annotation = arguments[0] if arguments else None
         return [
@@ -421,7 +596,7 @@ def _extract_declared_value_unchecked(
             )
             for item in value
         ]
-    if isinstance(value, tuple):
+    if value_type is tuple or isinstance(value, tuple):
         arguments = get_args(declared_annotation)
         if len(arguments) > 1 and arguments[-1] is not Ellipsis:
             item_annotations = arguments[: len(value)] + (None,) * max(
@@ -600,14 +775,13 @@ def _is_typed_dict(annotation: Any) -> bool:
 def _runtime_annotation_value(annotation: Any) -> Any:
     normalized = annotation
     while True:
-        stripped = _strip_annotated(normalized)
-        if stripped is not normalized:
-            normalized = stripped
+        origin = get_origin(normalized)
+        if origin is Annotated:
+            normalized = get_args(normalized)[0]
             continue
         if isinstance(normalized, _TYPE_ALIAS_TYPES):
             normalized = normalized.__value__
             continue
-        origin = get_origin(normalized)
         if isinstance(origin, _TYPE_ALIAS_TYPES):
             arguments = get_args(normalized)
             replacements = list(zip(origin.__type_params__, arguments, strict=False))
@@ -908,6 +1082,15 @@ def _runtime_structural_fields(
     ]
     | None
 ):
+    if (
+        annotation is None
+        or annotation in _FAST_SCALAR_TYPES
+        or annotation in (dict, list, tuple, set, frozenset, Any, object)
+    ):
+        return None
+    fast_origin = get_origin(annotation)
+    if fast_origin in (dict, list, tuple, set, frozenset, Literal, Union, UnionType):
+        return None
     normalized = _runtime_annotation_value(annotation)
     if _is_runtime_base_model_type(normalized):
         fields = {name: field.annotation for name, field in normalized.model_fields.items()}
@@ -1090,11 +1273,14 @@ def _extract_preflight_value(
     *,
     preserve_nested_models: bool,
 ) -> Any:
+    value_type = type(value)
+    if value_type in _FAST_SCALAR_TYPES:
+        return value
     if isinstance(value, BaseModel):
         if preserve_nested_models:
             return value
         return _extract_preflight_fields(value)
-    if isinstance(value, Mapping):
+    if value_type is dict or isinstance(value, Mapping):
         return {
             key: _extract_preflight_value(
                 item,
@@ -1102,7 +1288,10 @@ def _extract_preflight_value(
             )
             for key, item in value.items()
         }
-    if isinstance(value, list | tuple | set | frozenset):
+    if value_type in (list, tuple, set, frozenset) or isinstance(
+        value,
+        list | tuple | set | frozenset,
+    ):
         return tuple(
             _extract_preflight_value(
                 item,
