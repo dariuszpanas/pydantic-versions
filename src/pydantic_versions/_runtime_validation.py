@@ -19,7 +19,7 @@ from pydantic_core import (
 )
 
 from pydantic_versions._runtime_payload import (
-    _ATOMIC_SCALAR_TYPES,
+    _FAST_SCALAR_TYPES,
     _canonical_source_identities,
     _extract_declared_fields,
     _HashableCanonicalMapping,
@@ -644,8 +644,14 @@ def _validate_canonical_union(value: Any, handler: Any) -> Any:
 
 def _contains_hashable_canonical_mapping(value: Any) -> bool:
     value_type = type(value)
-    if value_type in _ATOMIC_SCALAR_TYPES:
+    if value_type in _FAST_SCALAR_TYPES:
         return False
+    if value_type is dict:
+        for key, item in value.items():
+            if type(key) not in _FAST_SCALAR_TYPES or type(item) not in _FAST_SCALAR_TYPES:
+                break
+        else:
+            return False
     if value_type is _HashableCanonicalMapping or isinstance(value, _HashableCanonicalMapping):
         return True
     if value_type not in (dict, list, tuple, set, frozenset) and not isinstance(
@@ -658,7 +664,7 @@ def _contains_hashable_canonical_mapping(value: Any) -> bool:
     while pending:
         current = pending.pop()
         current_type = type(current)
-        if current_type in _ATOMIC_SCALAR_TYPES:
+        if current_type in _FAST_SCALAR_TYPES:
             continue
         if current_type is _HashableCanonicalMapping or isinstance(
             current,
@@ -676,13 +682,13 @@ def _contains_hashable_canonical_mapping(value: Any) -> bool:
         seen.add(identity)
         if current_type is dict or isinstance(current, Mapping):
             for key, item in current.items():
-                if type(key) not in _ATOMIC_SCALAR_TYPES:
+                if type(key) not in _FAST_SCALAR_TYPES:
                     pending.append(key)
-                if type(item) not in _ATOMIC_SCALAR_TYPES:
+                if type(item) not in _FAST_SCALAR_TYPES:
                     pending.append(item)
         else:
             for item in current:
-                if type(item) not in _ATOMIC_SCALAR_TYPES:
+                if type(item) not in _FAST_SCALAR_TYPES:
                     pending.append(item)
     return False
 

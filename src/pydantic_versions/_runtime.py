@@ -150,63 +150,69 @@ def _validate_family[T: BaseModel](
         compiled=compiled,
         label=source_version,
     )
-    _preflight_nested_version_metadata(
-        payload=source_model,
-        compiled=compiled,
-        parent_label=source_version,
-    )
-    decorator_selections = _select_decorator_routes(
-        source_model,
-        compiled=compiled,
-        parent_label=source_version,
-        source_version=source,
-    )
-    _preflight_selected_decorator_version_metadata(
-        payload=data,
-        compiled=compiled,
-        parent_label=source_version,
-        selections=decorator_selections,
-    )
+    has_nested = bool(compiled.nested or compiled.decorator_nested)
+    if has_nested:
+        _preflight_nested_version_metadata(
+            payload=source_model,
+            compiled=compiled,
+            parent_label=source_version,
+        )
+        decorator_selections = _select_decorator_routes(
+            source_model,
+            compiled=compiled,
+            parent_label=source_version,
+            source_version=source,
+        )
+        _preflight_selected_decorator_version_metadata(
+            payload=data,
+            compiled=compiled,
+            parent_label=source_version,
+            selections=decorator_selections,
+        )
+    else:
+        decorator_selections = ()
     payload = _to_current_names(
         compiled,
         source,
         _extract_declared_fields(source_model, declared_model=source.model),
     )
     nested_payload_is_canonical = source.wire_model_kind != "explicit"
-    if nested_payload_is_canonical:
-        payload = _normalize_validated_explicit_nested_payloads(
+    if has_nested:
+        if nested_payload_is_canonical:
+            payload = _normalize_validated_explicit_nested_payloads(
+                payload=payload,
+                compiled=compiled,
+                parent_label=source_version,
+            )
+        payload = _normalize_selected_decorator_payloads(
             payload=payload,
-            compiled=compiled,
+            selections=decorator_selections,
             parent_label=source_version,
         )
-    payload = _normalize_selected_decorator_payloads(
-        payload=payload,
-        selections=decorator_selections,
-        parent_label=source_version,
-    )
 
     migrations_applied: list[tuple[str, str]] = []
     source_index = compiled.index(source_version)
     for transition in compiled.transitions[source_index:]:
-        payload = _apply_nested_family_migrations(
-            payload=payload,
-            compiled=compiled,
-            source_label=transition.source,
-            target_label=transition.target,
-            source_payload_is_canonical=nested_payload_is_canonical,
-        )
-        payload = _apply_selected_decorator_migrations(
-            payload=payload,
-            selections=decorator_selections,
-            target_label=transition.target,
-        )
-        decorator_selections = _reconcile_decorator_selections(
-            payload=payload,
-            selections=decorator_selections,
-            compiled=compiled,
-            discover_new=False,
-        )
-        nested_payload_is_canonical = True
+        if has_nested:
+            payload = _apply_nested_family_migrations(
+                payload=payload,
+                compiled=compiled,
+                source_label=transition.source,
+                target_label=transition.target,
+                source_payload_is_canonical=nested_payload_is_canonical,
+            )
+            payload = _apply_selected_decorator_migrations(
+                payload=payload,
+                selections=decorator_selections,
+                target_label=transition.target,
+            )
+            decorator_selections = _reconcile_decorator_selections(
+                payload=payload,
+                selections=decorator_selections,
+                compiled=compiled,
+                discover_new=False,
+            )
+            nested_payload_is_canonical = True
         if transition.upgrade is None:
             continue
         migrated = transition.upgrade(dict(payload))
@@ -214,46 +220,49 @@ def _validate_family[T: BaseModel](
             msg = f"Migration {transition.source!r} -> {transition.target!r} must return a dict"
             raise InvalidMigrationError(msg)
         payload = migrated
+        if has_nested:
+            decorator_selections = _reconcile_decorator_selections(
+                payload=payload,
+                selections=decorator_selections,
+                compiled=compiled,
+                discover_new=True,
+            )
+        migrations_applied.append((transition.source, transition.target))
+
+    nested_container_ids: set[int] = set()
+    materialized_model_ids: frozenset[int] = frozenset()
+    if has_nested:
+        payload = _apply_selected_decorator_migrations(
+            payload=payload,
+            selections=decorator_selections,
+            target_label=compiled.current_version,
+        )
         decorator_selections = _reconcile_decorator_selections(
             payload=payload,
             selections=decorator_selections,
             compiled=compiled,
-            discover_new=True,
+            discover_new=False,
         )
-        migrations_applied.append((transition.source, transition.target))
-
-    payload = _apply_selected_decorator_migrations(
-        payload=payload,
-        selections=decorator_selections,
-        target_label=compiled.current_version,
-    )
-    decorator_selections = _reconcile_decorator_selections(
-        payload=payload,
-        selections=decorator_selections,
-        compiled=compiled,
-        discover_new=False,
-    )
-    nested_container_ids: set[int] = set()
-    payload = _project_nested_family_payloads(
-        payload=payload,
-        compiled=compiled,
-        parent_label=compiled.current_version,
-        wire_boundary=False,
-        guarded_container_ids=nested_container_ids,
-    )
-    payload = _project_selected_decorator_payloads(
-        payload=payload,
-        selections=decorator_selections,
-        parent_label=compiled.current_version,
-        wire_boundary=False,
-    )
-    payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
-        payload=payload,
-        selections=decorator_selections,
-        compiled=compiled,
-        parent_label=compiled.current_version,
-        wire_boundary=False,
-    )
+        payload = _project_nested_family_payloads(
+            payload=payload,
+            compiled=compiled,
+            parent_label=compiled.current_version,
+            wire_boundary=False,
+            guarded_container_ids=nested_container_ids,
+        )
+        payload = _project_selected_decorator_payloads(
+            payload=payload,
+            selections=decorator_selections,
+            parent_label=compiled.current_version,
+            wire_boundary=False,
+        )
+        payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
+            payload=payload,
+            selections=decorator_selections,
+            compiled=compiled,
+            parent_label=compiled.current_version,
+            wire_boundary=False,
+        )
     current_model = _validate_canonical_model(
         family.model,
         _current_validation_input(
@@ -264,8 +273,12 @@ def _validate_family[T: BaseModel](
         ),
         cache=compiled._runtime_cache,
         materialized_model_ids=materialized_model_ids,
-        materialized_container_ids=frozenset(nested_container_ids)
-        | _materialized_hash_container_ids(payload, materialized_model_ids),
+        materialized_container_ids=(
+            frozenset(nested_container_ids)
+            | _materialized_hash_container_ids(payload, materialized_model_ids)
+            if has_nested
+            else frozenset()
+        ),
     )
     return VersionedValidation(
         source_version=source_version,
@@ -302,11 +315,13 @@ def _dump_family[T: BaseModel](
     if requested != compiled.current_version:
         family.plan_render(requested)
 
-    _preflight_nested_version_metadata(
-        payload=data,
-        compiled=compiled,
-        parent_label=compiled.current_version,
-    )
+    has_nested = bool(compiled.nested or compiled.decorator_nested)
+    if has_nested:
+        _preflight_nested_version_metadata(
+            payload=data,
+            compiled=compiled,
+            parent_label=compiled.current_version,
+        )
 
     payload, decorator_selections = _validated_current_render_payload(
         family=family,
@@ -321,25 +336,26 @@ def _dump_family[T: BaseModel](
     if requested != compiled.current_version:
         for edge_index in range(current_index - 1, target_index - 1, -1):
             transition = compiled.transitions[edge_index]
-            payload = _apply_nested_family_migrations(
-                payload=payload,
-                compiled=compiled,
-                source_label=transition.target,
-                target_label=transition.source,
-                source_payload_is_canonical=nested_payload_is_canonical,
-            )
-            payload = _apply_selected_decorator_migrations(
-                payload=payload,
-                selections=decorator_selections,
-                target_label=transition.source,
-            )
-            decorator_selections = _reconcile_decorator_selections(
-                payload=payload,
-                selections=decorator_selections,
-                compiled=compiled,
-                discover_new=False,
-            )
-            nested_payload_is_canonical = True
+            if has_nested:
+                payload = _apply_nested_family_migrations(
+                    payload=payload,
+                    compiled=compiled,
+                    source_label=transition.target,
+                    target_label=transition.source,
+                    source_payload_is_canonical=nested_payload_is_canonical,
+                )
+                payload = _apply_selected_decorator_migrations(
+                    payload=payload,
+                    selections=decorator_selections,
+                    target_label=transition.source,
+                )
+                decorator_selections = _reconcile_decorator_selections(
+                    payload=payload,
+                    selections=decorator_selections,
+                    compiled=compiled,
+                    discover_new=False,
+                )
+                nested_payload_is_canonical = True
             if transition.downgrade is None:
                 continue
             migrated = transition.downgrade(dict(payload))
@@ -350,45 +366,48 @@ def _dump_family[T: BaseModel](
                 )
                 raise InvalidMigrationError(msg)
             payload = migrated
-            decorator_selections = _reconcile_decorator_selections(
-                payload=payload,
-                selections=decorator_selections,
-                compiled=compiled,
-                discover_new=True,
-            )
+            if has_nested:
+                decorator_selections = _reconcile_decorator_selections(
+                    payload=payload,
+                    selections=decorator_selections,
+                    compiled=compiled,
+                    discover_new=True,
+                )
 
-    payload = _apply_selected_decorator_migrations(
-        payload=payload,
-        selections=decorator_selections,
-        target_label=requested,
-    )
-    decorator_selections = _reconcile_decorator_selections(
-        payload=payload,
-        selections=decorator_selections,
-        compiled=compiled,
-        discover_new=False,
-    )
     nested_container_ids: set[int] = set()
-    payload = _project_nested_family_payloads(
-        payload=payload,
-        compiled=compiled,
-        parent_label=requested,
-        wire_boundary=True,
-        guarded_container_ids=nested_container_ids,
-    )
-    payload = _project_selected_decorator_payloads(
-        payload=payload,
-        selections=decorator_selections,
-        parent_label=requested,
-        wire_boundary=True,
-    )
-    payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
-        payload=payload,
-        selections=decorator_selections,
-        compiled=compiled,
-        parent_label=requested,
-        wire_boundary=True,
-    )
+    materialized_model_ids: frozenset[int] = frozenset()
+    if has_nested:
+        payload = _apply_selected_decorator_migrations(
+            payload=payload,
+            selections=decorator_selections,
+            target_label=requested,
+        )
+        decorator_selections = _reconcile_decorator_selections(
+            payload=payload,
+            selections=decorator_selections,
+            compiled=compiled,
+            discover_new=False,
+        )
+        payload = _project_nested_family_payloads(
+            payload=payload,
+            compiled=compiled,
+            parent_label=requested,
+            wire_boundary=True,
+            guarded_container_ids=nested_container_ids,
+        )
+        payload = _project_selected_decorator_payloads(
+            payload=payload,
+            selections=decorator_selections,
+            parent_label=requested,
+            wire_boundary=True,
+        )
+        payload, materialized_model_ids = _materialize_selected_decorator_wire_models(
+            payload=payload,
+            selections=decorator_selections,
+            compiled=compiled,
+            parent_label=requested,
+            wire_boundary=True,
+        )
     if compiled.version_metadata is not None and (
         compiled.version_metadata.owner == "model"
         or (requested != compiled.current_version and target.wire_model_kind != "explicit")
@@ -410,8 +429,12 @@ def _dump_family[T: BaseModel](
         target_payload,
         cache=compiled._runtime_cache,
         materialized_model_ids=materialized_model_ids,
-        materialized_container_ids=frozenset(nested_container_ids)
-        | _materialized_hash_container_ids(target_payload, materialized_model_ids),
+        materialized_container_ids=(
+            frozenset(nested_container_ids)
+            | _materialized_hash_container_ids(target_payload, materialized_model_ids)
+            if has_nested
+            else frozenset()
+        ),
     )
     _validate_explicit_nested_runtime_shapes(
         target_model,
@@ -466,11 +489,16 @@ def _serialize_target_model(
     include_version: bool,
     dump_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    serialization_options = dict(dump_kwargs)
-    serialization_options.pop("polymorphic_serialization", None)
-    serialization_options.setdefault("by_alias", True)
-    serialization_options.setdefault("mode", "json")
-    serialized = target_model.model_dump(**serialization_options)
+    if not dump_kwargs:
+        by_alias: Any = True
+        serialized = target_model.model_dump(by_alias=True, mode="json")
+    else:
+        serialization_options = dict(dump_kwargs)
+        serialization_options.pop("polymorphic_serialization", None)
+        serialization_options.setdefault("by_alias", True)
+        serialization_options.setdefault("mode", "json")
+        by_alias = serialization_options["by_alias"]
+        serialized = target_model.model_dump(**serialization_options)
     if not isinstance(serialized, Mapping):
         msg = (
             f"Target wire model for family {compiled.name!r} and version "
@@ -479,35 +507,36 @@ def _serialize_target_model(
         raise ValueError(msg)
     dumped = dict(serialized)
 
-    target = compiled.version(requested)
-    for nested in compiled.nested:
-        _prune_nested_family_metadata_at_path(
-            payload=dumped,
-            source_payload=target_model,
-            model=target.model,
-            path=_target_nested_path(target, nested.path),
-            family=nested.family._compiled_family(),
-            target_label=nested.child_label(requested),
-            by_alias=serialization_options["by_alias"],
-        )
+    if compiled.nested or compiled.decorator_nested:
+        target = compiled.version(requested)
+        for nested in compiled.nested:
+            _prune_nested_family_metadata_at_path(
+                payload=dumped,
+                source_payload=target_model,
+                model=target.model,
+                path=_target_nested_path(target, nested.path),
+                family=nested.family._compiled_family(),
+                target_label=nested.child_label(requested),
+                by_alias=by_alias,
+            )
 
-    selections = _select_decorator_routes(
-        target_model,
-        compiled=compiled,
-        parent_label=requested,
-        source_version=target,
-    )
-    _prune_serialized_decorator_metadata(
-        dumped=dumped,
-        source_model=target_model,
-        compiled=compiled,
-        parent_label=requested,
-        selections=selections,
-        by_alias=serialization_options["by_alias"],
-    )
+        selections = _select_decorator_routes(
+            target_model,
+            compiled=compiled,
+            parent_label=requested,
+            source_version=target,
+        )
+        _prune_serialized_decorator_metadata(
+            dumped=dumped,
+            source_model=target_model,
+            compiled=compiled,
+            parent_label=requested,
+            selections=selections,
+            by_alias=by_alias,
+        )
     _validate_target_extra_output_collisions(
         target_model,
-        by_alias=serialization_options["by_alias"],
+        by_alias=by_alias,
     )
     _apply_serialized_version_metadata(
         dumped=dumped,
@@ -515,7 +544,7 @@ def _serialize_target_model(
         requested=requested,
         target_model=type(target_model),
         include_version=include_version,
-        by_alias=serialization_options["by_alias"],
+        by_alias=by_alias,
     )
     return dumped
 
@@ -525,6 +554,16 @@ def _validate_target_extra_output_collisions(
     *,
     by_alias: Any,
 ) -> None:
+    if not target_model.__pydantic_extra__:
+        instance_dict = target_model.__dict__
+        for field_name in type(target_model).model_fields:
+            if (
+                field_name in instance_dict
+                and type(instance_dict[field_name]) not in _FAST_SCALAR_TYPES
+            ):
+                break
+        else:
+            return
     seen: set[int] = set()
 
     def visit(value: Any) -> None:
@@ -589,6 +628,8 @@ def _validate_target_extra_output_collisions(
 
 
 def _validate_model_dump_options(dump_kwargs: Mapping[str, Any]) -> None:
+    if not dump_kwargs:
+        return
     omission_options = sorted(_CONTRACT_FIELD_OMISSION_OPTIONS.intersection(dump_kwargs))
     if omission_options:
         formatted = ", ".join(repr(option) for option in omission_options)

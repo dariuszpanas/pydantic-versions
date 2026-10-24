@@ -408,7 +408,11 @@ def _preflight_nested_version_metadata(
             payload,
             preserve_nested_models=True,
         )
-    if not isinstance(payload, Mapping) and _runtime_structural_fields(root_annotation) is None:
+    if (
+        not isinstance(payload, Mapping)
+        and not _is_runtime_base_model_type(root_annotation)
+        and _runtime_structural_fields(root_annotation) is None
+    ):
         return
 
     for nested in compiled.nested:
@@ -516,6 +520,25 @@ def _runtime_preflight_metadata_payload(
     normalized_annotation = _runtime_annotation_value(annotation)
     if _is_runtime_base_model_type(normalized_annotation):
         owner_model = cast(type[BaseModel], normalized_annotation)
+        alias_plans = (
+            ()
+            if owner_model.model_config.get("validate_by_alias", True) is False
+            else _model_alias_plans(owner_model)
+        )
+        if isinstance(family_metadata_path, str) and not alias_plans:
+            if isinstance(value, BaseModel):
+                extras = value.__pydantic_extra__
+                if isinstance(extras, Mapping) and family_metadata_path in extras:
+                    return {family_metadata_path: extras[family_metadata_path]}
+                if (
+                    family_metadata_path in owner_model.model_fields
+                    and family_metadata_path in value.__dict__
+                ):
+                    return {family_metadata_path: value.__dict__[family_metadata_path]}
+                return {}
+            if isinstance(value, Mapping) and family_metadata_path in value:
+                return {family_metadata_path: value[family_metadata_path]}
+            return {}
         extracted = (
             {key: _copy_alias_payload_value(item) for key, item in value.items()}
             if isinstance(value, Mapping)
@@ -533,17 +556,13 @@ def _runtime_preflight_metadata_payload(
             for field_name in owner_model.model_fields:
                 if field_name in instance_dict:
                     extracted.setdefault(field_name, instance_dict[field_name])
-        elif isinstance(value, Mapping):
-            for field_name in owner_model.model_fields:
-                if field_name in value:
-                    extracted.setdefault(field_name, value[field_name])
-        if owner_model.model_config.get("validate_by_alias", True) is not False:
+        if alias_plans:
             expected_path = (
                 (family_metadata_path,)
                 if isinstance(family_metadata_path, str)
                 else family_metadata_path
             )
-            for plan in _model_alias_plans(owner_model):
+            for plan in alias_plans:
                 present, field_value = _runtime_structural_field_value(
                     value,
                     kind="model",
@@ -1248,7 +1267,10 @@ def _prune_serialized_nested_value(
             family_name=family.name,
         )
         return
-    annotation_is_object = _runtime_structural_fields(annotation) is not None
+    annotation_is_object = (
+        _is_runtime_base_model_type(annotation)
+        or _runtime_structural_fields(annotation) is not None
+    )
     if (
         source_payload is not _MISSING
         and _is_concrete_runtime_scalar_annotation(annotation)
