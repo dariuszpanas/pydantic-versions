@@ -43,6 +43,7 @@ from pydantic_versions._runtime_nested import (
     _verify_validated_family_version_metadata,
 )
 from pydantic_versions._runtime_payload import (
+    _FAST_SCALAR_TYPES,
     _extract_declared_fields,
     _extract_preflight_fields,
     _preserve_canonical_mapping_copy,
@@ -527,9 +528,13 @@ def _validate_target_extra_output_collisions(
     seen: set[int] = set()
 
     def visit(value: Any) -> None:
-        if id(value) in seen:
+        value_type = type(value)
+        if value_type in _FAST_SCALAR_TYPES:
             return
-        seen.add(id(value))
+        identity = id(value)
+        if identity in seen:
+            return
+        seen.add(identity)
         if isinstance(value, BaseModel):
             model = type(value)
             extras = value.__pydantic_extra__
@@ -558,18 +563,27 @@ def _validate_target_extra_output_collisions(
                     )
                     raise ValueError(msg)
                 for item in extras.values():
-                    visit(item)
+                    if type(item) not in _FAST_SCALAR_TYPES:
+                        visit(item)
+            instance_dict = value.__dict__
             for field_name in model.model_fields:
-                if field_name in value.__dict__:
-                    visit(value.__dict__[field_name])
+                if field_name in instance_dict:
+                    field_value = instance_dict[field_name]
+                    if type(field_value) not in _FAST_SCALAR_TYPES:
+                        visit(field_value)
             return
-        if isinstance(value, Mapping):
+        if value_type is dict or isinstance(value, Mapping):
             for item in value.values():
-                visit(item)
+                if type(item) not in _FAST_SCALAR_TYPES:
+                    visit(item)
             return
-        if isinstance(value, list | tuple | set | frozenset):
+        if value_type in (list, tuple, set, frozenset) or isinstance(
+            value,
+            list | tuple | set | frozenset,
+        ):
             for item in value:
-                visit(item)
+                if type(item) not in _FAST_SCALAR_TYPES:
+                    visit(item)
 
     visit(target_model)
 
@@ -667,6 +681,7 @@ def _validated_current_render_payload[T: BaseModel](
 ) -> tuple[dict[str, Any], tuple[_DecoratorRouteSelection, ...]]:
     current_version = compiled.version(compiled.current_version)
     current_wire = current_version.model
+    extracted_current_payload: dict[str, Any] | None = None
     if isinstance(data, family.model):
         _validate_base_model_render_metadata(compiled, data)
         if _model_instance_requires_revalidation(family.model, data):
@@ -682,6 +697,7 @@ def _validated_current_render_payload[T: BaseModel](
             declared_model=family.model,
         )
         _validate_current_render_metadata(compiled, raw_payload)
+        extracted_current_payload = raw_payload
     elif isinstance(data, BaseModel):
         _validate_base_model_render_metadata(compiled, data)
         raw_payload = _extract_declared_fields(data)
@@ -714,7 +730,8 @@ def _validated_current_render_payload[T: BaseModel](
         )
         raise TypeError(msg)
 
-    _validate_base_model_render_metadata(compiled, current_model)
+    if current_model is not data:
+        _validate_base_model_render_metadata(compiled, current_model)
     selections = _select_decorator_routes(
         current_model,
         compiled=compiled,
@@ -730,9 +747,13 @@ def _validated_current_render_payload[T: BaseModel](
     payload = _to_current_names(
         compiled,
         current_version,
-        _extract_declared_fields(
-            current_model,
-            declared_model=family.model,
+        (
+            extracted_current_payload
+            if extracted_current_payload is not None
+            else _extract_declared_fields(
+                current_model,
+                declared_model=family.model,
+            )
         ),
     )
     _refresh_decorator_selection_identities(payload, selections)
@@ -753,6 +774,8 @@ def _apply_selected_decorator_migrations(
     selections: tuple[_DecoratorRouteSelection, ...],
     target_label: str,
 ) -> dict[str, Any]:
+    if not selections:
+        return payload
     pending: list[tuple[_DecoratorRouteSelection, str]] = []
     transforms = []
     for selection in _decorator_selections_child_first(selections):
@@ -809,6 +832,8 @@ def _project_selected_decorator_payloads(
     parent_label: str,
     wire_boundary: bool,
 ) -> dict[str, Any]:
+    if not selections:
+        return payload
     transforms = []
     for selection in _decorator_selections_child_first(selections):
         target_label = selection.route.child_label(parent_label)
@@ -841,6 +866,8 @@ def _materialize_selected_decorator_wire_models(
     parent_label: str,
     wire_boundary: bool,
 ) -> tuple[dict[str, Any], frozenset[int]]:
+    if not selections:
+        return payload, frozenset()
     transforms = []
     materialized_model_ids: set[int] = set()
     for selection in _decorator_selections_child_first(selections):
@@ -919,19 +946,25 @@ def _materialized_hash_container_ids(
         return False
 
     def visit(current: Any) -> None:
-        if not isinstance(current, Mapping | list | tuple | set | frozenset):
+        current_type = type(current)
+        if current_type in _FAST_SCALAR_TYPES:
+            return
+        if current_type not in (dict, list, tuple, set, frozenset) and not isinstance(
+            current,
+            Mapping | list | tuple | set | frozenset,
+        ):
             return
         identity = id(current)
         if identity in seen:
             return
         seen.add(identity)
-        if isinstance(current, set | frozenset):
+        if current_type in (set, frozenset) or isinstance(current, set | frozenset):
             if any(contains_materialized_hash_value(item) for item in current):
                 found.add(identity)
             for item in current:
                 visit(item)
             return
-        if isinstance(current, Mapping):
+        if current_type is dict or isinstance(current, Mapping):
             if any(contains_materialized_hash_value(key) for key in current):
                 found.add(identity)
             for key, item in current.items():

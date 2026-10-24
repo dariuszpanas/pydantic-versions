@@ -35,6 +35,7 @@ from pydantic_versions._runtime_payload import (
     _explicit_runtime_body_model,
     _extract_declared_fields,
     _extract_preflight_fields,
+    _extract_preflight_value,
     _HashableCanonicalMapping,
     _is_concrete_runtime_scalar_annotation,
     _is_runtime_base_model_type,
@@ -55,10 +56,10 @@ from pydantic_versions._runtime_payload import (
 )
 from pydantic_versions._runtime_versioning import (
     _MISSING,
-    _alias_paths,
     _copy_alias_payload_value,
     _get_version_field,
     _matches_version_label,
+    _model_alias_plans,
     _model_metadata_field_name,
     _normalize_payload_field_aliases,
     _path_has_payload,
@@ -90,6 +91,8 @@ def _validate_explicit_nested_runtime_shapes(
     label: str,
     recurse_nested_targets: bool = False,
 ) -> None:
+    if not compiled.nested:
+        return
     root_value = value
     root_annotation: Any = version.model
     if version.wire_model_kind == "explicit":
@@ -140,6 +143,8 @@ def _validate_nested_target_runtime_shapes(
         )
         if route_values is None:
             _raise_explicit_nested_runtime_shape(compiled, label=label, path=nested.path)
+        if not child_compiled.nested:
+            continue
         for route_value, route_annotation in route_values:
             for child_value, child_annotation in _runtime_nested_structural_occurrences(
                 route_value,
@@ -285,7 +290,14 @@ def _normalize_validated_nested_family_value(
             for item in value
         ]
         if isinstance(value, list):
-            return normalized_items
+            return (
+                value
+                if all(
+                    normalized_item is item
+                    for normalized_item, item in zip(normalized_items, value, strict=True)
+                )
+                else normalized_items
+            )
         if isinstance(value, tuple):
             return tuple(normalized_items)
         return _rebuild_canonical_set(
@@ -300,9 +312,16 @@ def _normalize_validated_nested_family_value(
         return value
     source_mapping = value
     child_compiled = family._compiled_family()
+    child_version = child_compiled.version(child_label)
+    if (
+        type(value) is dict
+        and not child_version.projection.renamed_fields
+        and not child_compiled.nested
+    ):
+        return value
     normalized = _to_current_names(
         child_compiled,
-        child_compiled.version(child_label),
+        child_version,
         dict(value),
     )
     normalized = _normalize_validated_explicit_nested_payloads(
@@ -413,32 +432,32 @@ def _preflight_nested_version_metadata(
                 model=child_model,
                 conservative_structural_unions=True,
             ):
-                metadata_payload = _runtime_preflight_metadata_payload(
-                    item,
-                    annotation=item_annotation,
-                    family_metadata_path=(
-                        child_compiled.version_metadata.path
-                        if child_compiled.version_metadata is not None
-                        and child_compiled.version_metadata.owner == "family"
-                        else None
-                    ),
-                )
-                found, declared = _declared_nested_version_metadata(
-                    payload=metadata_payload,
-                    compiled=child_compiled,
-                    source_label=expected,
-                )
-                if found and not _matches_version_label(declared, expected):
-                    declared_display = _safe_nested_version_display(
-                        declared,
+                if child_compiled.version_metadata is not None:
+                    metadata_payload = _runtime_preflight_metadata_payload(
+                        item,
+                        annotation=item_annotation,
+                        family_metadata_path=(
+                            child_compiled.version_metadata.path
+                            if child_compiled.version_metadata.owner == "family"
+                            else None
+                        ),
+                    )
+                    found, declared = _declared_nested_version_metadata(
+                        payload=metadata_payload,
                         compiled=child_compiled,
+                        source_label=expected,
                     )
-                    msg = (
-                        f"Nested family {nested.family.name!r} at path {nested.path!r} "
-                        f"expects version {expected!r} for parent label {parent_label!r}, "
-                        f"but the payload declares {declared_display}"
-                    )
-                    raise SchemaVersionError(msg)
+                    if found and not _matches_version_label(declared, expected):
+                        declared_display = _safe_nested_version_display(
+                            declared,
+                            compiled=child_compiled,
+                        )
+                        msg = (
+                            f"Nested family {nested.family.name!r} at path {nested.path!r} "
+                            f"expects version {expected!r} for parent label {parent_label!r}, "
+                            f"but the payload declares {declared_display}"
+                        )
+                        raise SchemaVersionError(msg)
                 _preflight_nested_version_metadata(
                     payload=item,
                     compiled=child_compiled,
@@ -494,22 +513,63 @@ def _runtime_preflight_metadata_payload(
     annotation: Any,
     family_metadata_path: VersionPath | None,
 ) -> dict[Any, Any]:
+    normalized_annotation = _runtime_annotation_value(annotation)
+    if _is_runtime_base_model_type(normalized_annotation):
+        owner_model = cast(type[BaseModel], normalized_annotation)
+        extracted = (
+            {key: _copy_alias_payload_value(item) for key, item in value.items()}
+            if isinstance(value, Mapping)
+            else {}
+        )
+        if isinstance(value, BaseModel):
+            extras = value.__pydantic_extra__
+            if isinstance(extras, Mapping) and extras:
+                extracted.update(
+                    (key, _copy_alias_payload_value(item))
+                    for key, item in extras.items()
+                    if isinstance(key, str)
+                )
+            instance_dict = value.__dict__
+            for field_name in owner_model.model_fields:
+                if field_name in instance_dict:
+                    extracted.setdefault(field_name, instance_dict[field_name])
+        elif isinstance(value, Mapping):
+            for field_name in owner_model.model_fields:
+                if field_name in value:
+                    extracted.setdefault(field_name, value[field_name])
+        if owner_model.model_config.get("validate_by_alias", True) is not False:
+            expected_path = (
+                (family_metadata_path,)
+                if isinstance(family_metadata_path, str)
+                else family_metadata_path
+            )
+            for plan in _model_alias_plans(owner_model):
+                present, field_value = _runtime_structural_field_value(
+                    value,
+                    kind="model",
+                    field_name=plan.name,
+                )
+                if not present:
+                    continue
+                for alias_path in plan.mapped_aliases:
+                    if expected_path is not None and alias_path != expected_path:
+                        continue
+                    _set_preflight_alias_payload_value(
+                        extracted,
+                        path=alias_path,
+                        value=field_value,
+                    )
+        return extracted
+
     structure = _runtime_structural_fields(annotation)
     assert structure is not None
     kind, owner, field_annotations, _required_keys = structure
+    assert kind in ("dataclass", "typed_dict")
     extracted = (
         {key: _copy_alias_payload_value(item) for key, item in value.items()}
         if isinstance(value, Mapping)
         else {}
     )
-    if isinstance(value, BaseModel):
-        extras = value.__pydantic_extra__
-        if isinstance(extras, Mapping):
-            extracted.update(
-                (key, _copy_alias_payload_value(item))
-                for key, item in extras.items()
-                if isinstance(key, str)
-            )
     for field_name, field_annotation in field_annotations.items():
         present, field_value = _runtime_structural_field_value(
             value,
@@ -519,20 +579,12 @@ def _runtime_preflight_metadata_payload(
         if not present:
             continue
         extracted.setdefault(field_name, field_value)
-        if kind == "model":
-            alias_config = cast(type[BaseModel], owner).model_config
-            model_field = cast(type[BaseModel], owner).model_fields[field_name]
-            alias_paths = _alias_paths(
-                model_field.validation_alias,
-                fallback=model_field.alias,
-            )
-        else:
-            alias_config, alias_paths = _runtime_structural_validation_alias_paths(
-                kind=kind,
-                owner=owner,
-                field_name=field_name,
-                field_annotation=field_annotation,
-            )
+        alias_config, alias_paths = _runtime_structural_validation_alias_paths(
+            kind=kind,
+            owner=owner,
+            field_name=field_name,
+            field_annotation=field_annotation,
+        )
         if alias_config.get("validate_by_alias", True) is False:
             continue
         for alias_path in alias_paths:
@@ -619,12 +671,41 @@ def _verify_validated_family_version_metadata(
     metadata = compiled.version_metadata
     if metadata is None:
         return
-    metadata_payload = _extract_preflight_fields(value)
-    found, declared = _declared_nested_version_metadata(
-        payload=metadata_payload,
-        compiled=compiled,
-        source_label=label,
-    )
+    if metadata.owner == "family" and isinstance(metadata.path, str):
+        extras = value.__pydantic_extra__
+        if isinstance(extras, Mapping) and metadata.path in extras:
+            found = True
+            declared = _extract_preflight_value(
+                extras[metadata.path],
+                preserve_nested_models=False,
+            )
+        elif metadata.path in type(value).model_fields and metadata.path in value.__dict__:
+            found = True
+            declared = _extract_preflight_value(
+                value.__dict__[metadata.path],
+                preserve_nested_models=False,
+            )
+        else:
+            found = False
+            declared = None
+    elif (
+        metadata.owner == "model"
+        and not value.__pydantic_extra__
+        and (metadata_field := _model_metadata_field_name(compiled)) in type(value).model_fields
+        and metadata_field in value.__dict__
+    ):
+        found = True
+        declared = _extract_preflight_value(
+            value.__dict__[metadata_field],
+            preserve_nested_models=False,
+        )
+    else:
+        metadata_payload = _extract_preflight_fields(value)
+        found, declared = _declared_nested_version_metadata(
+            payload=metadata_payload,
+            compiled=compiled,
+            source_label=label,
+        )
     if not found:
         msg = (
             f"Validated source for schema family {compiled.name!r} and version {label!r} "

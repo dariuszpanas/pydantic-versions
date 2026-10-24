@@ -31,6 +31,7 @@ from pydantic_versions import (
     SchemaCompilationError,
     SchemaFamily,
     SchemaVersion,
+    SchemaVersionError,
     UnknownSchemaVersionError,
     VersionMetadata,
     field_removed,
@@ -542,3 +543,191 @@ def test_discarded_models_in_alias_plan_cache_are_collectable() -> None:
     gc.collect()
 
     assert all(reference() is None for reference in references)
+
+
+def test_model_extraction_plans_fast_paths_fallbacks_and_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Status(Enum):
+        ready = "ready"
+
+    class Child(BaseModel):
+        label: str
+
+    class Parent(BaseModel):
+        count: int
+        status: Status | None = None
+        child: Child | None = None
+        children: list[Child] | None = None
+        hidden: str = Field(default="secret", exclude=True)
+
+    cached = runtime_payload._model_extraction_plans(Parent)
+    assert runtime_payload._model_extraction_plans(Parent) is cached
+    assert [plan.name for plan in cached] == ["count", "status", "child", "children"]
+    assert cached[0].fast_scalar_type is int
+    assert cached[1].fast_scalar_type is Status
+    assert cached[1].allows_none is True
+    assert cached[2].model_type is Child
+    assert cached[2].allows_none is True
+    assert cached[3].list_model_type is Child
+    assert cached[3].allows_none is True
+
+    def unexpected_value_extract(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("fast-path fields must not fall back to _extract_declared_value")
+
+    monkeypatch.setattr(runtime_payload, "_extract_declared_value", unexpected_value_extract)
+
+    instance = Parent(
+        count=3,
+        status=Status.ready,
+        child=Child(label="one"),
+        children=[Child(label="two")],
+    )
+    assert runtime_payload._extract_declared_fields(instance) == {
+        "count": 3,
+        "status": Status.ready,
+        "child": {"label": "one"},
+        "children": [{"label": "two"}],
+    }
+
+    none_instance = Parent(count=1, status=None, child=None, children=None)
+    assert runtime_payload._extract_declared_fields(none_instance) == {
+        "count": 1,
+        "status": None,
+        "child": None,
+        "children": None,
+    }
+
+    monkeypatch.undo()
+
+    constructed = Parent.model_construct(
+        count=1,
+        status=Status.ready,
+        child={"label": "raw"},
+        children=[{"label": "raw-list"}],
+    )
+    assert runtime_payload._extract_declared_fields(constructed) == {
+        "count": 1,
+        "status": Status.ready,
+        "child": {"label": "raw"},
+        "children": [{"label": "raw-list"}],
+    }
+
+    shared_list = [Child(label="cycle")]
+    with pytest.raises(InvalidMigrationError, match="cyclic"):
+        runtime_payload._extract_declared_fields(
+            Parent.model_construct(count=1, children=shared_list),
+            _active_ids={id(shared_list)},
+        )
+
+    Parent.model_rebuild(force=True)
+    rebuilt = runtime_payload._model_extraction_plans(Parent)
+    assert rebuilt == cached
+    assert rebuilt is not cached
+
+
+def test_discarded_models_in_extraction_plan_cache_are_collectable() -> None:
+    references: list[weakref.ReferenceType[type[BaseModel]]] = []
+    for index in range(32):
+        dynamic_model = create_model(
+            f"DynamicExtractionModel{index}",
+            __module__=__name__,
+            value=(int, 1),
+        )
+        runtime_payload._model_extraction_plans(dynamic_model)
+        references.append(weakref.ref(dynamic_model))
+        del dynamic_model
+
+    gc.collect()
+
+    assert all(reference() is None for reference in references)
+
+
+def test_contains_hashable_canonical_mapping_fast_paths() -> None:
+    carrier = runtime_payload._HashableCanonicalMapping({"a": 1})
+    assert not runtime_validation._contains_hashable_canonical_mapping("scalar")
+    assert not runtime_validation._contains_hashable_canonical_mapping(object())
+    assert not runtime_validation._contains_hashable_canonical_mapping(
+        {"a": 1, "b": ["x", "y"], "c": {"nested": True}}
+    )
+    assert runtime_validation._contains_hashable_canonical_mapping(carrier)
+    assert runtime_validation._contains_hashable_canonical_mapping({"nested": [carrier]})
+
+
+def test_verify_validated_metadata_and_render_payload_avoid_redundant_extractions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FamilyOwned(BaseModel):
+        value: int = 1
+
+    class ModelOwned(BaseModel):
+        schema_version: str = "1"
+        value: int = 1
+
+    family_owned = SchemaFamily(
+        model=FamilyOwned,
+        name="fast_verify_family_owned",
+        versions=(SchemaVersion("1"),),
+    )
+    model_owned = SchemaFamily(
+        model=ModelOwned,
+        name="fast_verify_model_owned",
+        versions=(SchemaVersion("1"),),
+        version_metadata=VersionMetadata("schema_version", owner="model"),
+    )
+
+    def unexpected_preflight(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("top-level metadata verification must not extract full preflight tree")
+
+    monkeypatch.setattr(runtime_nested, "_extract_preflight_fields", unexpected_preflight)
+
+    family_compiled = family_owned._compiled_family()
+    family_wire = family_compiled.version("1").model.model_validate(
+        {"schema_version": "1", "value": 2}
+    )
+    runtime_nested._verify_validated_family_version_metadata(
+        value=family_wire,
+        compiled=family_compiled,
+        label="1",
+    )
+    with pytest.raises(SchemaVersionError, match="omitted required version metadata"):
+        runtime_nested._verify_validated_family_version_metadata(
+            value=FamilyOwned.model_construct(value=2),
+            compiled=family_compiled,
+            label="1",
+        )
+    runtime_nested._verify_validated_family_version_metadata(
+        value=ModelOwned(schema_version="1", value=2),
+        compiled=family_compiled,
+        label="1",
+    )
+
+    model_compiled = model_owned._compiled_family()
+    model_wire = model_compiled.version("1").model.model_validate(
+        {"schema_version": "1", "value": 2}
+    )
+    runtime_nested._verify_validated_family_version_metadata(
+        value=model_wire,
+        compiled=model_compiled,
+        label="1",
+    )
+
+    monkeypatch.undo()
+
+    extraction_calls = 0
+    real_extract = runtime._extract_declared_fields
+
+    def counting_extract(*args: Any, **kwargs: Any) -> Any:
+        nonlocal extraction_calls
+        extraction_calls += 1
+        return real_extract(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "_extract_declared_fields", counting_extract)
+    payload, selections = runtime._validated_current_render_payload(
+        family=family_owned,
+        compiled=family_compiled,
+        data=FamilyOwned(value=5),
+    )
+    assert payload == {"value": 5}
+    assert selections == ()
+    assert extraction_calls == 1
