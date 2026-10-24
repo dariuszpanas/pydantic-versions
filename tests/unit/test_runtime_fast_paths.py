@@ -731,3 +731,73 @@ def test_verify_validated_metadata_and_render_payload_avoid_redundant_extraction
     assert payload == {"value": 5}
     assert selections == ()
     assert extraction_calls == 1
+
+
+def test_literal_extraction_plan_and_alias_copy_fast_paths() -> None:
+    class Child(BaseModel):
+        value: int = 1
+
+    class LiteralModel(BaseModel):
+        kind: Literal["alpha", "beta"] = "alpha"
+        mixed: Literal["alpha", 1] = "alpha"
+        child: Child = Field(default_factory=Child)
+
+    plans = {plan.name: plan for plan in runtime_payload._model_extraction_plans(LiteralModel)}
+    assert plans["kind"].fast_scalar_type is str
+    assert plans["mixed"].fast_scalar_type is None
+
+    assert runtime_payload._annotation_declares_path(LiteralModel, ("child", "value"))
+    assert not runtime_payload._annotation_declares_path(LiteralModel, ("missing",))
+    empty_child = Child.model_construct()
+    empty_child.__dict__.pop("value", None)
+    assert (
+        runtime_payload._declared_payload_occurrences_at_path(
+            empty_child,
+            annotation=Child,
+            path=("value",),
+        )
+        == ()
+    )
+
+    hashed_frozenset = runtime_payload._hashable_canonical_value(frozenset([("a", 1)]))
+    assert isinstance(hashed_frozenset, frozenset)
+    nested_frozenset = runtime_payload._hashable_canonical_value(
+        frozenset([runtime_payload._HashableCanonicalMapping({"a": 1})])
+    )
+    assert isinstance(nested_frozenset, frozenset)
+    with pytest.raises(InvalidMigrationError, match="collapse"):
+        runtime_payload._rebuild_canonical_set({1, 2}, [1], error_message="collapse")
+    with pytest.raises(InvalidMigrationError, match="collapse"):
+        runtime_payload._rebuild_canonical_set({1, 2}, [1, 1], error_message="collapse")
+
+    class NestedAliasModel(BaseModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        target: str = Field(validation_alias=AliasPath("meta", "target"))
+        items: list[dict[str, int]] = Field(default_factory=list)
+        pair: tuple[dict[str, int], ...] = ()
+        shared: list[dict[str, int]] = Field(default_factory=list)
+        opaque: object = None
+
+    shared_dict = {"a": 1}
+    source_list = [shared_dict]
+    source_tuple = ({"b": 2},)
+    tracked_ids = {id(source_list)}
+    normalized = runtime_versioning._normalize_payload_field_aliases(
+        NestedAliasModel,
+        {
+            "meta": {"target": "ok"},
+            "items": source_list,
+            "pair": source_tuple,
+            "shared": source_list,
+            "opaque": object(),
+        },
+        tracked_container_ids=tracked_ids,
+    )
+    assert normalized["target"] == "ok"
+    assert normalized["items"] == source_list
+    assert normalized["items"] is not source_list
+    assert normalized["shared"] is normalized["items"]
+    assert id(normalized["items"]) in tracked_ids
+    assert normalized["pair"] == source_tuple
+    assert normalized["pair"] is not source_tuple

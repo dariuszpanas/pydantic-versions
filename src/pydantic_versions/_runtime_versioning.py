@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 from weakref import WeakKeyDictionary
 
 from pydantic import AliasChoices, AliasPath, BaseModel
@@ -26,6 +30,13 @@ _ATOMIC_ALIAS_VALUE_TYPES = {
     bool,
     bytes,
     type(None),
+    dt.datetime,
+    dt.date,
+    dt.time,
+    dt.timedelta,
+    Decimal,
+    Path,
+    UUID,
     set,
     frozenset,
 }
@@ -40,6 +51,7 @@ class _CompiledFieldAliasPlan:
     name: str
     mapped_aliases: tuple[tuple[str | int, ...], ...]
     source_path: tuple[str | int, ...] | None
+    has_nested_path: bool = False
 
 
 _MODEL_ALIAS_PLANS: WeakKeyDictionary[
@@ -385,11 +397,16 @@ def _model_alias_plans(model_cls: type[BaseModel]) -> tuple[_CompiledFieldAliasP
         )
         if not mapped_aliases:
             continue
+        source_path = _next_alias_path(field_info)
+        has_nested_path = any(len(path) > 1 for path in mapped_aliases) or (
+            source_path is not None and len(source_path) > 1
+        )
         plans.append(
             _CompiledFieldAliasPlan(
                 name=name,
                 mapped_aliases=mapped_aliases,
-                source_path=_next_alias_path(field_info),
+                source_path=source_path,
+                has_nested_path=has_nested_path,
             )
         )
     compiled_plans = tuple(plans)
@@ -405,21 +422,27 @@ def _normalize_payload_field_aliases(
     tracked_container_ids: set[int] | None = None,
     mapping_copy: _CanonicalMappingCopy | None = None,
 ) -> dict[str, Any]:
-    memo: dict[int, Any] | None = None
-    normalized: dict[str, Any] = {}
-    for key, value in payload.items():
-        if type(value) in _ATOMIC_ALIAS_VALUE_TYPES:
-            normalized[key] = value
-            continue
-        if memo is None:
-            memo = {}
-        normalized[key] = _copy_alias_payload_value(
-            value,
-            tracked_container_ids=tracked_container_ids,
-            mapping_copy=mapping_copy,
-            memo=memo,
-        )
-    for plan in _model_alias_plans(model_cls):
+    plans = _model_alias_plans(model_cls)
+    if not plans:
+        return dict(payload)
+    if not any(plan.has_nested_path for plan in plans):
+        normalized = dict(payload)
+    else:
+        memo: dict[int, Any] | None = None
+        normalized = {}
+        for key, value in payload.items():
+            if type(value) in _ATOMIC_ALIAS_VALUE_TYPES:
+                normalized[key] = value
+                continue
+            if memo is None:
+                memo = {}
+            normalized[key] = _copy_alias_payload_value(
+                value,
+                tracked_container_ids=tracked_container_ids,
+                mapping_copy=mapping_copy,
+                memo=memo,
+            )
+    for plan in plans:
         name = plan.name
         if name in normalized:
             mapped_aliases = plan.mapped_aliases

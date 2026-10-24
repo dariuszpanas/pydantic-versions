@@ -164,16 +164,19 @@ def _preserve_canonical_mapping_copy(
 
 def _hashable_canonical_value(value: Any) -> Any:
     """Keep recursively projected mappings usable in exact set containers."""
-    if isinstance(value, _HashableCanonicalMapping):
+    value_type = type(value)
+    if value_type in _FAST_SCALAR_TYPES:
         return value
-    if isinstance(value, Mapping):
+    if value_type is _HashableCanonicalMapping or isinstance(value, _HashableCanonicalMapping):
+        return value
+    if value_type is dict or isinstance(value, Mapping):
         return _HashableCanonicalMapping(value)
-    if isinstance(value, tuple):
+    if value_type is tuple or isinstance(value, tuple):
         source_items = value
         items = tuple(_hashable_canonical_value(item) for item in source_items)
         unchanged = all(item is source for item, source in zip(items, source_items, strict=True))
         return value if unchanged else items
-    if isinstance(value, frozenset):
+    if value_type is frozenset or isinstance(value, frozenset):
         source_items = tuple(value)
         items = tuple(_hashable_canonical_value(item) for item in source_items)
         if all(item is source for item, source in zip(items, source_items, strict=True)):
@@ -183,9 +186,12 @@ def _hashable_canonical_value(value: Any) -> Any:
 
 
 def _canonical_source_identities(value: Any) -> frozenset[int]:
-    if isinstance(value, _HashableCanonicalMapping):
+    value_type = type(value)
+    if value_type in _FAST_SCALAR_TYPES:
+        return frozenset()
+    if value_type is _HashableCanonicalMapping or isinstance(value, _HashableCanonicalMapping):
         return value.source_identities
-    if isinstance(value, tuple | frozenset):
+    if value_type in (tuple, frozenset) or isinstance(value, tuple | frozenset):
         return frozenset(
             identity for item in value for identity in _canonical_source_identities(item)
         )
@@ -194,9 +200,12 @@ def _canonical_source_identities(value: Any) -> frozenset[int]:
 
 def _bind_canonical_source_identity(value: Any, source_identity: int) -> Any:
     """Bind one unordered occurrence through exact hashable container layers."""
-    if isinstance(value, _HashableCanonicalMapping):
+    value_type = type(value)
+    if value_type in _FAST_SCALAR_TYPES:
+        return value
+    if value_type is _HashableCanonicalMapping or isinstance(value, _HashableCanonicalMapping):
         value.source_identities |= frozenset((source_identity,))
-    elif isinstance(value, tuple | frozenset):
+    elif value_type in (tuple, frozenset) or isinstance(value, tuple | frozenset):
         for item in value:
             _bind_canonical_source_identity(item, source_identity)
     return value
@@ -332,6 +341,25 @@ def _build_field_extraction_plan(
                 allows_none=allows_none,
                 model_type=candidate,
             )
+    if candidate_origin is Literal:
+        literal_args = get_args(candidate)
+        literal_types = {type(arg) for arg in literal_args}
+        if len(literal_types) == 1:
+            literal_type = next(iter(literal_types))
+            if literal_type in _FAST_SCALAR_TYPES or (
+                issubclass(literal_type, Enum)
+                and not issubclass(
+                    literal_type,
+                    BaseModel | Mapping | list | tuple | set | frozenset,
+                )
+                and not is_dataclass(literal_type)
+            ):
+                return _CompiledFieldExtractionPlan(
+                    name=name,
+                    annotation=annotation,
+                    fast_scalar_type=literal_type,
+                    allows_none=allows_none,
+                )
     if candidate_origin is list:
         arguments = get_args(candidate)
         if len(arguments) == 1:
@@ -458,7 +486,7 @@ def _extract_declared_value(
     _active_ids: set[int] | None = None,
 ) -> Any:
     value_type = type(value)
-    if value_type in _ATOMIC_SCALAR_TYPES and (
+    if value_type in _FAST_SCALAR_TYPES and (
         annotation is None or value_type is annotation or annotation in _FAST_SCALAR_TYPES
     ):
         return value
@@ -773,8 +801,12 @@ def _is_typed_dict(annotation: Any) -> bool:
 
 
 def _runtime_annotation_value(annotation: Any) -> Any:
+    if isinstance(annotation, type) and "__supertype__" not in annotation.__dict__:
+        return annotation
     normalized = annotation
     while True:
+        if isinstance(normalized, type) and "__supertype__" not in normalized.__dict__:
+            return normalized
         origin = get_origin(normalized)
         if origin is Annotated:
             normalized = get_args(normalized)[0]
@@ -794,6 +826,8 @@ def _runtime_annotation_value(annotation: Any) -> Any:
                 replacements=tuple(replacements),
             )
             continue
+        if origin is not None:
+            return normalized
         supertype = getattr(normalized, "__supertype__", None)
         if supertype is not None and supertype is not normalized:
             normalized = supertype
@@ -982,20 +1016,20 @@ def _runtime_nested_structural_occurrences(
                 conservative_structural_unions=conservative_structural_unions,
             )
         )
-    if _runtime_structural_fields(selected) is None:
+    if not _is_runtime_base_model_type(selected) and _runtime_structural_fields(selected) is None:
         return ()
     return ((value, selected),)
 
 
 def _explicit_runtime_body_model(model: type[BaseModel]) -> type[BaseModel]:
-    body_model = getattr(model, "_document_body_model", None)
+    body_model = model.__dict__.get("_document_body_model")
     return cast(type[BaseModel], body_model) if _is_runtime_base_model_type(body_model) else model
 
 
 def _explicit_runtime_body(value: Any, *, model: type[BaseModel]) -> Any:
     if isinstance(value, model):
         return value
-    if getattr(type(value), "_document_body_model", None) is not model:
+    if type(value).__dict__.get("_document_body_model") is not model:
         return value
     try:
         body = object.__getattribute__(
@@ -1035,14 +1069,20 @@ def _declared_runtime_values_at_path(
             occurrences.extend(nested)
         return tuple(occurrences)
 
-    structure = _runtime_structural_fields(selected)
-    if structure is None:
-        # A concrete historical scalar may intentionally replace the rest of
-        # a current nested route.
-        return ()
-    kind, _owner, field_annotations, required_keys = structure
     field_name, *remaining = path
-    field_annotation = field_annotations.get(field_name, _MISSING)
+    if _is_runtime_base_model_type(selected):
+        kind: Literal["model", "dataclass", "typed_dict"] = "model"
+        model_field_info = selected.model_fields.get(field_name)
+        field_annotation = _MISSING if model_field_info is None else model_field_info.annotation
+        required_keys: frozenset[str] = frozenset()
+    else:
+        structure = _runtime_structural_fields(selected)
+        if structure is None:
+            # A concrete historical scalar may intentionally replace the rest of
+            # a current nested route.
+            return ()
+        kind, _owner, field_annotations, required_keys = structure
+        field_annotation = field_annotations.get(field_name, _MISSING)
     if field_annotation is _MISSING:
         return (
             None
@@ -1554,15 +1594,18 @@ def _annotation_declares_path(
         )
     if _is_runtime_base_model_type(annotation):
         field_info = annotation.model_fields.get(path[0])
-        if field_info is None:
-            return False
-        if len(path) == 1:
-            return True
-        return _annotation_declares_path(field_info.annotation, path[1:], _seen=seen)
-    structure = _runtime_structural_fields(annotation)
-    if structure is not None:
-        _kind, _owner, field_annotations, _required_keys = structure
-        field_annotation = field_annotations.get(path[0], _MISSING)
+        field_annotation = _MISSING if field_info is None else field_info.annotation
+        is_structural = True
+    else:
+        structure = _runtime_structural_fields(annotation)
+        if structure is not None:
+            _kind, _owner, field_annotations, _required_keys = structure
+            field_annotation = field_annotations.get(path[0], _MISSING)
+            is_structural = True
+        else:
+            field_annotation = _MISSING
+            is_structural = False
+    if is_structural:
         if field_annotation is _MISSING:
             return False
         if len(path) == 1:
@@ -1664,59 +1707,90 @@ def _declared_payload_occurrences_at_path(
             )
         )
 
-    structure = _runtime_structural_fields(selected)
-    if structure is None:
-        return ()
-    kind, owner, field_annotations, _required_keys = structure
     field_name, *remaining = path
-    field_annotation = field_annotations.get(field_name, _MISSING)
-    if field_annotation is _MISSING:
-        return ()
-
-    if kind == "model":
-        model = cast(type[BaseModel], owner)
+    if _is_runtime_base_model_type(selected):
+        model = selected
+        model_field_info = model.model_fields.get(field_name)
+        if model_field_info is None:
+            return ()
+        field_annotation = model_field_info.annotation
         payload_is_canonical = isinstance(payload, model)
         if isinstance(payload, BaseModel):
-            payload = _extract_preflight_fields(
-                payload,
-                preserve_nested_models=True,
-            )
             if payload_is_canonical:
                 prefer_aliases = False
-        if not isinstance(payload, Mapping):
+                extras = payload.__pydantic_extra__
+                if isinstance(extras, Mapping) and field_name in extras:
+                    found = True
+                    field_value = _extract_preflight_value(
+                        extras[field_name],
+                        preserve_nested_models=True,
+                    )
+                elif field_name in payload.__dict__:
+                    found = True
+                    field_value = _extract_preflight_value(
+                        payload.__dict__[field_name],
+                        preserve_nested_models=True,
+                    )
+                else:
+                    found = False
+                    field_value = None
+            else:
+                payload = _extract_preflight_fields(
+                    payload,
+                    preserve_nested_models=True,
+                )
+                found, field_value = _declared_field_payload_value(
+                    payload,
+                    field_name=field_name,
+                    field_info=model_field_info,
+                    model_config=model.model_config,
+                    prefer_aliases=prefer_aliases,
+                )
+        elif isinstance(payload, Mapping):
+            found, field_value = _declared_field_payload_value(
+                payload,
+                field_name=field_name,
+                field_info=model_field_info,
+                model_config=model.model_config,
+                prefer_aliases=prefer_aliases,
+            )
+        else:
             return ()
-        field_info = model.model_fields[field_name]
-        found, field_value = _declared_field_payload_value(
-            payload,
-            field_name=field_name,
-            field_info=field_info,
-            model_config=model.model_config,
-            prefer_aliases=prefer_aliases,
-        )
-    elif isinstance(payload, Mapping):
-        config, alias_paths = _runtime_structural_validation_alias_paths(
-            kind=kind,
-            owner=owner,
-            field_name=field_name,
-            field_annotation=field_annotation,
-        )
-        access_path = _declared_payload_path_for_aliases(
-            payload,
-            field_name=field_name,
-            alias_paths=alias_paths,
-            model_config=config,
-            prefer_aliases=prefer_aliases,
-        )
-        found = access_path is not None
-        field_value = (
-            _payload_value_at_access_path(payload, access_path) if access_path is not None else None
-        )
     else:
-        found, field_value = _runtime_structural_field_value(
-            payload,
-            kind=kind,
-            field_name=field_name,
-        )
+        structure = _runtime_structural_fields(selected)
+        if structure is None:
+            return ()
+        kind, owner, field_annotations, _required_keys = structure
+        assert kind in ("dataclass", "typed_dict")
+        field_annotation = field_annotations.get(field_name, _MISSING)
+        if field_annotation is _MISSING:
+            return ()
+        if isinstance(payload, Mapping):
+            config, alias_paths = _runtime_structural_validation_alias_paths(
+                kind=kind,
+                owner=owner,
+                field_name=field_name,
+                field_annotation=field_annotation,
+            )
+            access_path = _declared_payload_path_for_aliases(
+                payload,
+                field_name=field_name,
+                alias_paths=alias_paths,
+                model_config=config,
+                prefer_aliases=prefer_aliases,
+            )
+            found = access_path is not None
+            field_value = (
+                _payload_value_at_access_path(payload, access_path)
+                if access_path is not None
+                else None
+            )
+        else:
+            found, field_value = _runtime_structural_field_value(
+                payload,
+                kind=kind,
+                field_name=field_name,
+            )
     if not found:
         return ()
     if not remaining:
