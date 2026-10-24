@@ -9,7 +9,9 @@ from pydantic import BaseModel
 from pydantic_versions._compiler import (
     _compile_projection,
     _compile_transition,
+    _CompiledDecoratorNestedFamily,
     _CompiledFamily,
+    _CompiledNestedFamily,
     _CompiledVersion,
     _ensure_pydantic_v2_model,
     _validate_compilation_boundary,
@@ -223,6 +225,12 @@ class SchemaFamily[T: BaseModel]:
                     nested=nested,
                     decorator_nested=decorator_nested,
                     _model_core_schema=model_core_schema,
+                    _schema_dependencies=_collect_schema_dependencies(
+                        self,
+                        model_core_schema,
+                        nested,
+                        decorator_nested,
+                    ),
                 )
             finally:
                 self._compiling = False
@@ -333,6 +341,10 @@ class SchemaFamily[T: BaseModel]:
         )
 
     def _compiled_family(self) -> _CompiledFamily:
+        compiled = self._compiled
+        if compiled is not None:
+            self._ensure_compiled_graph_unchanged(compiled)
+            return compiled
         self.compile()
         if self._compiled is None:  # pragma: no cover - compile() publishes atomically
             msg = f"Schema family {self.name!r} did not publish compiled state"
@@ -342,30 +354,16 @@ class SchemaFamily[T: BaseModel]:
     def _ensure_compiled_graph_unchanged(
         self,
         compiled: _CompiledFamily,
-        *,
-        visited: set[int] | None = None,
     ) -> None:
-        checked = set() if visited is None else visited
-        if id(self) in checked:
-            return
-        checked.add(id(self))
-        if self.model.__pydantic_core_schema__ is not compiled._model_core_schema:
-            msg = (
-                f"Authoritative model {self.model.__name__!r} for schema family {self.name!r} "
-                "was rebuilt after compilation; discard and recreate every affected "
-                "schema-family declaration, then call as_default() on the replacement "
-                "when model-only helpers use this graph"
-            )
-            raise SchemaCompilationError(msg)
-        for nested in (*compiled.nested, *compiled.decorator_nested):
-            child_family = nested.family
-            child_compiled = child_family._compiled
-            # A parent cannot publish until every nested projection has compiled.
-            assert child_compiled is not None
-            child_family._ensure_compiled_graph_unchanged(
-                child_compiled,
-                visited=checked,
-            )
+        for family, expected_schema in compiled._schema_dependencies:
+            if family.model.__pydantic_core_schema__ is not expected_schema:
+                msg = (
+                    f"Authoritative model {family.model.__name__!r} for schema family "
+                    f"{family.name!r} was rebuilt after compilation; discard and recreate "
+                    "every affected schema-family declaration, then call as_default() on "
+                    "the replacement when model-only helpers use this graph"
+                )
+                raise SchemaCompilationError(msg)
 
     def _family_graph_was_rebuilt(self, *, visited: set[int] | None = None) -> bool:
         checked = set() if visited is None else visited
@@ -430,6 +428,29 @@ class SchemaFamily[T: BaseModel]:
             ):
                 msg = f"Migration {source!r} -> {target!r} is already registered for {self.name!r}"
                 raise DuplicateSchemaVersionError(msg)
+
+
+def _collect_schema_dependencies(
+    root_family: SchemaFamily[Any],
+    root_core_schema: object,
+    nested: tuple[_CompiledNestedFamily, ...],
+    decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...],
+) -> tuple[tuple[SchemaFamily[Any], object], ...]:
+    seen: set[int] = {id(root_family)}
+    dependencies: list[tuple[SchemaFamily[Any], object]] = [
+        (root_family, root_core_schema),
+    ]
+    for route in (*nested, *decorator_nested):
+        child_compiled = route.family._compiled
+        # A parent cannot publish until every nested projection has compiled.
+        assert child_compiled is not None
+        for dependency_family, dependency_schema in child_compiled._schema_dependencies:
+            family_id = id(dependency_family)
+            if family_id in seen:
+                continue
+            seen.add(family_id)
+            dependencies.append((dependency_family, dependency_schema))
+    return tuple(dependencies)
 
 
 def _model_owned_default_family(model: type[BaseModel]) -> SchemaFamily[Any] | None:
