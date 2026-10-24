@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import AliasChoices, AliasPath, BaseModel
 
@@ -17,10 +19,33 @@ from pydantic_versions.exceptions import (
 )
 
 _MISSING = object()
+_ATOMIC_ALIAS_VALUE_TYPES = {
+    str,
+    int,
+    float,
+    bool,
+    bytes,
+    type(None),
+    set,
+    frozenset,
+}
 type _CanonicalMappingCopy = Callable[
     [Mapping[Any, Any], dict[Any, Any]],
     Mapping[Any, Any],
 ]
+
+
+@dataclass(frozen=True)
+class _CompiledFieldAliasPlan:
+    name: str
+    mapped_aliases: tuple[tuple[str | int, ...], ...]
+    source_path: tuple[str | int, ...] | None
+
+
+_MODEL_ALIAS_PLANS: WeakKeyDictionary[
+    type[BaseModel],
+    tuple[int, tuple[_CompiledFieldAliasPlan, ...]],
+] = WeakKeyDictionary()
 
 
 def _runtime_label(value: object, *, family_name: str) -> str:
@@ -31,9 +56,7 @@ def _runtime_label(value: object, *, family_name: str) -> str:
 
 
 def _safe_nested_version_display(value: Any, *, compiled: _CompiledFamily) -> str:
-    if type(value) is str and any(
-        value == version.projection.label for version in compiled.versions
-    ):
+    if type(value) is str and value in compiled._version_by_label:
         return repr(value)
     return "a different label"
 
@@ -153,7 +176,7 @@ def _serialized_version_field(data: Mapping[str, Any], version_field: VersionPat
         return data[version_field] if version_field in data else _MISSING
     current: Any = data
     for part in version_field:
-        if not isinstance(current, Mapping) or part not in current:
+        if not (isinstance(current, dict) or isinstance(current, Mapping)) or part not in current:
             return _MISSING
         current = current[part]
     return current
@@ -223,7 +246,9 @@ def _detect_version(
         version = _runtime_label(explicit_version, family_name=compiled.name)
         compiled.index(version)
         return version
-    if isinstance(data, Mapping) and compiled.version_metadata is not None:
+    if (isinstance(data, dict) or isinstance(data, Mapping)) and (
+        compiled.version_metadata is not None
+    ):
         version_value = _get_version_field(data, compiled.version_metadata.path)
         if version_value is not None:
             version = _runtime_label(version_value, family_name=compiled.name)
@@ -245,7 +270,7 @@ def _get_version_field(data: Mapping[str, Any], version_field: VersionPath) -> A
         return data.get(version_field)
     current: Any = data
     for part in version_field:
-        if not isinstance(current, Mapping) or part not in current:
+        if not (isinstance(current, dict) or isinstance(current, Mapping)) or part not in current:
             return None
         current = current[part]
     return current
@@ -311,11 +336,9 @@ def _to_current_names(
             if metadata.path != metadata_field:
                 normalized.pop(metadata.path, None)
             normalized[metadata_field] = compiled.current_version
-    renamed = tuple(
-        (field.current_name, field.version_name)
-        for field in version.projection.fields
-        if field.version_name is not None and field.version_name != field.current_name
-    )
+    renamed = version.projection.renamed_fields
+    if not renamed:
+        return normalized
     original = dict(normalized)
     renamed_values: dict[str, Any] = {}
     for current_name, version_name in renamed:
@@ -346,6 +369,34 @@ def _current_validation_input(
     )
 
 
+def _model_alias_plans(model_cls: type[BaseModel]) -> tuple[_CompiledFieldAliasPlan, ...]:
+    schema_id = id(model_cls.__pydantic_core_schema__)
+    cached = _MODEL_ALIAS_PLANS.get(model_cls)
+    if cached is not None and cached[0] == schema_id:
+        return cached[1]
+    plans: list[_CompiledFieldAliasPlan] = []
+    for name, field_info in model_cls.model_fields.items():
+        alias_paths = _alias_paths(
+            field_info.validation_alias,
+            fallback=field_info.alias,
+        )
+        mapped_aliases = tuple(
+            path for path in alias_paths if path and not (len(path) == 1 and path[0] == name)
+        )
+        if not mapped_aliases:
+            continue
+        plans.append(
+            _CompiledFieldAliasPlan(
+                name=name,
+                mapped_aliases=mapped_aliases,
+                source_path=_next_alias_path(field_info),
+            )
+        )
+    compiled_plans = tuple(plans)
+    _MODEL_ALIAS_PLANS[model_cls] = (schema_id, compiled_plans)
+    return compiled_plans
+
+
 def _normalize_payload_field_aliases(
     model_cls: type[BaseModel],
     payload: Mapping[str, Any],
@@ -354,41 +405,36 @@ def _normalize_payload_field_aliases(
     tracked_container_ids: set[int] | None = None,
     mapping_copy: _CanonicalMappingCopy | None = None,
 ) -> dict[str, Any]:
-    memo: dict[int, Any] = {}
-    normalized = {
-        key: _copy_alias_payload_value(
+    memo: dict[int, Any] | None = None
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if type(value) in _ATOMIC_ALIAS_VALUE_TYPES:
+            normalized[key] = value
+            continue
+        if memo is None:
+            memo = {}
+        normalized[key] = _copy_alias_payload_value(
             value,
             tracked_container_ids=tracked_container_ids,
             mapping_copy=mapping_copy,
             memo=memo,
         )
-        for key, value in payload.items()
-    }
-    for name, field_info in model_cls.model_fields.items():
-        alias_paths = _alias_paths(
-            field_info.validation_alias,
-            fallback=field_info.alias,
-        )
+    for plan in _model_alias_plans(model_cls):
+        name = plan.name
         if name in normalized:
+            mapped_aliases = plan.mapped_aliases
             if prefer_aliases:
                 value = normalized[name]
-                mapped_aliases = tuple(
-                    path for path in alias_paths if not (len(path) == 1 and path[0] == name)
-                )
-                if mapped_aliases:
-                    mapped_alias = mapped_aliases[0]
-                    for alias_path in mapped_aliases:
-                        _remove_payload_path(normalized, alias_path)
-                    _set_payload_path(normalized, mapped_alias, value)
-                    normalized.pop(name, None)
+                for alias_path in mapped_aliases:
+                    _remove_payload_path(normalized, alias_path)
+                _set_payload_path(normalized, mapped_aliases[0], value)
+                normalized.pop(name, None)
                 continue
 
-            for alias_path in alias_paths:
-                if len(alias_path) == 1 and alias_path[0] == name:
-                    continue
+            for alias_path in mapped_aliases:
                 _remove_payload_path(normalized, alias_path)
             continue
-        source_path = _next_alias_path(field_info)
+        source_path = plan.source_path
         if source_path is not None and _path_has_payload(normalized, source_path):
             value = _get_payload_path(normalized, source_path)
             _remove_payload_path(normalized, source_path)
@@ -403,12 +449,14 @@ def _copy_alias_payload_value(
     mapping_copy: _CanonicalMappingCopy | None = None,
     memo: dict[int, Any] | None = None,
 ) -> Any:
+    if type(value) in _ATOMIC_ALIAS_VALUE_TYPES:
+        return value
     if memo is None:
         memo = {}
     identity = id(value)
     if identity in memo:
         return memo[identity]
-    if isinstance(value, Mapping):
+    if isinstance(value, dict) or isinstance(value, Mapping):
         copied_items: dict[Any, Any] = {}
         memo[identity] = copied_items
         copied_items.update(
@@ -487,7 +535,7 @@ def _next_alias_path(field_info: Any) -> tuple[Any, ...] | None:
 def _path_has_payload(payload: Mapping[Any, Any], path: tuple[Any, ...]) -> bool:
     current: Any = payload
     for part in path:
-        if not isinstance(current, Mapping) or part not in current:
+        if not (isinstance(current, dict) or isinstance(current, Mapping)) or part not in current:
             return False
         current = current[part]
     return True
@@ -516,7 +564,7 @@ def _remove_payload_path(payload: dict[str, Any], path: tuple[Any, ...]) -> None
     if removed:
         for parent, part in reversed(parent_path):
             child = parent[part]
-            if isinstance(child, Mapping) and len(child) == 0:
+            if (isinstance(child, dict) or isinstance(child, Mapping)) and len(child) == 0:
                 parent.pop(part, None)
 
 
@@ -538,14 +586,9 @@ def _model_metadata_field_name(compiled: _CompiledFamily) -> str:
     if metadata is None or metadata.owner != "model" or not isinstance(metadata.path, str):
         msg = f"Compiled family {compiled.name!r} has invalid model-owned version metadata"
         raise SchemaCompilationError(msg)
-    for field_name, field_info in compiled.model.model_fields.items():
-        if metadata.path in (
-            field_name,
-            field_info.alias,
-            field_info.validation_alias,
-            field_info.serialization_alias,
-        ):
-            return field_name
+    cached_field = compiled.model_metadata_field
+    if cached_field is not None and cached_field in compiled.model.model_fields:
+        return cached_field
     msg = f"Compiled family {compiled.name!r} lost its model-owned version metadata field"
     raise SchemaCompilationError(msg)
 
@@ -563,16 +606,16 @@ def _to_version_names(
         tracked_container_ids=tracked_container_ids,
         mapping_copy=mapping_copy,
     )
-    original = dict(normalized)
+    removed = version.projection.removed_fields
+    renamed = version.projection.renamed_fields
+    if not removed and not renamed:
+        return normalized
     versioned = dict(normalized)
-    renamed = tuple(
-        (field.current_name, field.version_name)
-        for field in version.projection.fields
-        if field.version_name is not None and field.version_name != field.current_name
-    )
-    for field in version.projection.fields:
-        if field.version_name is None:
-            versioned.pop(field.current_name, None)
+    for current_name in removed:
+        versioned.pop(current_name, None)
+    if not renamed:
+        return versioned
+    original = dict(normalized)
     renamed_values: dict[str, Any] = {}
     for current_name, version_name in renamed:
         if current_name in original:

@@ -65,11 +65,47 @@ class _CompiledField:
 class _VersionProjection:
     label: str
     fields: tuple[_CompiledField, ...]
+    _fields_by_current: dict[str, _CompiledField] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    renamed_fields: tuple[tuple[str, str], ...] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    removed_fields: tuple[str, ...] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_fields_by_current",
+            {field.current_name: field for field in self.fields},
+        )
+        object.__setattr__(
+            self,
+            "renamed_fields",
+            tuple(
+                (field.current_name, field.version_name)
+                for field in self.fields
+                if field.version_name is not None and field.version_name != field.current_name
+            ),
+        )
+        object.__setattr__(
+            self,
+            "removed_fields",
+            tuple(field.current_name for field in self.fields if field.version_name is None),
+        )
 
     def field(self, current_name: str) -> _CompiledField:
-        for field in self.fields:
-            if field.current_name == current_name:
-                return field
+        compiled_field = self._fields_by_current.get(current_name)
+        if compiled_field is not None:
+            return compiled_field
         msg = f"Compiled projection does not contain current field {current_name!r}"
         raise SchemaCompilationError(msg)
 
@@ -97,9 +133,21 @@ class _CompiledNestedFamily:
     path: tuple[str, ...]
     family: SchemaFamily[Any]
     versions: _NestedLabelPairs
+    _child_by_parent: dict[str, str] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_child_by_parent",
+            dict(self.versions),
+        )
 
     def child_label(self, parent_label: str) -> str:
-        return next(child for parent, child in self.versions if parent == parent_label)
+        return self._child_by_parent[parent_label]
 
 
 @dataclass(frozen=True)
@@ -138,6 +186,27 @@ class _CompiledFamilyRuntimeCache:
         self.lock = Lock()
 
 
+def _resolve_compiled_model_metadata_field(
+    model: type[BaseModel],
+    version_metadata: VersionMetadata | None,
+) -> str | None:
+    if (
+        version_metadata is None
+        or version_metadata.owner != "model"
+        or not isinstance(version_metadata.path, str)
+    ):
+        return None
+    for field_name, field_info in model.model_fields.items():
+        if version_metadata.path in (
+            field_name,
+            field_info.alias,
+            field_info.validation_alias,
+            field_info.serialization_alias,
+        ):
+            return field_name
+    return None
+
+
 @dataclass(frozen=True)
 class _CompiledFamily:
     model: type[BaseModel]
@@ -150,25 +219,66 @@ class _CompiledFamily:
     nested: tuple[_CompiledNestedFamily, ...]
     decorator_nested: tuple[_CompiledDecoratorNestedFamily, ...]
     _model_core_schema: object = dataclass_field(repr=False, compare=False)
+    _schema_dependencies: tuple[tuple[SchemaFamily[Any], object], ...] = dataclass_field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+    model_metadata_field: str | None = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _index_by_label: dict[str, int] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _version_by_label: dict[str, _CompiledVersion] = dataclass_field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _runtime_cache: _CompiledFamilyRuntimeCache = dataclass_field(
         default_factory=_CompiledFamilyRuntimeCache,
         repr=False,
         compare=False,
     )
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "model_metadata_field",
+            _resolve_compiled_model_metadata_field(self.model, self.version_metadata),
+        )
+        object.__setattr__(
+            self,
+            "_index_by_label",
+            {version.projection.label: index for index, version in enumerate(self.versions)},
+        )
+        object.__setattr__(
+            self,
+            "_version_by_label",
+            {version.projection.label: version for version in self.versions},
+        )
+
     @property
     def current_version(self) -> str:
         return self.versions[-1].projection.label
 
     def index(self, label: str) -> int:
-        for index, version in enumerate(self.versions):
-            if version.projection.label == label:
-                return index
+        resolved = self._index_by_label.get(label)
+        if resolved is not None:
+            return resolved
         msg = f"Unknown schema version {label!r} for {self.name!r}"
         raise UnknownSchemaVersionError(msg)
 
     def version(self, label: str) -> _CompiledVersion:
-        return self.versions[self.index(label)]
+        resolved = self._version_by_label.get(label)
+        if resolved is not None:
+            return resolved
+        msg = f"Unknown schema version {label!r} for {self.name!r}"
+        raise UnknownSchemaVersionError(msg)
 
 
 def _ensure_pydantic_v2_model(model_cls: object) -> None:
