@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-10-25
+
+### Fixed
+- Restored canonical version metadata normalization before nested transition
+  callbacks, including child routes without field renames and parent edges that
+  retain the same child version. Family-owned metadata no longer leaks into
+  callbacks that revalidate their payloads with extra fields forbidden.
+- Preserved validation and rendering of collections whose `Annotated` element
+  metadata is unhashable, without hashing arbitrary annotations in scalar fast
+  paths.
+- Moved field extraction plans onto their exact model class so recursive
+  annotations cannot keep temporary models alive through a process-global
+  cache. Plans still refresh when the model's core schema changes, and
+  subclasses retain independent plans. Existing runtime optimizations and
+  dependency bounds remain in place.
+
 ## [1.0.3] - 2026-10-24
 
 ### Added
@@ -315,7 +331,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Django Ninja compatibility tests and documentation for versioned API schemas.
 - Added install and getting-started documentation.
 
-[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.0...v1.0.1

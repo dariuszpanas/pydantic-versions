@@ -317,6 +317,7 @@ def _normalize_validated_nested_family_value(
         type(value) is dict
         and not child_version.projection.renamed_fields
         and not child_compiled.nested
+        and child_compiled.version_metadata is None
     ):
         return value
     normalized = _to_current_names(
