@@ -96,8 +96,9 @@ uv run --frozen yaga change check --policy .yaga/change-policy.toml --range orig
 
 When preparing a release `X.Y.Z`:
 
-1. Verify that all notable changes since the previous tag are documented under
-   `## [Unreleased]` in `docs/changelog.md`.
+1. Verify that all user-facing guide and reference pages (`docs/guide/*.md`,
+   `docs/reference/*.md`, `docs/llms.txt`) and all notable changes since the
+   previous tag under `## [Unreleased]` in `docs/changelog.md` are up to date.
 2. Move the `## [Unreleased]` entries under a new dated heading
    `## [X.Y.Z] - YYYY-MM-DD` placed directly below an empty `## [Unreleased]`
    section.
@@ -112,5 +113,8 @@ When preparing a release `X.Y.Z`:
    uv run python scripts/validate_release.py X.Y.Z
    ```
 6. Run the full local verification gate, open the release PR, and merge via
-   rebase once CI passes. Tagging `vX.Y.Z` on the merged `main` commit triggers
-   `.github/workflows/release.yml`.
+   rebase once CI passes. Wait for the Read the Docs `latest` build for the
+   merged release commit to finish before pushing the `vX.Y.Z` tag (so Read the
+   Docs does not miss the tag sync while `latest` is mid-build), then push
+   `vX.Y.Z` to trigger `.github/workflows/release.yml` and verify both `latest`
+   and `stable` on Read the Docs.

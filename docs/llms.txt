@@ -16,8 +16,10 @@ The current supported runtime is Python 3.12 through 3.15. Python 3.12–3.14 re
 ## Contracts and reference
 
 - [Generated Wire Contracts](https://pydantic-versions.readthedocs.io/en/latest/guide/generated-wire-contracts/): Understand generated historical models, nested projections, and supported boundaries.
+- [External Schema Families](https://pydantic-versions.readthedocs.io/en/latest/guide/external-families/): Declare external schema histories, select defaults, and precompile families.
 - [Migrations](https://pydantic-versions.readthedocs.io/en/latest/guide/migrations/): Define upgrade and downgrade transitions and inspect their semantics.
 - [Rendering Configs](https://pydantic-versions.readthedocs.io/en/latest/guide/rendering/): Render current data into exact historical wire shapes.
+- [Adoption Guidance](https://pydantic-versions.readthedocs.io/en/latest/guide/adoption-guidance/): Choose between patches and migrations, precompile families at startup, and test compatibility.
 - [API Reference](https://pydantic-versions.readthedocs.io/en/latest/reference/api/): Use the documented public Python API.
 - [Stability and Compatibility](https://pydantic-versions.readthedocs.io/en/latest/reference/stability-policy/): Read the public compatibility contract and semantic-versioning policy.
 - [Pydantic Compatibility Matrix](https://pydantic-versions.readthedocs.io/en/latest/guide/pydantic-compatibility-matrix/): Check supported Python and Pydantic combinations and the evidence behind them.
@@ -26,4 +28,5 @@ The current supported runtime is Python 3.12 through 3.15. Python 3.12–3.14 re
 
 - [Contributing](https://pydantic-versions.readthedocs.io/en/latest/contributing/): Follow the tool-neutral development, testing, and commit policies enforced by the repository.
 - [Changelog](https://pydantic-versions.readthedocs.io/en/latest/changelog/): Review notable changes and migration-relevant fixes.
+- [Agent Guide](https://github.com/dariuszpanas/pydantic-versions/blob/main/AGENTS.md): Read the repository-root operational checklist for coding agents.
 - [Source repository](https://github.com/dariuszpanas/pydantic-versions): Inspect the source, tests, examples, and issue tracker.

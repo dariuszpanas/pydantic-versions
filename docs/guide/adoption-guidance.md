@@ -252,3 +252,25 @@ automatic projection because its wire field types are not concrete. A resolved
 specialization such as `BenchmarkConfig[GeneralConfig]` is supported. Declare a
 nested family at each model path whose child schema history must be projected;
 the child family can use matching labels or an explicit parent-to-child mapping.
+
+## Precompilation and Runtime Performance
+
+Call `compile()` during application startup when you want to validate all family
+declarations and materialize generated wire models before serving requests:
+
+```python
+APP_CONFIG_SCHEMA.compile()
+```
+
+Compilation is idempotent and thread-safe. It precomputes:
+
+- generated wire models and version-specific field rename/remove projections;
+- `O(1)` version label and index lookup tables;
+- model-owned metadata field resolution and operation-specific conversion plans.
+
+At runtime, `validate()` and `dump()` cache per-model field alias and canonical
+extraction plans keyed by each model's Pydantic core-schema identity, and take
+direct fast paths when a family has no nested families or when input is already
+at `current_version`. These fast paths preserve the full two-stage wire and
+authoritative validation contract, including `revalidate_instances` policies and
+canonical value detachment.
