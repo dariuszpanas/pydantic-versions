@@ -194,6 +194,7 @@ than import-order dependent.
 
 ## Next steps
 
+- Read [Performance](performance.md) for versioning costs, startup compilation, and safe family reuse.
 - Read [External Schema Families](external-families.md) for defaults, isolation, and compilation rules.
 - Read [Version Discovery](version-discovery.md) before using `missing_version`.
 - Read [Schema Patches](schema-patches.md) for defaults, removed fields, renamed fields, and grouped patches.

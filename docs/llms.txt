@@ -20,6 +20,7 @@ The current supported runtime is Python 3.12 through 3.15. Python 3.12–3.14 re
 - [Migrations](https://pydantic-versions.readthedocs.io/en/latest/guide/migrations/): Define upgrade and downgrade transitions and inspect their semantics.
 - [Rendering Configs](https://pydantic-versions.readthedocs.io/en/latest/guide/rendering/): Render current data into exact historical wire shapes.
 - [Adoption Guidance](https://pydantic-versions.readthedocs.io/en/latest/guide/adoption-guidance/): Choose between patches and migrations, precompile families at startup, and test compatibility.
+- [Performance](https://pydantic-versions.readthedocs.io/en/latest/guide/performance/): Understand versioning overhead, cold compilation versus warm reuse, payload-dependent costs, and reproducible PR benchmark reports.
 - [API Reference](https://pydantic-versions.readthedocs.io/en/latest/reference/api/): Use the documented public Python API.
 - [Stability and Compatibility](https://pydantic-versions.readthedocs.io/en/latest/reference/stability-policy/): Read the public compatibility contract and semantic-versioning policy.
 - [Pydantic Compatibility Matrix](https://pydantic-versions.readthedocs.io/en/latest/guide/pydantic-compatibility-matrix/): Check supported Python and Pydantic combinations and the evidence behind them.
