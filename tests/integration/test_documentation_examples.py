@@ -38,6 +38,7 @@ _CANONICAL_DOCUMENTS = (
     (Path("docs/guide/getting-started.md"), {"getting-started": 6}),
     (Path("docs/guide/external-families.md"), {"external-families": 6}),
     (Path("docs/guide/rendering.md"), {"rendering": 4}),
+    (Path("docs/guide/performance.md"), {"performance-reuse": 1}),
     (
         Path("docs/guide/adoption-guidance.md"),
         {"adoption-version-fields": 2},
@@ -107,6 +108,7 @@ def _python_fences(text: str) -> tuple[tuple[int, str], ...]:
         "getting-started",
         "external-families",
         "rendering",
+        "performance",
         "adoption-guidance",
         "complex-config",
     ),

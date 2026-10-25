@@ -178,3 +178,6 @@ Field extraction plans belong to the exact model class and refresh after its
 core schema changes. Recursive annotations therefore do not create a global
 cache reference that keeps temporary model classes alive, and subclasses have
 independent plans.
+
+See [Performance](performance.md) for setup costs, safe reuse, payload-dependent
+runtime work, and benchmark guidance.

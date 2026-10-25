@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.4] - 2026-10-25
 
+### Added
+- Documented versioned-schema performance tradeoffs, startup compilation,
+  safe family reuse, and representative measurement methods.
+- Added a bounded base-versus-head PR benchmark with checked outputs, raw
+  measurement artifacts, and an Actions summary. Timing differences are
+  informational; correctness and harness failures fail the check.
+
 ### Fixed
 - Restored canonical version metadata normalization before nested transition
   callbacks, including child routes without field renames and parent edges that

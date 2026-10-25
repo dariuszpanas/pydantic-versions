@@ -26,6 +26,7 @@ nav = [
     { "Migrations" = "guide/migrations.md" },
     { "Rendering Configs" = "guide/rendering.md" },
     { "Adoption Guidance" = "guide/adoption-guidance.md" },
+    { "Performance" = "guide/performance.md" },
   ] },
   { "Reference" = [
     { "API" = "reference/api.md" },

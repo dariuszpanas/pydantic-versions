@@ -274,3 +274,7 @@ direct fast paths when a family has no nested families or when input is already
 at `current_version`. These fast paths preserve the full two-stage wire and
 authoritative validation contract, including `revalidate_instances` policies and
 canonical value detachment.
+
+See [Performance](performance.md) for overhead relative to plain Pydantic,
+cold versus warm measurements, safe family reuse, and interpretation of the
+PR benchmark reports.
