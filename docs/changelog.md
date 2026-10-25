@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added a repository-root `AGENTS.md` guide and enforced it in the committed
+  repository tree policy so coding agents retain changelog, documentation
+  synchronization, commit policy, worktree, and release validation rules across
+  sessions.
+
+### Changed
+- Precompiled runtime version and index lookup tables, field rename and removal
+  projections, model-owned metadata field resolution, lock-free compiled-family
+  schema-identity verification, and schema-keyed `WeakKeyDictionary` caches for
+  per-model field alias and field extraction plans.
+- Added runtime fast paths for non-nested schema families, uniform `Literal`
+  wire discriminators, `BaseModel` annotation and structural path traversal,
+  single-key nested preflight metadata checks, and alias normalization without
+  nested `AliasPath` declarations while preserving all wire, validation, and
+  revalidation contracts.
+
 ## [1.0.2] - 2026-10-10
 
 ### Added

@@ -7,6 +7,7 @@ from packaging.requirements import Requirement
 
 ROOT = Path(__file__).parents[2]
 README = ROOT / "README.md"
+AGENTS = ROOT / "AGENTS.md"
 LLMS_TXT = ROOT / "docs" / "llms.txt"
 CONTRIBUTING = ROOT / "CONTRIBUTING.md"
 RENDERED_CONTRIBUTING = ROOT / "docs" / "contributing.md"
@@ -90,3 +91,14 @@ def test_rendered_contributor_guide_matches_the_repository_guide() -> None:
     repository = CONTRIBUTING.read_text(encoding="utf-8")
 
     assert rendered == repository
+
+
+def test_agents_guide_references_changelog_and_policy_contracts() -> None:
+    agents = AGENTS.read_text(encoding="utf-8")
+
+    assert "docs/changelog.md" in agents
+    assert "## [Unreleased]" in agents
+    assert "CONTRIBUTING.md" in agents
+    assert "docs/contributing.md" in agents
+    assert ".yaga.toml" in agents
+    assert "scripts/validate_release.py" in agents
