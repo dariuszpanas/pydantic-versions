@@ -173,3 +173,8 @@ explicit nested-family mappings, upgrades, and downgrades. Runtime validation
 and rendering reuse the compiled family plans and per-model schema-keyed alias
 and field extraction plans while taking fast paths for current-version and
 non-nested payloads.
+
+Field extraction plans belong to the exact model class and refresh after its
+core schema changes. Recursive annotations therefore do not create a global
+cache reference that keeps temporary model classes alive, and subclasses have
+independent plans.

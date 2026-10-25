@@ -234,7 +234,9 @@ Python-value contract rather than a serialized JSON shape:
 - source model and field serializers are not invoked, so values such as
   secrets are not replaced by their display or wire representation;
 - caller-owned built-in mappings and containers are detached recursively before
-  a callback can mutate them; and
+  a callback can mutate them;
+- family-owned version metadata is removed from nested callback payloads, even
+  when a child route has no field renames or a parent edge keeps its version; and
 - fields omitted by `Field(exclude=True)` or `exclude_if`, historical removals,
   allowed extras, and subclass-only fields are not transition input.
 

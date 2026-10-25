@@ -25,7 +25,6 @@ from typing import (
 from typing import TypeAliasType as StdlibTypeAliasType
 from typing import is_typeddict as stdlib_is_typeddict
 from uuid import UUID
-from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
 from typing_extensions import TypeAliasType as ExtensionsTypeAliasType  # noqa: UP035
@@ -67,10 +66,7 @@ class _CompiledFieldExtractionPlan:
     list_model_type: type[BaseModel] | None = None
 
 
-_MODEL_EXTRACTION_PLANS: WeakKeyDictionary[
-    type[BaseModel],
-    tuple[int, tuple[_CompiledFieldExtractionPlan, ...]],
-] = WeakKeyDictionary()
+_EXTRACTION_PLANS_ATTRIBUTE = "__pydantic_versions_extraction_plans__"
 
 
 class _HashableCanonicalMapping(MutableMapping[Any, Any]):
@@ -284,17 +280,21 @@ def _detach_revalidation_value(value: Any, *, memo: dict[int, Any]) -> Any:
 def _model_extraction_plans(
     model: type[BaseModel],
 ) -> tuple[_CompiledFieldExtractionPlan, ...]:
-    schema_id = id(model.__pydantic_core_schema__)
-    cached = _MODEL_EXTRACTION_PLANS.get(model)
-    if cached is not None and cached[0] == schema_id:
-        return cached[1]
+    core_schema = model.__pydantic_core_schema__
+    # Plans can refer back to their model through recursive annotations. Keep
+    # that cycle on the model rather than in a process-global weak-key cache,
+    # whose strongly held values would keep the supposedly weak key alive.
+    # Read the exact class dictionary so subclasses cannot inherit a plan.
+    cached = model.__dict__.get(_EXTRACTION_PLANS_ATTRIBUTE)
+    if cached is not None and cached[0] is core_schema:
+        return cast(tuple[_CompiledFieldExtractionPlan, ...], cached[1])
     plans: list[_CompiledFieldExtractionPlan] = []
     for name, field_info in model.model_fields.items():
         if not _field_crosses_wire_boundary(field_info):
             continue
         plans.append(_build_field_extraction_plan(name, field_info.annotation))
     compiled_plans = tuple(plans)
-    _MODEL_EXTRACTION_PLANS[model] = (schema_id, compiled_plans)
+    setattr(model, _EXTRACTION_PLANS_ATTRIBUTE, (core_schema, compiled_plans))
     return compiled_plans
 
 
@@ -487,7 +487,9 @@ def _extract_declared_value(
 ) -> Any:
     value_type = type(value)
     if value_type in _FAST_SCALAR_TYPES and (
-        annotation is None or value_type is annotation or annotation in _FAST_SCALAR_TYPES
+        annotation is None
+        or value_type is annotation
+        or (type(annotation) is type and annotation in _FAST_SCALAR_TYPES)
     ):
         return value
     if value_type in (dict, list, tuple, set, frozenset):
@@ -1124,7 +1126,7 @@ def _runtime_structural_fields(
 ):
     if (
         annotation is None
-        or annotation in _FAST_SCALAR_TYPES
+        or (type(annotation) is type and annotation in _FAST_SCALAR_TYPES)
         or annotation in (dict, list, tuple, set, frozenset, Any, object)
     ):
         return None
