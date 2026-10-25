@@ -158,7 +158,10 @@ own family automatically. External family construction never does.
 
 Compilation happens on first use or through an explicit `compile()` call. It is
 thread-safe and idempotent; repeated calls on one family return the same family
-and generated model objects.
+and generated model objects. Calling `compile()` during application startup
+front-loads wire-model generation and precompiles version lookup tables, field
+rename and removal projections, model-owned metadata resolution, and conversion
+plans before request traffic arrives.
 
 Declarations are copied into immutable tuples before compilation. Labels must
 already be non-empty strings, the final label is current, and custom transitions
@@ -166,4 +169,7 @@ must connect adjacent forward labels. Duplicate, reverse, skipped, or otherwise
 unreachable transitions fail instead of becoming silent dead code.
 
 The current foundation covers flat patch projections, explicit wire models,
-explicit nested-family mappings, upgrades, and downgrades.
+explicit nested-family mappings, upgrades, and downgrades. Runtime validation
+and rendering reuse the compiled family plans and per-model schema-keyed alias
+and field extraction plans while taking fast paths for current-version and
+non-nested payloads.

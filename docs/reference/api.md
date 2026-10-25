@@ -51,12 +51,15 @@ declaration sequence and has no default-selection side effect.
   `defaults_for()`, while `{}` remains real current input.
 
 Compilation is idempotent and thread-safe. A family owns its generated-model
-identities and cache, so two families can reuse one current model without
-sharing state. Rebuild incomplete authoritative models before compilation. A
-forced `model_rebuild()` after compilation invalidates the compiled family;
-dependent parent families are invalidated transitively. Discard the affected
-family graph and recreate its declarations from fully rebuilt models rather
-than mixing stale projections with replacement Pydantic core schemas.
+identities, precompiled version and projection lookup tables, and conversion
+plan cache, while runtime validation and rendering cache per-model alias and
+canonical field extraction plans keyed by Pydantic core-schema identity, so two
+families can reuse one current model without sharing family state. Rebuild
+incomplete authoritative models before compilation. A forced `model_rebuild()`
+after compilation invalidates the compiled family; dependent parent families are
+invalidated transitively. Discard the affected family graph and recreate its
+declarations from fully rebuilt models rather than mixing stale projections with
+replacement Pydantic core schemas.
 Forced rebuilds must not race family operations. Once a compiled component of a
 selected family graph has been invalidated directly or through a nested family,
 calling `as_default()` on its recreated replacement atomically rebinds

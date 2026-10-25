@@ -72,8 +72,9 @@ uv run python scripts/validate_release.py X.Y.Z
 ```
 
 Coding agents should also read `AGENTS.md` in the repository root for the
-persistent checklist covering changelog updates, documentation synchronization,
-worktree-safe branching, and local CI gates.
+persistent checklist covering user-facing documentation updates, changelog
+discipline, documentation synchronization, worktree-safe branching, local CI
+gates, and Read the Docs release tag synchronization.
 
 ## Commits and pull requests
 
