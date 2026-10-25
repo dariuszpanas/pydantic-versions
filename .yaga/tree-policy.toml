@@ -9,6 +9,7 @@ required-paths = [
   ".yaga/tree-policy.toml",
   "LICENSE",
   "README.md",
+  "AGENTS.md",
   "CONTRIBUTING.md",
   "SECURITY.md",
   "pyproject.toml",
@@ -20,6 +21,7 @@ required-paths = [
   ".github/workflows/release.yml",
   "zensical.toml",
   "docs/index.md",
+  "docs/changelog.md",
   "scripts/validate_release.py",
 ]
 forbidden-patterns = [

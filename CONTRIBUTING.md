@@ -53,6 +53,28 @@ place, even when GitHub's documentation checks pass. Check the
 [Read the Docs build history](https://app.readthedocs.org/projects/pydantic-versions/builds/)
 when a merged documentation change is not visible.
 
+## Changelog and releases
+
+Record notable changes (`feat`, `fix`, `perf`, user-visible `refactor` or
+`chore`, `removed`, and `security`) under `## [Unreleased]` in
+`docs/changelog.md` using [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
+sections (`### Added`, `### Changed`, `### Deprecated`, `### Removed`,
+`### Fixed`, `### Security`).
+
+When preparing a release `X.Y.Z`, move the `## [Unreleased]` entries into a new
+dated `## [X.Y.Z] - YYYY-MM-DD` section directly below an empty
+`## [Unreleased]` heading, update the `[Unreleased]` and `[X.Y.Z]` comparison
+links at the bottom of `docs/changelog.md`, update `project.version` in
+`pyproject.toml`, and run:
+
+```bash
+uv run python scripts/validate_release.py X.Y.Z
+```
+
+Coding agents should also read `AGENTS.md` in the repository root for the
+persistent checklist covering changelog updates, documentation synchronization,
+worktree-safe branching, and local CI gates.
+
 ## Commits and pull requests
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
