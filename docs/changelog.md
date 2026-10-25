@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-24
+
 ### Added
 - Added a repository-root `AGENTS.md` guide and enforced it in the committed
   repository tree policy so coding agents retain changelog, documentation
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single-key nested preflight metadata checks, and alias normalization without
   nested `AliasPath` declarations while preserving all wire, validation, and
   revalidation contracts.
+- Refreshed GitHub Actions workflow dependencies.
 
 ## [1.0.2] - 2026-10-10
 
@@ -312,7 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Django Ninja compatibility tests and documentation for versioned API schemas.
 - Added install and getting-started documentation.
 
-[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/dariuszpanas/pydantic-versions/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/dariuszpanas/pydantic-versions/compare/v0.3.0...v1.0.0
