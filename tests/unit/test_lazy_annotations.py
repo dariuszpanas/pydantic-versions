@@ -18,7 +18,8 @@ from pydantic_versions import (
 class _DirectTypedExtra(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    __pydantic_extra__: dict[str, int] = Field(init=False)
+    # Pydantic's typed-extra declaration is the unsupported input under test.
+    __pydantic_extra__: dict[str, int] = Field(init=False)  # ty: ignore[invalid-mutable-override]
     value: int = 1
 
 
@@ -26,7 +27,8 @@ class _TypedExtraMixin:
     __pydantic_extra__: dict[str, int]
 
 
-class _InheritedTypedExtra(BaseModel, _TypedExtraMixin):
+# Preserve the conflicting mixin declaration to test deferred-annotation rejection.
+class _InheritedTypedExtra(BaseModel, _TypedExtraMixin):  # ty: ignore[invalid-attribute-override]
     model_config = ConfigDict(extra="allow")
 
     value: int = 1

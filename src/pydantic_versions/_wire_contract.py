@@ -1415,7 +1415,10 @@ def _add_nested_family_metadata_field(
                 validation_alias=field_name,
                 serialization_alias=field_name,
             )
-        field_definitions: dict[str, Any] = {field_name: Annotated[annotation, field]}
+        # create_model consumes a runtime-generated type, not a static type alias.
+        field_definitions: dict[str, Any] = {
+            field_name: Annotated[annotation, field]  # ty: ignore[invalid-type-form]
+        }
         child_model = create_model(
             _metadata_model_name(family, version, path, index),
             __config__=_metadata_wrapper_config(),
@@ -1429,7 +1432,7 @@ def _add_nested_family_metadata_field(
     assert child_model is not None
     root_name = path[0]
     fields[root_name] = Annotated[
-        child_model,
+        child_model,  # ty: ignore[invalid-type-form] runtime-generated wrapper model
         Field(
             default_factory=child_model,
             alias=root_name,

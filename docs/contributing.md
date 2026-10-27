@@ -137,9 +137,13 @@ multiple independent validation commands in separate Markdown list items.
 
 The required `Commit Messages` workflow reads committed default-branch policy
 and validates the PR title plus every commit in the exact PR range. It fetches
-PR objects without executing PR code. YAGA skips message validation for
-authenticated Dependabot PR events, including security updates, after checking
-event identity and complete Git history. All other CI checks still run. Local
+PR objects without executing PR code. YAGA 0.3 narrows the opt-in Dependabot
+exemption to individual commits after checking event identity, complete Git
+history, bot-compatible metadata, and an offline signature against its pinned
+GitHub signing key. Unsigned commits and human additions receive normal message
+validation; mixed pull requests also have their title checked. If signature
+verification is unavailable or fails, normal checks run. All other CI checks
+still run. Local
 `yaga commit check` never infers a bot exemption from author names, branches,
 or generated message text.
 

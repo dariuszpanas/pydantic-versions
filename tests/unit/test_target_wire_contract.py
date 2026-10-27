@@ -3005,7 +3005,8 @@ def test_typed_target_extras_recurse_into_nested_model_collisions() -> None:
     class Inner(BaseModel):
         model_config = ConfigDict(extra="allow")
 
-        __pydantic_extra__: dict[str, Any] = Field(init=False)
+        # Keep Pydantic's typed-extra declaration to exercise nested collision checks.
+        __pydantic_extra__: dict[str, Any] = Field(init=False)  # ty: ignore[invalid-mutable-override]
         value: int = Field(default=1, serialization_alias="wireValue")
 
         @model_validator(mode="after")
@@ -3020,7 +3021,8 @@ def test_typed_target_extras_recurse_into_nested_model_collisions() -> None:
     class Historical(BaseModel):
         model_config = ConfigDict(extra="allow")
 
-        __pydantic_extra__: dict[str, Inner] = Field(init=False)
+        # The runtime extra validator must retain this narrowed model annotation.
+        __pydantic_extra__: dict[str, Inner] = Field(init=False)  # ty: ignore[invalid-mutable-override]
         value: int = 1
 
         @model_validator(mode="after")
