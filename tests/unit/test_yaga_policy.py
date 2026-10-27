@@ -218,7 +218,9 @@ def test_human_commit_policy_remains_enforced(message: str, diagnostic: str) -> 
     assert diagnostic in {item["code"] for item in report["commits"][0]["diagnostics"]}
 
 
-def test_failed_dependabot_pr_is_accepted_with_an_explicit_skip_reason(tmp_path: Path) -> None:
+def test_unsigned_dependabot_message_passes_normal_policy_without_an_exemption(
+    tmp_path: Path,
+) -> None:
     repository, base, head = _repository(tmp_path, DEPENDABOT_MESSAGE)
     event = _event(tmp_path, base, head, DEPENDABOT)
 
@@ -226,13 +228,16 @@ def test_failed_dependabot_pr_is_accepted_with_an_explicit_skip_reason(tmp_path:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "pull request #152: one title and 1 commit(s)" in result.stdout
-    assert "0 failed, 2 skipped" in result.stdout
-    assert "Skip reason: Dependabot pull request" in result.stdout
+    # The copied message is valid, but this locally created commit has no GitHub
+    # signature. YAGA 0.3 must check it, even with matching bot event and metadata.
+    assert "0 failed, 0 skipped" in result.stdout
+    assert "Skip reason" not in result.stdout
 
 
 @pytest.mark.parametrize(
     ("author", "head_ref", "head_repository"),
     [
+        (DEPENDABOT, DEPENDABOT_REF, None),
         ({"login": "contributor", "id": 1, "type": "User"}, DEPENDABOT_REF, None),
         ({"login": "dependabot[bot]", "id": 49699333, "type": "User"}, DEPENDABOT_REF, None),
         ({"login": "dependabot", "id": 49699333, "type": "Bot"}, DEPENDABOT_REF, None),
@@ -243,9 +248,9 @@ def test_failed_dependabot_pr_is_accepted_with_an_explicit_skip_reason(tmp_path:
             {"id": 2, "full_name": "contributor/pydantic-versions"},
         ),
     ],
-    ids=["human", "fake-account-type", "fake-login", "ordinary-branch", "fork"],
+    ids=["unsigned-bot", "human", "fake-account-type", "fake-login", "ordinary-branch", "fork"],
 )
-def test_untrusted_identity_cannot_skip_or_weaken_commit_policy(
+def test_untrusted_or_unsigned_commit_cannot_skip_or_weaken_policy(
     tmp_path: Path,
     author: Mapping[str, object],
     head_ref: str,
