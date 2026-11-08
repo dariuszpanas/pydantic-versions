@@ -66,7 +66,9 @@ jobs:
         run: |
           uv export --frozen --no-emit-project \
             --output-file "$RUNNER_TEMP/audit-requirements.txt"
-          uv run --no-sync pip-audit --strict \
+          # Audit the complete locked graph without resolving this project
+          # again through YAGA's dependency on pydantic-versions.
+          uv run --no-sync pip-audit --strict --require-hashes --disable-pip \
             --requirement "$RUNNER_TEMP/audit-requirements.txt"
 
       - name: Install project with the audited build backend
@@ -86,6 +88,7 @@ jobs:
           uv run --no-sync vulture
           uv run --no-sync ty check
           uv run --no-sync mypy --strict tests/typing/schema_family_contract.py
+          uv run --no-sync yaga policy check --strict
           uv run --no-sync yaga repo check --plan .yaga/checks/repository.toml --revision HEAD
           uv run --no-sync yaga workflow lint .github/workflows
           uv run --no-sync pytest --cov=pydantic_versions --cov-report=term

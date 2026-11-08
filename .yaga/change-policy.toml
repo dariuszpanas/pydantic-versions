@@ -1,4 +1,5 @@
 change-policy-version = 1
+required-version = ">=0.5.0,<0.6.0"
 
 [[rules]]
 name = "python-source-needs-tests"

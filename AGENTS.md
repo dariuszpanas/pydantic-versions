@@ -87,6 +87,7 @@ uv run mypy --strict tests/typing/schema_family_contract.py
 uv run vulture
 uv run pytest --cov=src --cov-report=term-missing --cov-fail-under=95
 uv run zensical build --strict
+uv run --frozen yaga policy check --strict
 uv run --frozen yaga repo check --plan .yaga/checks/repository.toml --revision HEAD
 uv run --frozen yaga commit check --range origin/main..HEAD
 uv run --frozen yaga change check --policy .yaga/change-policy.toml --range origin/main...HEAD

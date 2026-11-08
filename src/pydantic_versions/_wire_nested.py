@@ -866,7 +866,7 @@ def _rewrite_nested_model(
                 version=version,
             )
             fields[source_name] = Annotated[
-                rewritten_annotation,
+                rewritten_annotation,  # ty: ignore[invalid-type-form] runtime projection
                 *metadata,
                 Field(**attributes),
             ]

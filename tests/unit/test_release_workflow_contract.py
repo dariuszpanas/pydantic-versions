@@ -24,7 +24,9 @@ def test_release_build_repeats_security_and_distribution_gates() -> None:
     lock_check = build.index("uv lock --check")
     dependency_sync = build.index("uv sync --frozen --no-install-project")
     frozen_export = build.index("uv export --frozen --no-emit-project")
-    dependency_audit = build.index("uv run --no-sync pip-audit --strict")
+    dependency_audit = build.index(
+        "uv run --no-sync pip-audit --strict --require-hashes --disable-pip"
+    )
     audit_input = build.index('--requirement "$RUNNER_TEMP/audit-requirements.txt"')
     project_sync = build.index("uv sync --frozen --no-editable --no-build-isolation")
     release_metadata = build.index("uv run --no-sync python scripts/validate_release.py")
@@ -198,5 +200,32 @@ def test_commit_policy_uses_trusted_base_without_executing_pr_code() -> None:
     assert 'test "$(git rev-parse "$pr_ref")" = "$PR_HEAD_SHA"' in workflow
     assert 'git cat-file -e "${PR_BASE_SHA}^{commit}"' in workflow
     assert "trusted-config: .yaga.toml" in workflow[validation_step:]
-    assert "dariuszpanas/yaga/actions/commit-check@" in workflow[validation_step:]
+    assert "dariuszpanas/yaga@" in workflow[validation_step:]
+    assert "check: commit" in workflow[validation_step:]
     assert "uv sync" not in workflow
+
+
+def test_ci_isolates_policy_tooling_from_runtime_compatibility_tests() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    groups = pyproject["dependency-groups"]
+    assert groups["policy"] == ["yaga-cli>=0.5.0,<0.6.0"]
+    assert not any(requirement.startswith("yaga-cli") for requirement in groups["dev"])
+    assert pyproject["tool"]["uv"]["default-groups"] == ["dev", "policy"]
+
+    policy_job = _job(workflow, "repository-policy", "lint")
+    runtime_job = _job(workflow, "test", "benchmark")
+    assert "uv run --frozen pytest tests/policy" in policy_job
+    assert "--no-group policy" not in policy_job
+    assert 'uv sync --frozen --no-group policy --python "$PYTHON_VERSION"' in runtime_job
+    assert "--ignore=tests/policy" in runtime_job
+    assert "uv pip check --python .venv/bin/python" in runtime_job
+
+
+def test_ci_and_release_audit_complete_locked_dependencies_without_resolution() -> None:
+    ci = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    for workflow in (ci, _release_workflow()):
+        assert "uv export --frozen --no-emit-project" in workflow
+        assert "pip-audit --strict --require-hashes --disable-pip" in workflow
+        assert '--requirement "$RUNNER_TEMP/audit-requirements.txt"' in workflow
+        assert "--ignore-vuln" not in workflow

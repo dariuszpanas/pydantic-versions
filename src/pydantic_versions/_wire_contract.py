@@ -1362,7 +1362,7 @@ def _add_family_metadata_field(
         return
     annotation = _literal_type(version)
     fields[metadata.path] = Annotated[
-        annotation,
+        annotation,  # ty: ignore[invalid-type-form] runtime-generated Literal
         Field(
             default=version,
             alias=metadata.path,
@@ -1383,7 +1383,7 @@ def _add_nested_family_metadata_field(
         field_name = path[0]
         annotation = _literal_type(version)
         fields[field_name] = Annotated[
-            annotation,
+            annotation,  # ty: ignore[invalid-type-form] runtime-generated Literal
             Field(
                 default=version,
                 alias=field_name,

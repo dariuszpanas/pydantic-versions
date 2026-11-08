@@ -1823,7 +1823,7 @@ def test_outer_collection_validators_cannot_observe_or_swallow_private_carriers(
     outer_validator = (
         BeforeValidator(observe) if validator_kind == "before" else WrapValidator(swallow)
     )
-    opaque_annotation = Annotated[opaque_container, outer_validator]
+    opaque_annotation = Annotated[opaque_container, outer_validator]  # ty: ignore[invalid-type-form] runtime-selected container
     historical_annotation = opaque_annotation if operation == "render" else typed_annotation
     current_annotation = typed_annotation if operation == "render" else opaque_annotation
     historical_payload = create_model(
