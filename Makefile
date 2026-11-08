@@ -42,6 +42,7 @@ test-cov:
 
 # YAGA snapshot policies inspect committed objects; commit edits first.
 policy-check:
+	uv run --frozen yaga policy check --strict
 	uv run --frozen yaga repo check --plan .yaga/checks/repository.toml --revision "$(REVISION)"
 
 commit-check:
@@ -104,7 +105,7 @@ help:
 	@echo "  typecheck         - Run ty and the external mypy consumer contract"
 	@echo "  dead-code         - Scan production code with Vulture"
 	@echo "  check             - Run lint, typecheck, and dead-code analysis"
-	@echo "  policy-check      - Check workflows and committed repository policies"
+	@echo "  policy-check      - Audit policy schemas, workflows, and committed repository policies"
 	@echo "  commit-check      - Check one commit message (REVISION=HEAD)"
 	@echo "  change-check      - Require tests with source changes (RANGE=origin/main...HEAD)"
 	@echo "  workflow-lint     - Lint workflows with YAGA (requires Docker)"

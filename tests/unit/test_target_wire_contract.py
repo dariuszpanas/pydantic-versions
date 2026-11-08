@@ -2320,7 +2320,7 @@ def test_annotation_serializer_cannot_rewrite_declared_nested_path(
     )
     annotation = list[Child] if collection else Child
     serialized_annotation = Annotated[
-        annotation,
+        annotation,  # ty: ignore[invalid-type-form] runtime-selected nested annotation
         PlainSerializer(
             lambda _value: [] if collection else {},
             return_type=list[dict[str, Any]] if collection else dict[str, Any],

@@ -58,13 +58,14 @@ dev = [
     "ruff>=0.14.13",
     "ty>=0.0.12",
     "vulture>=2.16",
-    "yaga-cli>=0.3,<0.6",
     "zensical>=0.0.42",
     "twine>=7.0.0",
 ]
+policy = ["yaga-cli>=0.5.0,<0.6.0"]
 
 [tool.uv]
 required-version = ">=0.12.23"
+default-groups = ["dev", "policy"]
 
 [tool.ruff]
 line-length = 100

@@ -1352,6 +1352,7 @@ wheels = [
 name = "pydantic-versions"
 version = "1.0.4"
 source = { editable = "." }
+default-groups = ["dev", "policy"]
 dependencies = [
     { name = "annotated-types" },
     { name = "pydantic" },
@@ -1371,8 +1372,10 @@ dev = [
     { name = "twine" },
     { name = "ty" },
     { name = "vulture" },
-    { name = "yaga-cli" },
     { name = "zensical" },
+]
+policy = [
+    { name = "yaga-cli" },
 ]
 
 [package.metadata]
@@ -1396,9 +1399,9 @@ dev = [
     { name = "twine", specifier = ">=7.0.0" },
     { name = "ty", specifier = ">=0.0.12" },
     { name = "vulture", specifier = ">=2.16" },
-    { name = "yaga-cli", specifier = ">=0.3,<0.6" },
     { name = "zensical", specifier = ">=0.0.42" },
 ]
+policy = [{ name = "yaga-cli", specifier = ">=0.5.0,<0.6.0" }]
 
 [[package]]
 name = "pygments"

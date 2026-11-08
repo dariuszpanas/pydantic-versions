@@ -130,7 +130,7 @@ def test_explicit_wire_model_rejects_unresolvable_root_schema_references() -> No
         @classmethod
         def model_json_schema(
             cls,
-            by_alias: bool = True,
+            by_alias: bool | None = None,
             ref_template: str = DEFAULT_REF_TEMPLATE,
             schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
             mode: JsonSchemaMode = "validation",
@@ -146,7 +146,7 @@ def test_explicit_wire_model_rejects_unresolvable_root_schema_references() -> No
         @classmethod
         def model_json_schema(
             cls,
-            by_alias: bool = True,
+            by_alias: bool | None = None,
             ref_template: str = DEFAULT_REF_TEMPLATE,
             schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
             mode: JsonSchemaMode = "validation",

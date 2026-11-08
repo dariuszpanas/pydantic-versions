@@ -149,7 +149,7 @@ def test_explicit_wire_model_must_have_object_shaped_schemas() -> None:
         @classmethod
         def model_json_schema(
             cls,
-            by_alias: bool = True,
+            by_alias: bool | None = None,
             ref_template: str = "",
             schema_generator: Any = None,
             mode: str = "validation",
@@ -388,7 +388,7 @@ def test_type_aliases_cannot_hide_runtime_field_behavior(alias_type: Any) -> Non
     )
     payload = create_model(
         "AliasBehaviorPayload",
-        values=(list[behavior_alias], ...),
+        values=(list[behavior_alias], ...),  # ty: ignore[invalid-type-form] runtime alias factory
     )
 
     baseline = calls.copy()

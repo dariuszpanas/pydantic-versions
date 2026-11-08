@@ -10,6 +10,11 @@ Install dependencies from the lockfile:
 uv sync --frozen
 ```
 
+The default dependency groups include development tools and YAGA policy tooling.
+CI runs `tests/policy` in the repository-policy job and excludes the `policy`
+group from runtime compatibility jobs, keeping YAGA's Pydantic requirement
+independent of this library's supported minimum versions.
+
 Run checks after committing the candidate changes. `make ci` includes YAGA's
 committed-tree checks and workflow lint, which requires Docker with Linux
 containers:
@@ -29,7 +34,7 @@ To use a compatible uv without changing a global installation, run
 - `make dead-code`: scan production code with Vulture and reviewed local exceptions.
 - `make test`: run the test suite.
 - `make docs-build`: build the documentation site.
-- `make policy-check`: run YAGA workflow and committed repository policies;
+- `make policy-check`: audit YAGA policy schemas, then run workflow and committed repository policies;
   set `REVISION` to inspect a different commit (default: `HEAD`).
 - `make workflow-lint`: lint workflows with YAGA's pinned actionlint image.
 - `make commit-check`: validate one commit with YAGA (`REVISION=HEAD`).
@@ -37,8 +42,13 @@ To use a compatible uv without changing a global installation, run
   (`RANGE=origin/main...HEAD`). This checks paths, not test effectiveness.
 
 Repository policy lives in `.yaga/checks/repository.toml` and the referenced
-`.yaga/*-policy.toml` files. Snapshot providers inspect committed modes, paths,
-blob sizes, and required or forbidden files; uncommitted edits are not included.
+`.yaga/*-policy.toml` files. These policies and `.yaga.toml` require YAGA 0.5.x,
+matching the locked development dependency. Run
+`uv run --frozen yaga policy check --strict` to validate their schemas and reject
+deprecated versions. The repository plan uses schema version 2; the individual
+policies retain schema version 1, as in the YAGA repository. Snapshot providers
+inspect committed modes, paths, blob sizes, and required or forbidden files;
+uncommitted edits are not included.
 Workflow providers inspect the working files for immutable action references,
 permissions, and checkout safety. CI runs these checks against the exact PR head
 alongside the existing tests, typing, docs, security audit, and package build.
@@ -135,17 +145,20 @@ guidance; YAGA does not enforce section names or interpret validation claims.
 Small changes may use a short explanatory body. Record actual results and keep
 multiple independent validation commands in separate Markdown list items.
 
-The required `Commit Messages` workflow reads committed default-branch policy
-and validates the PR title plus every commit in the exact PR range. It fetches
-PR objects without executing PR code. YAGA 0.3 narrows the opt-in Dependabot
-exemption to individual commits after checking event identity, complete Git
-history, bot-compatible metadata, and an offline signature against its pinned
-GitHub signing key. Unsigned commits and human additions receive normal message
-validation; mixed pull requests also have their title checked. If signature
-verification is unavailable or fails, normal checks run. All other CI checks
-still run. Local
-`yaga commit check` never infers a bot exemption from author names, branches,
-or generated message text.
+The required `Commit Messages` workflow uses YAGA 0.5.0's root Action
+(`dariuszpanas/yaga@<audited-commit-sha>`, default `check: commit`) with
+`trusted-config: .yaga.toml`. It reads committed default-branch policy and
+validates the PR title plus every commit in the exact PR range. It fetches PR
+objects without executing PR code. The opt-in Dependabot exemption applies to
+individual commits after checking event identity, complete Git history,
+bot-compatible metadata, and an offline signature against YAGA's pinned GitHub
+signing key. In trusted mode, the exemption also requires a same-repository
+`dependabot/` branch.
+Unsigned commits and human additions receive normal message validation; mixed
+pull requests also have their title checked. If the trusted `gpgv` executable
+is unavailable or signature verification fails, normal checks run. All other
+CI checks still run. Local `yaga commit check` never infers a bot exemption from
+author names, branches, or generated message text.
 
 Wrap ordinary commit prose at about 72 characters so terminal history stays
 readable. This wrapping guidance does not apply to PR descriptions, which should

@@ -229,7 +229,7 @@ def test_unsigned_dependabot_message_passes_normal_policy_without_an_exemption(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "pull request #152: one title and 1 commit(s)" in result.stdout
     # The copied message is valid, but this locally created commit has no GitHub
-    # signature. YAGA 0.3 must check it, even with matching bot event and metadata.
+    # signature. YAGA must check it, even with matching bot event and metadata.
     assert "0 failed, 0 skipped" in result.stdout
     assert "Skip reason" not in result.stdout
 

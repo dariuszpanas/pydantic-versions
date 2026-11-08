@@ -8,9 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Updated the development tools to YAGA 0.3 and ty 0.0.91. Policy tests now
-  verify that unsigned bot-like commits receive normal message validation;
-  narrow typing exceptions preserve intentional Pydantic runtime fixtures.
+- Updated the development tools to YAGA 0.5.0, using its unified GitHub
+  Action, explicit policy compatibility bounds, and strict policy schema
+  validation in local, CI, and release checks.
+- Isolated policy tooling from the Pydantic compatibility matrix so YAGA's
+  dependency requirements do not raise the library's supported minimums.
+- Updated ty to 0.0.97 and retained narrow typing exceptions for intentional
+  Pydantic runtime fixtures. Policy tests verify that unsigned bot-like commits
+  receive normal message validation.
+
+### Fixed
+- Repaired grouped Dependabot updates for ty 0.0.97 and Pydantic 2.14.2, and
+  audit the complete locked dependency graph without resolving the local
+  project again through YAGA.
 
 ## [1.0.4] - 2026-10-25
 
