@@ -651,7 +651,7 @@ def test_current_render_accepts_subclasses_with_narrower_route_annotations() -> 
 
     class NarrowUnionParent(UnionParent):
         # Deliberately narrow a mutable field to exercise runtime subclass routing.
-        item: Child  # ty: ignore[invalid-mutable-override]
+        item: Child  # ty: ignore[incompatible-mutable-override]
 
     @versioned_schema(name="narrow_list_parent", versions=("1", "2"), current="2")
     class ListParent(BaseModel):

@@ -1391,7 +1391,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "ruff", specifier = ">=0.14.13" },
     { name = "twine", specifier = ">=7.0.0" },
-    { name = "ty", specifier = ">=0.0.12" },
+    { name = "ty", specifier = ">=0.0.100" },
     { name = "vulture", specifier = ">=2.16" },
     { name = "zensical", specifier = ">=0.0.42" },
 ]
