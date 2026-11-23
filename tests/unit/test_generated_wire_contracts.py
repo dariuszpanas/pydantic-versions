@@ -1083,7 +1083,7 @@ def test_typed_extra_values_fail_instead_of_losing_their_wire_type() -> None:
         model_config = ConfigDict(extra="allow")
 
         # Pydantic's typed-extra declaration is the unsupported input under test.
-        __pydantic_extra__: dict[str, int] = Field(init=False)  # ty: ignore[invalid-mutable-override]
+        __pydantic_extra__: dict[str, int] = Field(init=False)  # ty: ignore[incompatible-mutable-override]
         value: int = 1
 
     _assert_unsupported(TypedExtraPayload, family_name="unsupported_typed_extras")
@@ -1094,7 +1094,7 @@ def test_typed_extra_values_in_a_mixin_after_base_model_are_rejected() -> None:
         __pydantic_extra__: dict[str, int]
 
     # Deliberately conflicting inherited annotations must fail compilation closed.
-    class InheritedTypedExtraPayload(BaseModel, TypedExtraMixin):  # ty: ignore[invalid-attribute-override]
+    class InheritedTypedExtraPayload(BaseModel, TypedExtraMixin):  # ty: ignore[incompatible-attribute-override]
         model_config = ConfigDict(extra="allow")
 
         value: int = 1

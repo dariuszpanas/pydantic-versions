@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receive normal message validation.
 
 ### Fixed
+- Updated the typing suppressions in Pydantic test fixtures for the rule
+  names used by ty 0.0.103.
 - Repaired grouped Dependabot updates for ty 0.0.97 and Pydantic 2.14.2, and
   audit the complete locked dependency graph without resolving the local
   project again through YAGA.

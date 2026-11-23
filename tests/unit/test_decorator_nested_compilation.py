@@ -647,7 +647,7 @@ def test_unsafe_ordinary_wrapper_models_fail_closed() -> None:
         model_config = ConfigDict(extra="allow")
 
         # Pydantic's typed-extra declaration is the unsupported input under test.
-        __pydantic_extra__: dict[str, int] = Field(init=False)  # ty: ignore[invalid-mutable-override]
+        __pydantic_extra__: dict[str, int] = Field(init=False)  # ty: ignore[incompatible-mutable-override]
         child: Child
 
     class RootWrapper(RootModel[Child]):
